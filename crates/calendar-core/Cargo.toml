@@ -11,3 +11,4 @@ uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 chrono-tz.workspace = true
+ammonia = "4"

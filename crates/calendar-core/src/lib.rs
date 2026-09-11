@@ -702,3 +702,32 @@ mod tests {
         assert_eq!(CalendarCapability::from_db_str("bogus"), None);
     }
 }
+
+
+/// Sanitizes pasted rich content to safe HTML (ADR-005): scripts, event
+/// handlers and active content are stripped, safe formatting is kept.
+pub fn sanitize_html(html: &str) -> String {
+    ammonia::Builder::default().clean(html).to_string()
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    #[test]
+    fn strips_active_content() {
+        let dirty = "<p onclick=\"x\">hi<script>evil()</script><style>bad</style></p><a href=\"javascript:y\">link</a>";
+        let clean = super::sanitize_html(dirty);
+        assert!(!clean.contains("<script"));
+        assert!(!clean.contains("onclick"));
+        assert!(!clean.contains("<style"));
+        assert!(!clean.contains("javascript:"));
+        assert!(clean.contains("hi"));
+    }
+
+    #[test]
+    fn keeps_safe_formatting() {
+        let ok = "<b>bold</b> <a href=\"https://example.com\" rel=\"noopener\">link</a>";
+        let clean = super::sanitize_html(ok);
+        assert!(clean.contains("<b>bold</b>"));
+        assert!(clean.contains("<a"));
+    }
+}

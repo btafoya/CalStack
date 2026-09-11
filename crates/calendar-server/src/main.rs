@@ -909,7 +909,7 @@ async fn create_event(
         rdate: body.rdate.clone(),
         exdate: body.exdate.clone(),
         summary: body.summary.clone(),
-        description_html: body.description_html.clone(),
+        description_html: body.description_html.as_deref().map(calendar_core::sanitize_html),
         description_text: body.description_text.clone(),
         url: body.url.clone(),
         status: body.status.clone(),
@@ -1248,6 +1248,7 @@ impl From<AuthExtractError> for AppError {
 
 fn build_router(state: AppState) -> Router {
     Router::new()
+        .merge(calendar_web::router())
         .merge(mfa::router())
         .merge(extras::router())
         .merge(sharing_api::router())

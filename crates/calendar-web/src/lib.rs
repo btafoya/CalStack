@@ -1,3 +1,204 @@
-//! Embedded progressive-enhancement web UI integration.
-//! Build the frontend and embed assets with include_dir or a generated asset module.
-pub const UI_MODE: &str = "embedded-progressive-enhancement";
+//! Embedded web UI (docs/PRD.md section 18): Bootstrap 5.3 + jQuery 4 +
+//! jQuery Migrate + vendored bs-calendar, all served from the executable, no
+//! CDN, no build step. Server-rendered shells with progressive enhancement.
+
+use axum::{http::{header, HeaderValue, StatusCode}, response::IntoResponse};
+
+// ============ embedded assets ============
+
+macro_rules! asset {
+    ($path:literal) => {
+        include_bytes!(concat!("assets/", $path))
+    };
+}
+
+static ASSETS: &[(&str, &[u8], &str)] = &[
+    ("css/bootstrap.min.css", asset!("css/bootstrap.min.css"), "text/css; charset=utf-8"),
+    ("css/bootstrap-icons.css", asset!("css/bootstrap-icons.css"), "text/css; charset=utf-8"),
+    ("fonts/bootstrap-icons.woff2", asset!("fonts/bootstrap-icons.woff2"), "font/woff2"),
+    ("fonts/bootstrap-icons.woff", asset!("fonts/bootstrap-icons.woff"), "font/woff"),
+    ("js/bootstrap.bundle.min.js", asset!("js/bootstrap.bundle.min.js"), "text/javascript; charset=utf-8"),
+    ("js/jquery.min.js", asset!("js/jquery.min.js"), "text/javascript; charset=utf-8"),
+    ("js/jquery-migrate.min.js", asset!("js/jquery-migrate.min.js"), "text/javascript; charset=utf-8"),
+    ("js/bs-calendar.min.js", asset!("js/bs-calendar.min.js"), "text/javascript; charset=utf-8"),
+    ("js/app.js", asset!("js/app.js"), "text/javascript; charset=utf-8"),
+];
+
+async fn assets(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
+    for (name, bytes, mime) in ASSETS {
+        if *name == path {
+            // ponytail: no cache-busting versioning; flip Cache-Control when
+            // assets start churning between deploys.
+            return (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
+                    (header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400")),
+                ],
+                bytes.to_vec(),
+            )
+                .into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+
+// ============ pages ============
+
+const LOGIN_PAGE: &str = r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar — Sign in</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+</head>
+<body class="d-flex align-items-center bg-body-tertiary" style="min-height:100vh">
+<div class="container" style="max-width:420px">
+  <form id="login-form" class="card p-4 mt-5">
+    <h1 class="h4 mb-3">Calendar</h1>
+    <div class="mb-3"><label class="form-label" for="user">Username or email</label>
+      <input class="form-control" id="user" name="user" autocomplete="username" required></div>
+    <div class="mb-3"><label class="form-label" for="pass">Password</label>
+      <input class="form-control" id="pass" type="password" autocomplete="current-password" required></div>
+    <div class="mb-3" id="totp-row" hidden><label class="form-label" for="totp">2FA code</label>
+      <input class="form-control" id="totp" inputmode="numeric" autocomplete="one-time-code"></div>
+    <button class="btn btn-primary" type="submit">Sign in</button>
+    <div id="error" class="alert alert-danger mt-3 mb-0 d-none" role="alert"></div>
+  </form>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script>
+$(function () {
+  $('#login-form').on('submit', function (ev) {
+    ev.preventDefault();
+    $('#error').addClass('d-none');
+    $.post('/api/auth/login', {
+      username_or_email: $('#user').val(),
+      password: $('#pass').val(),
+      totp_code: $('#totp').val() || null,
+    })
+      .done(function () { window.location.href = '/'; })
+      .fail(function (xhr) {
+        if (xhr.status === 401 && $('#totp-row').prop('hidden')) {
+          $('#totp-row').prop('hidden', false);
+          $('#error').text('Enter your two-factor code.').removeClass('d-none');
+        } else {
+          $('#error').text(xhr.responseJSON && xhr.responseJSON.error || 'Sign in failed').removeClass('d-none');
+        }
+      });
+  });
+});
+</script>
+</body></html>"#;
+
+const APP_PAGE_HEAD: &str = r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+</head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom px-3">
+  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
+  <div class="ms-auto d-flex gap-2">
+    <a class="btn btn-outline-secondary btn-sm" href="/rules"><i class="bi bi-sliders"></i> Rules</a>
+    <button id="share-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-share"></i> Share</button>
+    <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
+  </div>
+</nav>
+<div class="container-fluid">
+  <div class="row">
+    <aside class="col-md-3 col-lg-2 p-3 border-end">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <span class="fw-semibold">Calendars</span>
+        <button id="add-cal-btn" class="btn btn-sm btn-outline-primary" type="button" aria-label="Add calendar">+</button>
+      </div>
+      <ul id="cal-list" class="list-group list-group-flush"></ul>
+    </aside>
+    <main class="col-md-9 col-lg-10 p-3">
+      <div id="calendar"></div>
+    </main>
+  </div>
+</div>
+<!-- event editor -->
+<div class="modal fade" id="event-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog"><form id="event-form" class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5">Event</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <div class="mb-3"><label class="form-label" for="ev-title">Title</label>
+        <input class="form-control" id="ev-title" required></div>
+      <div class="row mb-3"><div class="col"><label class="form-label" for="ev-start">Start</label>
+        <input class="form-control" id="ev-start" type="datetime-local" required></div>
+      <div class="col"><label class="form-label" for="ev-end">End</label>
+        <input class="form-control" id="ev-end" type="datetime-local" required></div></div>
+      <div class="mb-3"><label class="form-label" for="ev-desc">Rich description (paste)</label>
+        <div id="ev-desc" class="form-control" contenteditable="true" style="min-height:90px"></div></div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-danger me-auto" id="ev-delete" hidden>Delete</button>
+      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
+      <button class="btn btn-primary" type="submit">Save</button>
+    </div>
+  </div></div>
+</div>
+<div class="modal fade" id="share-modal" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5">Sharing</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+      <div class="row g-2 mb-3">
+        <div class="col"><input id="acl-user" class="form-control" placeholder="User UUID"></div>
+        <div class="col-auto"><select id="acl-cap" class="form-select">
+          <option>read_only</option><option>read_write</option><option>owner</option><option>free_busy</option>
+        </select></div>
+        <div class="col-auto"><button id="acl-add" class="btn btn-primary" type="button">Add</button></div>
+      </div>
+      <table class="table table-sm"><tbody id="acl-rows"></tbody></table>
+      <hr>
+      <div class="d-flex gap-2">
+        <button id="share-create" class="btn btn-outline-primary btn-sm" type="button">Create public link</button>
+        <button id="share-create-caldav" class="btn btn-outline-primary btn-sm" type="button">Create link + CalDAV</button>
+      </div>
+      <div id="share-out" class="mt-2"></div>
+    </div>
+  </div></div>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/bs-calendar.min.js"></script>
+<script src="/assets/js/app.js"></script>
+</body></html>"#;
+
+async fn index() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        APP_PAGE_HEAD,
+    )
+}
+
+async fn login_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        LOGIN_PAGE,
+    )
+}
+
+pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
+    axum::Router::new()
+        .route("/", axum::routing::get(index))
+        .route("/login", axum::routing::get(login_page))
+        .route("/assets/{*path}", axum::routing::get(assets))
+}

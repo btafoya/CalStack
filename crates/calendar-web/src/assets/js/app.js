@@ -1,0 +1,124 @@
+/* Calendar web app: jQuery 4 against /api. Progressive enhancement shell. */
+(function () {
+  'use strict';
+
+  var state = { calendars: [], currentCalendar: null, csrf: sessionStorage.getItem('csrf') || '' };
+
+  function api(method, url, data) {
+    return $.ajax({
+      method: method,
+      url: url,
+      data: data ? JSON.stringify(data) : null,
+      contentType: 'application/json',
+      headers: method !== 'GET' ? { 'X-CSRF-Token': state.csrf } : {},
+    }).fail(function (xhr) {
+      if (xhr.status === 401) { window.location.href = '/login'; }
+    });
+  }
+
+  function fmt(value) {
+    return value ? value.replace(/[: ]/g, function (c) {
+      return c === ' ' ? 'T' : '-'; // local input formatting below
+    }) : value;
+  }
+
+  // ============ calendars ============
+  function loadCalendars() {
+    return api('GET', '/api/calendars').done(function (list) {
+      state.calendars = list;
+      if (!state.currentCalendar && list.length) {
+        state.currentCalendar = list[0];
+      }
+      $('#cal-list').empty();
+      list.forEach(function (cal) {
+        var item = $('<li class="list-group-item list-group-item-action d-flex justify-content-between">')
+          .attr('data-id', cal.id)
+          .text(cal.name);
+        item.on('click', function () { selectCalendar(cal); });
+        if (state.currentCalendar && cal.id === state.currentCalendar.id) {
+          item.addClass('active');
+        }
+        $('#cal-list').append(item);
+      });
+    });
+  }
+
+  function selectCalendar(cal) {
+    state.currentCalendar = cal;
+    $('#cal-list li').removeClass('active');
+    $('#cal-list li[data-id="' + cal.id + '"]').addClass('active');
+    $('#calendar').bsCalendar('refresh');
+  }
+
+  $('#add-cal-btn').on('click', function () {
+    var slug = window.prompt('New calendar slug (lowercase-dash):');
+    if (!slug) { return; }
+    api('POST', '/api/calendars', { slug: slug, name: slug }).done(loadCalendars);
+  });
+
+  function loadCalendars() {
+    return api('GET', '/api/calendars').done(function (list) {
+      state.calendars = list;
+      if (!state.currentCalendar && list.length) { state.currentCalendar = list[0]; }
+      renderCalList(list);
+    });
+  }
+
+  function renderCalList(list) {
+    $('#cal-list').empty();
+    list.forEach(function (cal) {
+      var item = $('<li class="list-group-item list-group-item-action">')
+        .attr('data-id', cal.id)
+        .text(cal.name + ' (' + cal.my_capability + ')');
+      item.on('click', function () { selectCalendar(cal); });
+      $('#cal-list').append(item);
+    });
+  }
+
+  // ============ bs-calendar data feed ============
+  function toAppointment(ev) {
+    return {
+      id: ev.id,
+      title: ev.summary || '(untitled)',
+      start: (ev.starts_at || ev.start_date).replace('T', ' ').substring(0, 19),
+      end: ev.ends_at
+        ? ev.ends_at.replace('T', ' ').substring(0, 19)
+        : (ev.end_date || ev.start_date) + ' 23:59:00',
+      color: (state.currentCalendar && state.currentCalendar.color) || '#0d6efd',
+    };
+  }
+
+  function eventsUrl(requestData) {
+    var cal = state.currentCalendar;
+    if (!cal) { return Promise.resolve([]); }
+    var params = new URLSearchParams({
+      from: requestData.start,
+      to: requestData.end,
+    });
+    return fetch('/api/calendars/' + cal.id + '/occurrences?' + params)
+      .then(function (r) { return r.json(); })
+      .then(function (rows) {
+        return rows.map(function (row) {
+          var ev = row.event || row;
+          return toAppointment(ev);
+        });
+      });
+  }
+
+  // ============ init ============
+  $(function () {
+    if (!window.jQuery) { return; }
+    loadCalendars().done(function () {
+      $('#calendar').bsCalendar({
+        url: function (requestData) { return eventsUrl(requestData); },
+        startView: 'week',
+      });
+    });
+
+    $('#logout-btn').on('click', function () {
+      api('POST', '/api/auth/logout').done(function () {
+        window.location.href = '/login';
+      });
+    });
+  });
+})();
