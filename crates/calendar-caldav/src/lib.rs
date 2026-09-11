@@ -1,6 +1,12 @@
 //! CalDAV adapter: iCalendar parse/serialize between the normalized model
-//! (calendar-db rows) and RFC 5545 wire format. DAV protocol handling lives
-//! elsewhere; this crate owns the `.ics` representation.
+//! (calendar-db rows) and RFC 5545 wire format, the dav-server-rs guarded
+//! filesystem adapter, and CalDAV REPORT helpers dav-server lacks.
+
+pub mod adapter;
+pub mod store;
+
+pub use adapter::{DavAuth, PgDavFs};
+pub(crate) use store::upsert_data;
 
 use calendar_core::DateOrDateTime;
 use calendar_db::{AttendeeRow, EventRow};
@@ -321,6 +327,12 @@ fn parse_event(event: icalendar::Event) -> Result<ParsedEvent, IcsError> {
     let Some(points) = event.get_start() else {
         return Err(IcsError::MissingDtstart);
     };
+    // Preserve the DTSTART zone identity for round-trips (PRD data rules).
+    if let DatePerhapsTime::DateTime(icalendar::CalendarDateTime::WithTimezone { tzid, .. }) =
+        &points
+    {
+        parsed.tzid = Some(tzid.clone());
+    }
     let Some(point) = points_to_core(&points) else {
         return Err(IcsError::MissingDtstart);
     };

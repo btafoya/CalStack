@@ -1,5 +1,12 @@
-//! Authentication primitives: Argon2id passwords, token generation/hashing.
-//! Storage lives in `calendar-db`; HTTP session semantics live in `calendar-server`.
+//! Authentication primitives: Argon2id passwords, token generation/hashing,
+//! TOTP and WebAuthn helpers, envelope encryption. Storage lives in
+//! `calendar-db`; HTTP session semantics live in `calendar-server`.
+
+pub mod crypto;
+pub mod totp;
+pub mod webauthn;
+
+pub use crypto::{Crypto, CryptoError};
 
 use argon2::Argon2;
 use argon2::password_hash::{
