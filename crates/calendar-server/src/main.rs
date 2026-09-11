@@ -1,7 +1,10 @@
 //! Single production executable: HTTP server, CLI commands.
 
 mod dav;
+mod extras;
+mod jobs;
 mod mfa;
+mod sharing_api;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -44,14 +47,18 @@ enum Command {
 
 /// Environment-only configuration (docs/PRD.md section 23).
 #[derive(Debug, Clone)]
-struct Config {
-    database_url: String,
-    database_max_connections: u32,
-    bind_addr: String,
-    session_ttl: Duration,
-    encryption_key: Option<String>,
-    webauthn_rp_id: Option<String>,
-    webauthn_origin: Option<String>,
+pub struct Config {
+    pub database_url: String,
+    pub database_max_connections: u32,
+    pub bind_addr: String,
+    pub session_ttl: Duration,
+    pub encryption_key: Option<String>,
+    pub webauthn_rp_id: Option<String>,
+    pub webauthn_origin: Option<String>,
+    /// Per-attachment cap in bytes (ADR-010; PRD default 50 MB).
+    pub attachment_max_bytes: i64,
+    /// Soft-deleted calendar resources live this long before purge.
+    pub retention_days: i64,
 }
 
 impl Config {
@@ -71,6 +78,12 @@ impl Config {
             encryption_key: env("APP_ENCRYPTION_KEY"),
             webauthn_rp_id: env("WEBAUTHN_RP_ID"),
             webauthn_origin: env("WEBAUTHN_ORIGIN"),
+            attachment_max_bytes: env("ATTACHMENT_MAX_BYTES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50 * 1024 * 1024),
+            retention_days: env("RETENTION_DAYS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
         })
     }
 }
@@ -1152,6 +1165,7 @@ pub struct AppState {
     pub crypto: Option<std::sync::Arc<calendar_auth::Crypto>>,
     pub passkeys: Option<std::sync::Arc<mfa::PasskeyStore>>,
     pub dav: Option<std::sync::Arc<dav_server::DavHandler<calendar_caldav::DavAuth>>>,
+    pub config: Config,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1218,6 +1232,8 @@ impl From<AuthExtractError> for AppError {
 fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(mfa::router())
+        .merge(extras::router())
+        .merge(sharing_api::router())
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
@@ -1287,13 +1303,20 @@ async fn serve(cfg: &Config) -> Result<()> {
             .principal("/calendars/")
             .build_handler(),
     ));
+    // Background job worker: reminders and scheduled scans.
+    tokio::spawn(jobs::run_worker(
+        pool.clone(),
+        format!("worker-{}", std::process::id()),
+    ));
     let app = build_router(AppState {
         pool,
         session_ttl: cfg.session_ttl,
         crypto,
         passkeys,
         dav,
+        config: cfg.clone(),
     });
+
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await
         .with_context(|| format!("binding {}", cfg.bind_addr))?;

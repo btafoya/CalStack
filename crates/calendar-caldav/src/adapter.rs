@@ -12,7 +12,7 @@
 //!   /calendars/{user}/{slug}/{uuid}.ics — one VEVENT resource (master or
 //!                                         RECURRENCE-ID exception)
 
-use crate::events_to_ics;
+use crate::{ExportRow, events_to_ics};
 use calendar_core::CalendarCapability;
 use calendar_db::{self as db, AttendeeRow, CalendarRow, EventRow};
 use chrono::{DateTime, Utc};
@@ -205,7 +205,14 @@ impl PgDavFs {
                 let (cal, cap) = self.calendar_by_slug(creds, slug).await?;
                 capability_guard(cap, CalendarCapability::ReadOnly)?;
                 let (event, attendees) = self.event_with_attendees(&cal, *id).await?;
-                let ics = events_to_ics(&[(event.clone(), attendees)]);
+                let alarms = db::alarms::list_alarms(&self.pool, *id)
+                    .await
+                    .unwrap_or_default();
+                let ics = events_to_ics(&[ExportRow {
+                    event: event.clone(),
+                    attendees,
+                    alarms,
+                }]);
                 Ok((
                     location,
                     Meta {
@@ -249,7 +256,14 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     if reading {
                         capability_guard(cap, CalendarCapability::ReadOnly)?;
                         let (event, attendees) = self.event_with_attendees(&cal, id).await?;
-                        let ics = events_to_ics(&[(event.clone(), attendees)]);
+                        let alarms = db::alarms::list_alarms(&self.pool, id)
+                            .await
+                            .unwrap_or_default();
+                        let ics = events_to_ics(&[ExportRow {
+                            event: event.clone(),
+                            attendees,
+                            alarms,
+                        }]);
                         let modified: SystemTime = event.updated_at.into();
                         let meta = Meta {
                             len: ics.len() as u64,
@@ -355,7 +369,14 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                         let attendees = db::list_attendees(&self.pool, event.id)
                             .await
                             .unwrap_or_default();
-                        let ics = events_to_ics(&[(event.clone(), attendees)]);
+                        let alarms = db::alarms::list_alarms(&self.pool, event.id)
+                            .await
+                            .unwrap_or_default();
+                        let ics = events_to_ics(&[ExportRow {
+                            event: event.clone(),
+                            attendees,
+                            alarms,
+                        }]);
                         entries.push(Entry {
                             name: format!("{}.ics", event.id).into_bytes(),
                             meta: Meta {

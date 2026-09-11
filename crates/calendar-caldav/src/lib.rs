@@ -103,12 +103,31 @@ fn recurrence_id_property(event: &EventRow) -> Option<icalendar::Property> {
     }
 }
 
+/// One exportable resource: event row, attendees and its VALARM set.
+pub struct ExportRow {
+    pub event: EventRow,
+    pub attendees: Vec<AttendeeRow>,
+    pub alarms: Vec<calendar_db::alarms::AlarmRow>,
+}
+
+impl From<(EventRow, Vec<AttendeeRow>)> for ExportRow {
+    fn from((event, attendees): (EventRow, Vec<AttendeeRow>)) -> Self {
+        Self {
+            event,
+            attendees,
+            alarms: vec![],
+        }
+    }
+}
+
 /// One VEVENT per row (masters and exceptions alike); a calendar export is a
 /// VCALENDAR of all of them.
-pub fn events_to_ics(rows: &[(EventRow, Vec<AttendeeRow>)]) -> String {
+pub fn events_to_ics(rows: &[ExportRow]) -> String {
     let mut calendar = Calendar::new();
     calendar.name("calendar-server");
-    for (event, attendees) in rows {
+    for row in rows {
+        let (event, attendees) = (&row.event, &row.attendees);
+        let alarms = &row.alarms;
         let mut ev = Event::new();
         ev.uid(&event.uid).summary(&event.summary);
         if let Some(text) = &event.description_text {
@@ -205,6 +224,9 @@ pub fn events_to_ics(rows: &[(EventRow, Vec<AttendeeRow>)]) -> String {
             }
             ev.append_property(prop);
         }
+        for alarm in alarms {
+            serialize_alarm(&mut ev, alarm, event);
+        }
         ev.sequence(event.sequence.max(0) as u32);
         let stamp = icalendar::Property::new(
             "DTSTAMP",
@@ -215,6 +237,49 @@ pub fn events_to_ics(rows: &[(EventRow, Vec<AttendeeRow>)]) -> String {
         calendar.push(ev);
     }
     calendar.to_string()
+}
+
+/// VALARM: ACTION, TRIGGER (relative or absolute), RELATED, recipients.
+/// Built through `Alarm::display` (the only public constructor) and adjusted
+/// property-by-property for the EMAIL action.
+fn serialize_alarm(
+    ev: &mut icalendar::Event,
+    alarm: &calendar_db::alarms::AlarmRow,
+    event: &EventRow,
+) {
+    use icalendar::{Related, Trigger};
+    let related = if alarm.related.as_deref() == Some("END") {
+        Related::End
+    } else {
+        Related::Start
+    };
+    let trigger = match alarm.trigger_at {
+        Some(at) => Trigger::DateTime(icalendar::CalendarDateTime::Utc(at)),
+        None => Trigger::Duration(
+            chrono::Duration::seconds(alarm.offset_secs().unwrap_or(0)),
+            Some(related),
+        ),
+    };
+    let description = alarm
+        .description
+        .clone()
+        .unwrap_or_else(|| event.summary.clone());
+    let mut valarm = icalendar::Alarm::display(&description, trigger);
+    if alarm.action == "EMAIL" {
+        valarm
+            .remove_property("ACTION")
+            .add_property("ACTION", "EMAIL");
+        for recipient in &alarm.recipient_emails {
+            valarm.append_property(icalendar::Property::new(
+                "ATTENDEE",
+                format!("mailto:{recipient}"),
+            ));
+        }
+        if let Some(summary) = &alarm.summary {
+            valarm.add_property("SUMMARY", summary);
+        }
+    }
+    icalendar::EventLike::alarm(ev, valarm);
 }
 
 fn json_points_to_ics(value: &serde_json::Value, tzid: Option<&str>) -> String {
@@ -245,6 +310,7 @@ fn json_points_to_ics(value: &serde_json::Value, tzid: Option<&str>) -> String {
 #[derive(Debug, Default, Clone)]
 pub struct ParsedEvent {
     pub uid: String,
+    pub alarms: Vec<ParsedAlarm>,
     pub summary: Option<String>,
     pub description_text: Option<String>,
     pub description_html: Option<String>,
@@ -253,6 +319,8 @@ pub struct ParsedEvent {
     pub ends_at: Option<DateTime<Utc>>,
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
+    /// DURATION property in seconds (when the client sent DURATION not DTEND).
+    pub duration_secs: Option<i64>,
     pub tzid: Option<String>,
     pub all_day: bool,
     pub rrule: Option<String>,
@@ -269,6 +337,18 @@ pub struct ParsedEvent {
     pub sequence: Option<i32>,
     pub recurrence_id: Option<NaiveDateTime>,
     pub recurrence_id_date: Option<NaiveDate>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ParsedAlarm {
+    pub action: String, // DISPLAY | EMAIL
+    pub related: Option<String>,
+    /// Relative trigger in seconds (negative = before).
+    pub offset_secs: Option<i64>,
+    pub trigger_at: Option<DateTime<Utc>>,
+    pub description: Option<String>,
+    pub summary: Option<String>,
+    pub recipients: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -295,13 +375,23 @@ pub fn parse_ics(text: &str) -> Result<Vec<ParsedEvent>, IcsError> {
         if name != "VEVENT" {
             continue;
         }
+        let alarms: Vec<ParsedAlarm> = component
+            .components
+            .iter()
+            .filter(|sub| sub.name.as_ref() == "VALARM")
+            .map(|sub| parse_alarm(sub))
+            .collect();
         let event = to_owned_event(&component);
-        out.push(parse_event(event)?);
+        let mut parsed = parse_event(event)?;
+        parsed.alarms = alarms;
+        out.push(parsed);
     }
     Ok(out)
 }
 
-/// Converts a borrowed parser component into an owned `Event`.
+/// Converts a borrowed parser component into an owned `Event`, collecting
+/// nested VALARM components (the 0.17 crate parser is never called directly —
+/// unfolding happens first).
 fn to_owned_event(component: &icalendar::parser::Component<'_>) -> icalendar::Event {
     let mut event = icalendar::Event::new();
     for prop in &component.properties {
@@ -341,6 +431,11 @@ fn parse_event(event: icalendar::Event) -> Result<ParsedEvent, IcsError> {
         && let Some(point) = points_to_core(&end)
     {
         apply_date_point(&mut parsed, &point, false);
+    }
+    if let Some(prop) = event.properties().get("DURATION")
+        && let Some(secs) = parse_ics_duration(prop.value())
+    {
+        parsed.duration_secs = Some(secs);
     }
     if let Some(recurrence) = event.get_recurrence_id() {
         // RECURRENCE-ID is stored as wall-clock in the event's zone.
@@ -456,6 +551,90 @@ fn parse_event(event: icalendar::Event) -> Result<ParsedEvent, IcsError> {
     parsed.description_html = event.property_value("X-ALT-DESC").map(|s| s.to_string());
     parsed.priority = event.get_priority().map(|p| p as i16);
     Ok(parsed)
+}
+
+/// VALARM subset: ACTION, TRIGGER, RELATED, DESCRIPTION, SUMMARY, ATTENDEE.
+fn parse_alarm(component: &icalendar::parser::Component<'_>) -> ParsedAlarm {
+    let mut parsed = ParsedAlarm::default();
+    for prop in &component.properties {
+        match prop.name.as_ref() {
+            "ACTION" => parsed.action = prop.val.as_str().to_string(),
+            "RELATED" => parsed.related = Some(prop.val.as_str().to_string()),
+            "DESCRIPTION" => parsed.description = Some(prop.val.as_str().to_string()),
+            "SUMMARY" => parsed.summary = Some(prop.val.as_str().to_string()),
+            "TRIGGER" => {
+                let value = prop.val.as_str();
+                if value.contains('P') {
+                    if let Some(secs) = parse_ics_duration(value) {
+                        parsed.offset_secs = Some(secs);
+                    }
+                    // ponytail: RELATED=END semantics land with per-occurrence
+                    // end triggers if a client needs them; START-relative is
+                    // the only path real clients send today.
+                } else if value.len() == 16
+                    && let Ok(naive) =
+                        chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
+                {
+                    parsed.trigger_at = Some(Utc.from_utc_datetime(&naive));
+                }
+            }
+            "ATTENDEE" => {
+                let mailto = prop.val.as_str();
+                parsed.recipients.push(
+                    mailto
+                        .split_once(':')
+                        .map(|(_, rest)| rest)
+                        .unwrap_or(mailto)
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+    parsed
+}
+
+/// ISO 8601 duration subset: [+-]P[nW][nD][T[nH][nM][nS]] → seconds.
+fn parse_ics_duration(value: &str) -> Option<i64> {
+    let (negative, value) = match value.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, value.trim_start_matches('+')),
+    };
+    let value = value.strip_prefix('P')?;
+    let mut seconds: i64 = 0;
+    let mut number = String::new();
+    let mut in_time = false;
+    for ch in value.chars() {
+        match ch {
+            'T' => in_time = true,
+            'W' => {
+                seconds += number.parse::<i64>().ok()? * 604_800;
+                number.clear();
+            }
+            'D' => {
+                seconds += number.parse::<i64>().ok()? * 86_400;
+                number.clear();
+            }
+            'H' if in_time => {
+                seconds += number.parse::<i64>().ok()? * 3600;
+                number.clear();
+            }
+            'M' if in_time => {
+                seconds += number.parse::<i64>().ok()? * 60;
+                number.clear();
+            }
+            'S' if in_time => {
+                seconds += number.parse::<i64>().ok()?;
+                number.clear();
+            }
+            '0'..='9' => number.push(ch),
+            _ => return None,
+        }
+    }
+    if !number.is_empty() {
+        return None; // trailing digits without a unit
+    }
+    Some(if negative { -seconds } else { seconds })
 }
 
 fn parse_ics_datetime(value: &str) -> Option<DateTime<Utc>> {
@@ -646,7 +825,11 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
     fn serialize_then_parse_round_trip() {
         let event = sample_event_row();
         let attendees = vec![sample_attendee()];
-        let ics = events_to_ics(&[(event, attendees)]);
+        let ics = events_to_ics(&[ExportRow {
+            event,
+            attendees,
+            alarms: vec![],
+        }]);
         eprintln!("GENERATED ICS:\n{}<<END>>", ics);
         let parsed = parse_ics(&ics).unwrap();
         assert_eq!(parsed.len(), 1);
@@ -671,7 +854,11 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
             NaiveDateTime::parse_from_str("2026-01-12T09:00:00", "%Y-%m-%dT%H:%M:%S").unwrap(),
         );
         event.summary = "Moved".into();
-        let ics = events_to_ics(&[(event, vec![])]);
+        let ics = events_to_ics(&[ExportRow {
+            event,
+            attendees: vec![],
+            alarms: vec![],
+        }]);
         assert!(ics.contains("RECURRENCE-ID"));
         let parsed = parse_ics(&ics).unwrap();
         assert_eq!(

@@ -11,7 +11,7 @@ pub(crate) fn upsert_data(parsed: &crate::ParsedEvent) -> IcsEventUpsert {
         ends_at: parsed.ends_at,
         start_date: parsed.start_date,
         end_date: parsed.end_date,
-        duration_secs: None,
+        duration_secs: parsed.duration_secs,
         tzid: parsed.tzid.clone(),
         all_day: parsed.all_day,
         rrule: parsed.rrule.clone(),
@@ -31,6 +31,19 @@ pub(crate) fn upsert_data(parsed: &crate::ParsedEvent) -> IcsEventUpsert {
         recurrence_id_date: parsed.recurrence_id_date,
         organizer_email: parsed.organizer_email.clone(),
         organizer_name: parsed.organizer_name.clone(),
+        alarms: parsed
+            .alarms
+            .iter()
+            .map(|a| calendar_db::alarms::NewAlarm {
+                action: a.action.clone(),
+                related: a.related.clone(),
+                offset_secs: a.offset_secs,
+                trigger_at: a.trigger_at,
+                description: a.description.clone(),
+                summary: a.summary.clone(),
+                recipient_emails: a.recipients.clone(),
+            })
+            .collect(),
         attendees: parsed
             .attendees
             .iter()
