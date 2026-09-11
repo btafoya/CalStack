@@ -6,3 +6,4 @@ target/
 .claude/
 CLAUDE.md
 docs/.playwright-mcp/
+.playwright-mcp/
