@@ -3,8 +3,10 @@
 pub mod alarms;
 pub mod attachments;
 pub mod auth_ext;
+pub mod backup;
 pub mod ics_upsert;
 pub mod jobs;
+pub mod scheduling;
 pub mod search;
 pub mod sharing;
 

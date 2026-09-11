@@ -754,6 +754,8 @@ impl DavFile for WriteFile {
                     _ => FsError::GeneralFailure,
                 }
             })?;
+            // New scheduled events fan out invitations.
+            db::scheduling::schedule_requests(&self.pool, event.id).await;
             self.new_meta = Some(Meta {
                 len: 0,
                 modified: event.updated_at.into(),

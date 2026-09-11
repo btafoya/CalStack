@@ -4,6 +4,8 @@ mod dav;
 mod extras;
 mod jobs;
 mod mfa;
+mod rules_api;
+mod scheduling;
 mod sharing_api;
 
 use anyhow::{Context, Result};
@@ -41,9 +43,11 @@ enum Command {
     Migrate,
     /// Verify configuration and database connectivity.
     Check,
+    /// Export a portable JSON backup to stdout (attachments included).
+    Backup,
+    /// Import a portable JSON backup from a file (empty database only).
+    Restore { path: String },
 }
-
-// ponytail: Backup/Restore/Export/Import commands land with stage 18.
 
 /// Environment-only configuration (docs/PRD.md section 23).
 #[derive(Debug, Clone)]
@@ -924,6 +928,19 @@ async fn create_event(
     let attendees = body.attendees.clone().unwrap_or_default();
     let (event, etag) =
         db::create_event(&pool, calendar_id, auth.user.id, &attendees, &data).await?;
+    if !attendees.is_empty() {
+        db::scheduling::schedule_requests(&pool, event.id).await;
+    }
+    if let Ok(cal) = db::get_calendar(&pool, calendar_id).await {
+        crate::rules_api::run_rules(
+            &pool,
+            cal.tenant_id,
+            "event_created",
+            event.id,
+            serde_json::json!({"summary": event.summary, "starts_at": event.starts_at}),
+        )
+        .await;
+    }
     let rows = db::list_attendees(&pool, event.id).await?;
     Ok((StatusCode::CREATED, Json(event_view(&event, &etag, &rows))))
 }
@@ -1234,6 +1251,8 @@ fn build_router(state: AppState) -> Router {
         .merge(mfa::router())
         .merge(extras::router())
         .merge(sharing_api::router())
+        .merge(rules_api::router())
+        .merge(scheduling::router())
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
@@ -1307,6 +1326,7 @@ async fn serve(cfg: &Config) -> Result<()> {
     tokio::spawn(jobs::run_worker(
         pool.clone(),
         format!("worker-{}", std::process::id()),
+        crypto.clone(),
     ));
     let app = build_router(AppState {
         pool,
@@ -1343,6 +1363,26 @@ async fn run_check(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+async fn run_backup(cfg: &Config) -> Result<()> {
+    let pool = db::connect(&cfg.database_url, cfg.database_max_connections).await?;
+    let document = db::backup::export(&pool).await?;
+    serde_json::to_writer(std::io::stdout(), &document)?;
+    println!();
+    Ok(())
+}
+
+async fn run_restore(cfg: &Config, path: &str) -> Result<()> {
+    let document: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(path)?).context("reading backup file")?;
+    let pool = db::connect(&cfg.database_url, cfg.database_max_connections).await?;
+    db::migrate(&pool).await.context("running migrations")?;
+    db::backup::import(&pool, &document)
+        .await
+        .context("importing backup")?;
+    tracing::info!("restore complete");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -1358,5 +1398,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => serve(&cfg).await,
         Command::Migrate => run_migrate(&cfg).await,
         Command::Check => run_check(&cfg).await,
+        Command::Backup => run_backup(&cfg).await,
+        Command::Restore { path } => run_restore(&cfg, &path).await,
     }
 }

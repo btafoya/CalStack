@@ -12,7 +12,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Poll loop; one in-process worker (docs/ARCHITECTURE.md).
-pub async fn run_worker(pool: PgPool, worker_id: String) {
+pub async fn run_worker(
+    pool: PgPool,
+    worker_id: String,
+    crypto: Option<std::sync::Arc<calendar_auth::Crypto>>,
+) {
     // Seed the alarm scan if no scan job is pending (first boot / after purge).
     let pending: bool = sqlx::query_scalar(
         "SELECT EXISTS (
@@ -26,11 +30,35 @@ pub async fn run_worker(pool: PgPool, worker_id: String) {
     if !pending {
         schedule_alarm_scan(&pool, Utc::now()).await.ok();
     }
+    let purge_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM durable_jobs
+            WHERE job_type = 'retention_purge' AND completed_at IS NULL AND failed_at IS NULL
+        )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(false);
+    if !purge_pending {
+        db::jobs::enqueue(
+            &pool,
+            "retention_purge",
+            serde_json::json!({}),
+            Some(Utc::now()),
+            0,
+        )
+        .await
+        .ok();
+    }
 
+    let retention_days = std::env::var("RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
     loop {
         match db::jobs::lease_next(&pool, &worker_id, 60).await {
             Ok(Some(job)) => {
-                let result = execute(&pool, &job).await;
+                let result = execute(&pool, &job, retention_days, crypto.as_deref()).await;
                 match result {
                     Ok(()) => {
                         db::jobs::complete(&pool, job.id).await.ok();
@@ -50,7 +78,12 @@ pub async fn run_worker(pool: PgPool, worker_id: String) {
     }
 }
 
-async fn execute(pool: &sqlx::PgPool, job: &db::jobs::JobRow) -> Result<(), String> {
+async fn execute(
+    pool: &sqlx::PgPool,
+    job: &db::jobs::JobRow,
+    retention_days: i64,
+    crypto: Option<&calendar_auth::Crypto>,
+) -> Result<(), String> {
     match job.job_type.as_str() {
         "alarm_scan" => {
             alarm_scan(pool).await?;
@@ -60,8 +93,48 @@ async fn execute(pool: &sqlx::PgPool, job: &db::jobs::JobRow) -> Result<(), Stri
                 .map_err(|e| e.to_string())?;
             Ok(())
         }
+        "imip_send" => {
+            crate::scheduling::send_pending(pool, crypto).await;
+            Ok(())
+        }
+        "retention_purge" => {
+            retention_purge(pool, retention_days).await?;
+            // Daily sweep.
+            db::jobs::enqueue(
+                pool,
+                "retention_purge",
+                serde_json::json!({}),
+                Some(Utc::now() + Duration::days(1)),
+                0,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        }
         other => Err(format!("unknown job type: {other}")),
     }
+}
+
+/// Soft-deleted resources, expired auth rows and stale journal entries go
+/// once retention passes (docs/PRD.md section 21).
+async fn retention_purge(pool: &sqlx::PgPool, days: i64) -> Result<(), String> {
+    sqlx::query(&format!(
+        "DELETE FROM events WHERE deleted_at < now() - interval '{days} days'"
+    ))
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    for query in [
+        "DELETE FROM sessions WHERE expires_at < now() - interval '7 days'",
+        "DELETE FROM webauthn_challenges WHERE expires_at < now()",
+        "DELETE FROM notifications WHERE read_at IS NOT NULL AND created_at < now() - interval '30 days'",
+    ] {
+        sqlx::query(query)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 async fn schedule_alarm_scan(
