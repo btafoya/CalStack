@@ -4,6 +4,29 @@
 
   var calendarId = new URLSearchParams(window.location.search).get('calendar_id');
 
+  function updateScopeUi() {
+    var url = new URL(window.location);
+    if (calendarId) { url.searchParams.set('calendar_id', calendarId); } else { url.searchParams.delete('calendar_id'); }
+    window.history.replaceState(null, '', url);
+    if (calendarId) {
+      $('#rules-scope-note').text('Showing rules for this calendar, plus any that apply to all calendars.');
+      $('#rule-global-row').show();
+    } else {
+      $('#rules-scope-note').text('No calendar selected: showing rules that apply to all calendars. Pick one above to add a calendar-specific rule.');
+      $('#rule-global-row').hide();
+    }
+  }
+
+  function loadCalendarOptions() {
+    return api('GET', '/api/calendars').done(function (list) {
+      var $select = $('#rule-calendar-select');
+      list.forEach(function (cal) {
+        $('<option>').val(cal.id).text(cal.name).appendTo($select);
+      });
+      if (calendarId) { $select.val(calendarId); }
+    });
+  }
+
   function renderRules(rules) {
     var $rows = $('#rules-rows').empty();
     rules.forEach(function (rule) {
@@ -32,13 +55,14 @@
   }
 
   $(function () {
-    if (calendarId) {
-      $('#rules-scope-note').text('Showing rules for this calendar, plus any that apply to all calendars.');
-    } else {
-      $('#rules-scope-note').text('No calendar selected: showing rules that apply to all calendars. Open a calendar first to add a calendar-specific rule.');
-      $('#rule-global-row').hide();
-    }
+    updateScopeUi();
+    loadCalendarOptions();
     loadRules();
+    $('#rule-calendar-select').on('change', function () {
+      calendarId = $(this).val() || null;
+      updateScopeUi();
+      loadRules();
+    });
     $('#rule-action-type').on('change', function () {
       var isSms = $(this).val() === 'sms';
       $('#rule-title-row').prop('hidden', isSms);
