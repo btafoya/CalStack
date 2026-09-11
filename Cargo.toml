@@ -52,3 +52,5 @@ argon2 = { version = "0.5", features = ["std"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 sha2 = "0.10"
 rand_core = { version = "0.9", features = ["os_rng"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1"] }
