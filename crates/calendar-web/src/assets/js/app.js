@@ -12,7 +12,8 @@
       contentType: 'application/json',
       headers: method !== 'GET' ? { 'X-CSRF-Token': state.csrf } : {},
     }).fail(function (xhr) {
-      if (xhr.status === 401) { window.location.href = '/login'; }
+      if (xhr.status === 401) { window.location.href = '/login'; return; }
+      window.alert((xhr.responseJSON && xhr.responseJSON.error) || 'Request failed');
     });
   }
 
@@ -23,37 +24,25 @@
   }
 
   // ============ calendars ============
-  function loadCalendars() {
-    return api('GET', '/api/calendars').done(function (list) {
-      state.calendars = list;
-      if (!state.currentCalendar && list.length) {
-        state.currentCalendar = list[0];
-      }
-      $('#cal-list').empty();
-      list.forEach(function (cal) {
-        var item = $('<li class="list-group-item list-group-item-action d-flex justify-content-between">')
-          .attr('data-id', cal.id)
-          .text(cal.name);
-        item.on('click', function () { selectCalendar(cal); });
-        if (state.currentCalendar && cal.id === state.currentCalendar.id) {
-          item.addClass('active');
-        }
-        $('#cal-list').append(item);
-      });
-    });
+  function updateRulesLink() {
+    var cal = state.currentCalendar;
+    $('#rules-link').attr('href', cal ? '/rules?calendar_id=' + cal.id : '/rules');
   }
 
   function selectCalendar(cal) {
     state.currentCalendar = cal;
     $('#cal-list li').removeClass('active');
     $('#cal-list li[data-id="' + cal.id + '"]').addClass('active');
+    updateRulesLink();
     $('#calendar').bsCalendar('refresh');
   }
 
   $('#add-cal-btn').on('click', function () {
-    var slug = window.prompt('New calendar slug (lowercase-dash):');
-    if (!slug) { return; }
-    api('POST', '/api/calendars', { slug: slug, name: slug }).done(loadCalendars);
+    var name = window.prompt('New calendar name:');
+    if (!name) { return; }
+    var slug = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!slug) { window.alert('Enter a valid calendar name.'); return; }
+    api('POST', '/api/calendars', { slug: slug, name: name }).done(loadCalendars);
   });
 
   function loadCalendars() {
@@ -61,6 +50,7 @@
       state.calendars = list;
       if (!state.currentCalendar && list.length) { state.currentCalendar = list[0]; }
       renderCalList(list);
+      updateRulesLink();
     });
   }
 

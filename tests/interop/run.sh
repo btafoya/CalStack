@@ -76,6 +76,11 @@ CAL=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
   -d '{"slug":"work","name":"Work"}' | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
 [ -n "$CAL" ] || fail "calendar create"
 
+step "Calendar create rejects a non-slug name with a clear 400 (web UI must slugify before posting)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars" -d '{"slug":"My Calendar","name":"My Calendar"}')
+[ "$CODE" = 400 ] || fail "expected 400 for invalid slug, got $CODE"
+
 step "Event create + ETag If-Match update + 409 on stale"
 EV=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
   -H 'content-type: application/json' -X POST "$BASE/api/calendars/$CAL/events" \
@@ -172,11 +177,43 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-To
 [ "$CODE" = 200 ] || fail "rule enable toggle, got $CODE"
 curl -s -b "$DATA/alice.jar" "$BASE/api/rules" | grep -q '"enabled":false' || fail "rule disable not reflected in list"
 
-step "Web UI: /rules and /admin pages exist (no longer 404)"
+step "Rules are calendar-scoped: per-calendar rule stays out of the global-only list"
+GLOBAL_RULE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/rules" -d '{"name":"global-r","trigger_type":"event_created"}')
+echo "$GLOBAL_RULE" | grep -q '"id"' || fail "global rule create failed: $GLOBAL_RULE"
+CAL_RULE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/rules" -d "{\"name\":\"cal-r\",\"trigger_type\":\"event_created\",\"calendar_id\":\"$CAL\"}")
+echo "$CAL_RULE" | grep -q '"id"' || fail "calendar-scoped rule create failed: $CAL_RULE"
+curl -s -b "$DATA/alice.jar" "$BASE/api/rules?calendar_id=$CAL" | grep -q '"cal-r"' || fail "calendar-scoped rule missing from scoped list"
+curl -s -b "$DATA/alice.jar" "$BASE/api/rules?calendar_id=$CAL" | grep -q '"global-r"' || fail "global rule missing from scoped list"
+curl -s -b "$DATA/alice.jar" "$BASE/api/rules" | grep -q '"cal-r"' && fail "calendar-scoped rule leaked into global-only (unscoped) list"
+curl -s -b "$DATA/alice.jar" "$BASE/api/rules" | grep -q '"global-r"' || fail "global rule missing from unscoped list"
+
+step "Rules: cannot scope a rule to a calendar you do not own"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/bob.jar" -H "X-CSRF-Token: $(csrf bob)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/rules" \
+  -d "{\"name\":\"nope\",\"trigger_type\":\"event_created\",\"calendar_id\":\"$CAL\"}")
+# require_capability 404s on no visibility at all (same as calendar reads elsewhere), not 403
+[ "$CODE" = 404 ] || fail "bob should not create a rule on alice's calendar, got $CODE"
+
+step "Notification providers: create typed Twilio config, list, delete"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/notification-providers" \
+  -d '{"kind":"twilio","name":"main","config":{"account_sid":"ACxxx","auth_token":"secret","from":"+15550000000"}}')
+[ "$CODE" = 201 ] || fail "create twilio provider, got $CODE"
+PROV_ID=$(curl -s -b "$DATA/alice.jar" "$BASE/api/notification-providers" \
+  | python3 -c "import json,sys;print([p for p in json.load(sys.stdin) if p['kind']=='twilio'][0]['id'])")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -X DELETE "$BASE/api/notification-providers/$PROV_ID")
+[ "$CODE" = 200 ] || fail "delete twilio provider, got $CODE"
+
+step "Web UI: /rules, /admin and /providers pages exist (no longer 404)"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/rules")
 [ "$CODE" = 200 ] || fail "/rules page, got $CODE"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin")
 [ "$CODE" = 200 ] || fail "/admin page, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/providers")
+[ "$CODE" = 200 ] || fail "/providers page, got $CODE"
 
 # ============ 6. admin user management ============
 step "create-admin CLI seeds an is_admin user"

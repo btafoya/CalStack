@@ -2,14 +2,15 @@
 //! simple trigger → optional conditions → actions engine, executed inline on
 //! event mutations, with executions recorded for the audit trail.
 
-use crate::{AppError, AppState, require_csrf, resolve_auth};
+use crate::{AppError, AppState, require_capability, require_csrf, resolve_auth};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     response::IntoResponse,
     routing::{delete, patch, post},
 };
+use calendar_core::CalendarCapability;
 use calendar_db::{self as db};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -21,6 +22,8 @@ struct RuleBody {
     name: String,
     enabled: Option<bool>,
     trigger_type: String,
+    /// Calendar this rule applies to; omit/null for tenant-wide (all calendars).
+    calendar_id: Option<Uuid>,
     conditions: Option<Value>,
     actions: Option<Value>,
 }
@@ -30,6 +33,7 @@ struct RuleBody {
 pub(crate) async fn run_rules(
     pool: &sqlx::PgPool,
     tenant_id: Uuid,
+    calendar_id: Uuid,
     trigger_type: &str,
     subject_id: Uuid,
     context: Value,
@@ -40,13 +44,16 @@ pub(crate) async fn run_rules(
         conditions: Value,
         actions: Value,
     }
+    // A rule with calendar_id NULL applies tenant-wide (all calendars).
     let Ok(rules) = sqlx::query_as::<_, RuleRow>(
         "SELECT id, conditions, actions FROM rules
          WHERE tenant_id = $1 AND enabled AND trigger_type = $2
+         AND (calendar_id = $3 OR calendar_id IS NULL)
          ORDER BY position",
     )
     .bind(tenant_id)
     .bind(trigger_type)
+    .bind(calendar_id)
     .fetch_all(pool)
     .await
     else {
@@ -198,6 +205,7 @@ struct RuleListRow {
     name: String,
     enabled: bool,
     trigger_type: String,
+    calendar_id: Option<Uuid>,
     conditions: Value,
     actions: Value,
 }
@@ -209,13 +217,17 @@ async fn create_rule(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_csrf(&auth, &headers)?;
+    if let Some(calendar_id) = body.calendar_id {
+        require_capability(&pool, calendar_id, auth.user.id, CalendarCapability::Owner).await?;
+    }
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO rules (id, tenant_id, name, enabled, trigger_type, conditions, actions, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        "INSERT INTO rules (id, tenant_id, calendar_id, name, enabled, trigger_type, conditions, actions, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
     )
     .bind(Uuid::new_v4())
     .bind(tenant_id)
+    .bind(body.calendar_id)
     .bind(&body.name)
     .bind(body.enabled.unwrap_or(true))
     .bind(&body.trigger_type)
@@ -228,25 +240,34 @@ async fn create_rule(
     Ok((axum::http::StatusCode::CREATED, Json(json!({"id": id}))))
 }
 
+#[derive(serde::Deserialize)]
+struct RulesQuery {
+    calendar_id: Option<Uuid>,
+}
+
 async fn list_rules(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<RulesQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
+    // A rule with calendar_id NULL applies tenant-wide (all calendars).
     let rows: Vec<RuleListRow> = sqlx::query_as(
-        "SELECT id, name, enabled, trigger_type, conditions, actions
-         FROM rules WHERE tenant_id = $1 ORDER BY position",
+        "SELECT id, name, enabled, trigger_type, calendar_id, conditions, actions
+         FROM rules WHERE tenant_id = $1 AND (calendar_id = $2 OR calendar_id IS NULL)
+         ORDER BY position",
     )
     .bind(tenant_id)
+    .bind(query.calendar_id)
     .fetch_all(&pool)
     .await
     .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
     Ok(Json(json!(
         rows.iter()
             .map(|r| json!({
-                "id": r.id, "name": r.name, "enabled": r.enabled,
-                "trigger_type": r.trigger_type, "conditions": r.conditions, "actions": r.actions,
+                "id": r.id, "name": r.name, "enabled": r.enabled, "trigger_type": r.trigger_type,
+                "calendar_id": r.calendar_id, "conditions": r.conditions, "actions": r.actions,
             }))
             .collect::<Vec<_>>()
     )))

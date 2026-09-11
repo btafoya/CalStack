@@ -945,6 +945,7 @@ async fn create_event(
         crate::rules_api::run_rules(
             &pool,
             cal.tenant_id,
+            cal.id,
             "event_created",
             event.id,
             serde_json::json!({"summary": event.summary, "starts_at": event.starts_at}),

@@ -7,6 +7,7 @@ function api(method, url, data) {
     contentType: 'application/json',
     headers: method !== 'GET' ? { 'X-CSRF-Token': sessionStorage.getItem('csrf') || '' } : {},
   }).fail(function (xhr) {
-    if (xhr.status === 401) { window.location.href = '/login'; }
+    if (xhr.status === 401) { window.location.href = '/login'; return; }
+    window.alert((xhr.responseJSON && xhr.responseJSON.error) || 'Request failed');
   });
 }

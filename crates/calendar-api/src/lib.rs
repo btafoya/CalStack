@@ -317,9 +317,17 @@ pub fn openapi_document() -> serde_json::Value {
     put(
         "/api/rules",
         json!({
-            "post": {"summary": "Create a rule (trigger -> optional conditions -> actions)",
+            "post": {"summary": "Create a rule (trigger -> optional conditions -> actions), scoped to one calendar or tenant-wide",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "required": ["name", "trigger_type"],
+                    "properties": {"name": {"type": "string"}, "enabled": {"type": ["boolean", "null"]},
+                        "trigger_type": {"type": "string"},
+                        "calendar_id": {"type": ["string", "null"], "format": "uuid", "description": "omit/null for tenant-wide (all calendars)"},
+                        "conditions": {"type": ["array", "null"]}, "actions": {"type": ["array", "null"]}}}}}},
                 "responses": {"201": {"description": "created"}}},
-            "get": {"summary": "List rules", "responses": {"200": {"description": "list"}}},
+            "get": {"summary": "List rules effective for a calendar (that calendar's rules plus tenant-wide ones)",
+                "parameters": [param("calendar_id", false)],
+                "responses": {"200": {"description": "list"}}},
         }),
     );
     put(
