@@ -1,0 +1,15 @@
+[package]
+name = "calendar-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+argon2.workspace = true
+sha2.workspace = true
+rand.workspace = true
