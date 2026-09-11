@@ -39,17 +39,28 @@
       $('#rule-global-row').hide();
     }
     loadRules();
+    $('#rule-action-type').on('change', function () {
+      var isSms = $(this).val() === 'sms';
+      $('#rule-title-row').prop('hidden', isSms);
+      $('#rule-title').prop('required', !isSms);
+      $('#rule-to-row').prop('hidden', !isSms);
+    });
     $('#rule-form').on('submit', function (ev) {
       ev.preventDefault();
       var global = !calendarId || $('#rule-global').is(':checked');
+      var type = $('#rule-action-type').val();
+      var action = { type: type, body: $('#rule-body').val() };
+      if (type === 'sms') { action.to = $('#rule-to').val(); } else { action.title = $('#rule-title').val(); }
       api('POST', '/api/rules', {
         name: $('#rule-name').val(),
         trigger_type: $('#rule-trigger').val(),
         enabled: $('#rule-enabled').is(':checked'),
         calendar_id: global ? null : calendarId,
-        actions: [{ type: 'create_notification', title: $('#rule-title').val(), body: $('#rule-body').val() }],
+        actions: [action],
       }).done(function () {
         $('#rule-form')[0].reset();
+        $('#rule-title-row').prop('hidden', false);
+        $('#rule-to-row').prop('hidden', true);
         loadRules();
       });
     });

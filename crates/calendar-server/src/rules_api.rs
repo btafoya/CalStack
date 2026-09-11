@@ -12,6 +12,7 @@ use axum::{
 };
 use calendar_core::CalendarCapability;
 use calendar_db::{self as db};
+use calendar_notify::SmsProvider;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -28,6 +29,30 @@ struct RuleBody {
     actions: Option<Value>,
 }
 
+/// The tenant's enabled Twilio provider, config decrypted.
+async fn load_sms_provider(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    crypto: Option<&calendar_auth::Crypto>,
+) -> Option<SmsProvider> {
+    let crypto = crypto?;
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        config_encrypted: Vec<u8>,
+    }
+    let row = sqlx::query_as::<_, Row>(
+        "SELECT config_encrypted FROM notification_providers
+         WHERE tenant_id = $1 AND enabled AND kind = 'twilio' LIMIT 1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()??;
+    let config: Value =
+        serde_json::from_slice(&crypto.decrypt(&row.config_encrypted).ok()?).ok()?;
+    SmsProvider::from_config(&config).ok()
+}
+
 /// Evaluates rules for one trigger. Called from event mutations; failures are
 /// logged, never propagated (rules must not break the mutation).
 pub(crate) async fn run_rules(
@@ -37,6 +62,7 @@ pub(crate) async fn run_rules(
     trigger_type: &str,
     subject_id: Uuid,
     context: Value,
+    crypto: Option<&calendar_auth::Crypto>,
 ) {
     #[derive(sqlx::FromRow)]
     struct RuleRow {
@@ -68,26 +94,47 @@ pub(crate) async fn run_rules(
             continue;
         }
         // actions: [{"type": "create_notification", "title", "body"}, ...]
+        // or [{"type": "sms", "to": "+1...", "body": "..."}, ...] (needs a
+        // tenant Twilio provider configured; the "to" number is explicit —
+        // no per-user phone-number resolution yet).
         let mut status = "succeeded";
         if let Value::Array(actions) = &rule.actions {
             for action in actions {
                 let kind = action.get("type").and_then(Value::as_str).unwrap_or("");
-                if kind != "create_notification" {
-                    // email/sms/webhook actions ride the notify providers later.
-                    status = "failed";
-                    continue;
-                }
-                let created = db::alarms::create_notification_deduped(
-                    pool,
-                    Uuid::nil(),
-                    "in_app",
-                    action.get("title").and_then(Value::as_str),
-                    action.get("body").and_then(Value::as_str),
-                    Some(context.clone()),
-                    &format!("rule:{}:{}", rule.id, subject_id),
-                )
-                .await;
-                if created.is_err() {
+                let ok = match kind {
+                    "create_notification" => db::alarms::create_notification_deduped(
+                        pool,
+                        Uuid::nil(),
+                        "in_app",
+                        action.get("title").and_then(Value::as_str),
+                        action.get("body").and_then(Value::as_str),
+                        Some(context.clone()),
+                        &format!("rule:{}:{}", rule.id, subject_id),
+                    )
+                    .await
+                    .is_ok(),
+                    "sms" => match action.get("to").and_then(Value::as_str) {
+                        Some(to) => match load_sms_provider(pool, tenant_id, crypto).await {
+                            Some(sms) => {
+                                let body = action.get("body").and_then(Value::as_str).unwrap_or("");
+                                match sms.send(to, body).await {
+                                    Ok(()) => true,
+                                    Err(e) => {
+                                        tracing::warn!(rule_id = %rule.id, error = %e, "rule sms action failed");
+                                        false
+                                    }
+                                }
+                            }
+                            None => {
+                                tracing::warn!(rule_id = %rule.id, "rule sms action skipped: no Twilio provider configured");
+                                false
+                            }
+                        },
+                        None => false,
+                    },
+                    _ => false, // email/webhook actions ride the notify providers later.
+                };
+                if !ok {
                     status = "failed";
                 }
             }

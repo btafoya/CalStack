@@ -885,7 +885,7 @@ fn validate_event_body(body: &EventBody) -> Result<(), AppError> {
 }
 
 async fn create_event(
-    State(AppState { pool, .. }): State<AppState>,
+    State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
     Path(calendar_id): Path<Uuid>,
     Json(body): Json<EventBody>,
@@ -949,6 +949,7 @@ async fn create_event(
             "event_created",
             event.id,
             serde_json::json!({"summary": event.summary, "starts_at": event.starts_at}),
+            crypto.as_deref(),
         )
         .await;
     }

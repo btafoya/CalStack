@@ -161,7 +161,10 @@ impl SmsProvider {
             "https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json",
             self.account_sid
         );
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| NotifyError::Send(e.to_string()))?;
         let response = client
             .post(url)
             .basic_auth(&self.account_sid, Some(&self.auth_token))
