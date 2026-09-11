@@ -47,6 +47,12 @@ enum Command {
     Backup,
     /// Import a portable JSON backup from a file (empty database only).
     Restore { path: String },
+    /// Create a user with is_admin=true.
+    CreateAdmin {
+        username: String,
+        email: String,
+        password: String,
+    },
 }
 
 /// Environment-only configuration (docs/PRD.md section 23).
@@ -1397,6 +1403,23 @@ async fn run_backup(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+async fn run_create_admin(cfg: &Config, username: &str, email: &str, password: &str) -> Result<()> {
+    validate_username(username)?;
+    calendar_core::validate_email(email)?;
+    if password.len() < 8 {
+        anyhow::bail!("password must be at least 8 characters");
+    }
+    let hash = calendar_auth::hash_password(password)?;
+    let pool = db::connect(&cfg.database_url, cfg.database_max_connections).await?;
+    let user = db::create_user(&pool, username, email, None, &hash).await?;
+    sqlx::query("UPDATE users SET is_admin = true WHERE id = $1")
+        .bind(user.id)
+        .execute(&pool)
+        .await?;
+    tracing::info!(username, "admin user created");
+    Ok(())
+}
+
 async fn run_restore(cfg: &Config, path: &str) -> Result<()> {
     let document: serde_json::Value =
         serde_json::from_reader(std::fs::File::open(path)?).context("reading backup file")?;
@@ -1426,5 +1449,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Check => run_check(&cfg).await,
         Command::Backup => run_backup(&cfg).await,
         Command::Restore { path } => run_restore(&cfg, &path).await,
+        Command::CreateAdmin {
+            username,
+            email,
+            password,
+        } => run_create_admin(&cfg, &username, &email, &password).await,
     }
 }
