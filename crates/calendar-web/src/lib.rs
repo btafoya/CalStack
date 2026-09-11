@@ -278,9 +278,16 @@ const RULES_PAGE: &str = r#"<!doctype html>
         <label class="form-check-label" for="rule-global">Apply to all calendars</label></div>
     </div>
     <div class="row g-2 mt-1">
-      <div class="col"><label class="form-label" for="rule-title">Notification title</label>
+      <div class="col-auto"><label class="form-label" for="rule-action-type">Action</label>
+        <select class="form-select" id="rule-action-type">
+          <option value="create_notification">In-app notification</option>
+          <option value="sms">SMS (requires a Twilio provider)</option>
+        </select></div>
+      <div id="rule-title-row" class="col"><label class="form-label" for="rule-title">Notification title</label>
         <input class="form-control" id="rule-title" required></div>
-      <div class="col"><label class="form-label" for="rule-body">Notification body</label>
+      <div id="rule-to-row" class="col" hidden><label class="form-label" for="rule-to">To (phone number)</label>
+        <input class="form-control" id="rule-to"></div>
+      <div class="col"><label class="form-label" for="rule-body">Message</label>
         <input class="form-control" id="rule-body"></div>
       <div class="col-auto d-flex align-items-end">
         <button class="btn btn-primary" type="submit">Add rule</button></div>

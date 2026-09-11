@@ -196,13 +196,31 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/bob.jar" -H "X-CSRF-Toke
 # require_capability 404s on no visibility at all (same as calendar reads elsewhere), not 403
 [ "$CODE" = 404 ] || fail "bob should not create a rule on alice's calendar, got $CODE"
 
-step "Notification providers: create typed Twilio config, list, delete"
+step "SMS rule action: skipped (not silently ignored) with no Twilio provider configured"
+SMS_RULE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/rules" \
+  -d '{"name":"sms-r","trigger_type":"event_created","actions":[{"type":"sms","to":"+15551234567","body":"hi"}]}')
+echo "$SMS_RULE" | grep -q '"id"' || fail "sms rule create failed: $SMS_RULE"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/events" \
+  -d '{"summary":"sms trigger 1","starts_at":"2026-09-22T10:00:00Z","ends_at":"2026-09-22T11:00:00Z"}' >/dev/null
+for _ in $(seq 1 20); do grep -q "no Twilio provider configured" "$DATA/server.log" && break; sleep 0.2; done
+grep -q "no Twilio provider configured" "$DATA/server.log" || fail "sms action should log a skip with no provider configured"
+
+step "Notification providers: create typed Twilio config, list; SMS action now attempts a real send"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
   -H 'content-type: application/json' -X POST "$BASE/api/notification-providers" \
   -d '{"kind":"twilio","name":"main","config":{"account_sid":"ACxxx","auth_token":"secret","from":"+15550000000"}}')
 [ "$CODE" = 201 ] || fail "create twilio provider, got $CODE"
 PROV_ID=$(curl -s -b "$DATA/alice.jar" "$BASE/api/notification-providers" \
   | python3 -c "import json,sys;print([p for p in json.load(sys.stdin) if p['kind']=='twilio'][0]['id'])")
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/events" \
+  -d '{"summary":"sms trigger 2","starts_at":"2026-09-22T12:00:00Z","ends_at":"2026-09-22T13:00:00Z"}' >/dev/null
+for _ in $(seq 1 20); do grep -q "rule sms action failed" "$DATA/server.log" && break; sleep 0.2; done
+grep -q "rule sms action failed" "$DATA/server.log" || fail "sms action should attempt a real Twilio send once a provider is configured (fake creds are expected to fail, but it must try)"
+
+step "Notification providers: delete"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
   -X DELETE "$BASE/api/notification-providers/$PROV_ID")
 [ "$CODE" = 200 ] || fail "delete twilio provider, got $CODE"

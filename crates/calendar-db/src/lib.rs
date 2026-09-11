@@ -1026,7 +1026,10 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
 mod migration_tests {
     #[test]
     fn embedded_migrations_present() {
+        // Smoke test that sqlx::migrate! actually embeds files from disk —
+        // not a count check, which goes stale (and silently, pre-build.rs)
+        // every time a migration is added.
         let migrations = sqlx::migrate!("../../migrations").migrations;
-        assert_eq!(migrations.len(), 2, "expected 0001 and 0002");
+        assert!(!migrations.is_empty(), "expected embedded migrations");
     }
 }
