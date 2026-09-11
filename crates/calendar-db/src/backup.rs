@@ -38,24 +38,26 @@ pub async fn export(pool: &PgPool) -> Result<Value, DbError> {
     )
     .fetch_all(pool)
     .await?;
-    let events: Vec<Value> =
-        sqlx::query_as::<_, super::EventRow>("SELECT * FROM events WHERE deleted_at IS NULL")
-            .fetch_all(pool)
-            .await?
-            .iter()
-            .map(|e| {
-                json!({
-                    "id": e.id, "calendar_id": e.calendar_id, "uid": e.uid,
-                    "starts_at": e.starts_at, "ends_at": e.ends_at,
-                    "start_date": e.start_date, "end_date": e.end_date,
-                    "tzid": e.tzid, "all_day": e.all_day, "rrule": e.rrule,
-                    "rdate": e.rdate, "exdate": e.exdate, "summary": e.summary,
-                    "description_text": e.description_text, "description_html": e.description_html,
-                    "status": e.status, "class": e.class, "transp": e.transp,
-                    "sequence": e.sequence,
-                })
+    let events: Vec<Value> = sqlx::query_as::<_, super::EventRow>(
+        "SELECT * FROM events WHERE deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?
+    .iter()
+    .map(|e| {
+        json!({
+                "id": e.id, "calendar_id": e.calendar_id, "uid": e.uid,
+                "starts_at": e.starts_at, "ends_at": e.ends_at,
+                "start_date": e.start_date, "end_date": e.end_date,
+                "tzid": e.tzid, "all_day": e.all_day, "rrule": e.rrule,
+                "rdate": e.rdate, "exdate": e.exdate, "summary": e.summary,
+                "description_text": e.description_text, "description_html": e.description_html,
+                "status": e.status, "class": e.class, "transp": e.transp,
+                "sequence": e.sequence,
+        "duration_secs": e.duration.as_ref().map(|d| d.microseconds / 1_000_000),
             })
-            .collect();
+    })
+    .collect();
     let attachments: Vec<(Uuid, Uuid, String, String, Vec<u8>)> =
         sqlx::query_as("SELECT id, event_id, filename, content_type, data FROM attachments")
             .fetch_all(pool)
@@ -152,14 +154,41 @@ pub async fn import(pool: &PgPool, document: &Value) -> Result<(), DbError> {
     }
     for event in document["events"].as_array().unwrap_or(&vec![]) {
         sqlx::query(
-            "INSERT INTO events (id, calendar_id, uid, summary, sequence)
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO events (id, calendar_id, uid, summary, sequence, organizer_email,
+                 starts_at, ends_at, duration, all_day, tzid, rrule, rdate, exdate,
+                 status, class, transp, description_text, description_html)
+             VALUES ($1, $2, $3, $4, $5, 'restored@localhost',
+                 $6::timestamptz, $7::timestamptz, $8, $9, $10,
+                 $11, $12::jsonb, $13::jsonb,
+                 $14, $15, $16, $17, $18)
+             ON CONFLICT (id) DO NOTHING",
         )
         .bind(parse_uuid(&event["id"]))
         .bind(parse_uuid(&event["calendar_id"]))
         .bind(event["uid"].as_str().unwrap_or_default())
         .bind(event["summary"].as_str().unwrap_or_default())
         .bind(event["sequence"].as_i64().unwrap_or(0) as i32)
+        .bind(event["starts_at"].as_str())
+        .bind(event["ends_at"].as_str())
+        .bind(
+            event["duration_secs"]
+                .as_i64()
+                .map(|s| sqlx::postgres::types::PgInterval {
+                    months: 0,
+                    days: 0,
+                    microseconds: s * 1_000_000,
+                }),
+        )
+        .bind(event["all_day"].as_bool().unwrap_or(false))
+        .bind(event["tzid"].as_str())
+        .bind(event["rrule"].as_str())
+        .bind(event["rdate"].clone())
+        .bind(event["exdate"].clone())
+        .bind(event["status"].as_str())
+        .bind(event["class"].as_str())
+        .bind(event["transp"].as_str())
+        .bind(event["description_text"].as_str())
+        .bind(event["description_html"].as_str())
         .execute(&mut *tx)
         .await?;
     }

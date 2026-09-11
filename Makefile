@@ -11,3 +11,6 @@ lint:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 verify: fmt check lint test
+
+interop:
+	tests/interop/run.sh

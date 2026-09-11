@@ -88,12 +88,19 @@
     };
   }
 
+  function toIso(value) {
+    if (!value) { return value; }
+    var text = value.replace(' ', 'T');
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) { return text + 'T00:00:00Z'; }
+    return /Z$/.test(text) ? text : text + 'Z';
+  }
+
   function eventsUrl(requestData) {
     var cal = state.currentCalendar;
     if (!cal) { return Promise.resolve([]); }
     var params = new URLSearchParams({
-      from: requestData.start,
-      to: requestData.end,
+      from: toIso(requestData.fromDate),
+      to: toIso(requestData.toDate),
     });
     return fetch('/api/calendars/' + cal.id + '/occurrences?' + params)
       .then(function (r) { return r.json(); })

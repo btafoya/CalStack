@@ -2,7 +2,10 @@
 //! jQuery Migrate + vendored bs-calendar, all served from the executable, no
 //! CDN, no build step. Server-rendered shells with progressive enhancement.
 
-use axum::{http::{header, HeaderValue, StatusCode}, response::IntoResponse};
+use axum::{
+    http::{HeaderValue, StatusCode, header},
+    response::IntoResponse,
+};
 
 // ============ embedded assets ============
 
@@ -13,15 +16,51 @@ macro_rules! asset {
 }
 
 static ASSETS: &[(&str, &[u8], &str)] = &[
-    ("css/bootstrap.min.css", asset!("css/bootstrap.min.css"), "text/css; charset=utf-8"),
-    ("css/bootstrap-icons.css", asset!("css/bootstrap-icons.css"), "text/css; charset=utf-8"),
-    ("fonts/bootstrap-icons.woff2", asset!("fonts/bootstrap-icons.woff2"), "font/woff2"),
-    ("fonts/bootstrap-icons.woff", asset!("fonts/bootstrap-icons.woff"), "font/woff"),
-    ("js/bootstrap.bundle.min.js", asset!("js/bootstrap.bundle.min.js"), "text/javascript; charset=utf-8"),
-    ("js/jquery.min.js", asset!("js/jquery.min.js"), "text/javascript; charset=utf-8"),
-    ("js/jquery-migrate.min.js", asset!("js/jquery-migrate.min.js"), "text/javascript; charset=utf-8"),
-    ("js/bs-calendar.min.js", asset!("js/bs-calendar.min.js"), "text/javascript; charset=utf-8"),
-    ("js/app.js", asset!("js/app.js"), "text/javascript; charset=utf-8"),
+    (
+        "css/bootstrap.min.css",
+        asset!("css/bootstrap.min.css"),
+        "text/css; charset=utf-8",
+    ),
+    (
+        "css/bootstrap-icons.css",
+        asset!("css/bootstrap-icons.css"),
+        "text/css; charset=utf-8",
+    ),
+    (
+        "fonts/bootstrap-icons.woff2",
+        asset!("fonts/bootstrap-icons.woff2"),
+        "font/woff2",
+    ),
+    (
+        "fonts/bootstrap-icons.woff",
+        asset!("fonts/bootstrap-icons.woff"),
+        "font/woff",
+    ),
+    (
+        "js/bootstrap.bundle.min.js",
+        asset!("js/bootstrap.bundle.min.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "js/jquery.min.js",
+        asset!("js/jquery.min.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "js/jquery-migrate.min.js",
+        asset!("js/jquery-migrate.min.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "js/bs-calendar.min.js",
+        asset!("js/bs-calendar.min.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "js/app.js",
+        asset!("js/app.js"),
+        "text/javascript; charset=utf-8",
+    ),
 ];
 
 async fn assets(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
@@ -33,7 +72,10 @@ async fn assets(axum::extract::Path(path): axum::extract::Path<String>) -> impl 
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
-                    (header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400")),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, max-age=60"),
+                    ),
                 ],
                 bytes.to_vec(),
             )
@@ -73,10 +115,15 @@ $(function () {
   $('#login-form').on('submit', function (ev) {
     ev.preventDefault();
     $('#error').addClass('d-none');
-    $.post('/api/auth/login', {
-      username_or_email: $('#user').val(),
-      password: $('#pass').val(),
-      totp_code: $('#totp').val() || null,
+    $.ajax({
+      method: 'POST',
+      url: '/api/auth/login',
+      contentType: 'application/json',
+      data: JSON.stringify({
+        username_or_email: $('#user').val(),
+        password: $('#pass').val(),
+        totp_code: $('#totp').val() || null,
+      }),
     })
       .done(function () { window.location.href = '/'; })
       .fail(function (xhr) {
@@ -171,7 +218,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/bs-calendar.min.js"></script>
-<script src="/assets/js/app.js"></script>
+<script src="/assets/js/app.js?v=2"></script>
 </body></html>"#;
 
 async fn index() -> impl IntoResponse {

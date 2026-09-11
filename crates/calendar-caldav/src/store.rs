@@ -18,7 +18,10 @@ pub(crate) fn upsert_data(parsed: &crate::ParsedEvent) -> IcsEventUpsert {
         rdate: points_to_json(&parsed.rdate),
         exdate: points_to_json(&parsed.exdate),
         summary: parsed.summary.clone(),
-        description_html: parsed.description_html.as_deref().map(calendar_core::sanitize_html),
+        description_html: parsed
+            .description_html
+            .as_deref()
+            .map(calendar_core::sanitize_html),
         description_text: parsed.description_text.clone(),
         url: parsed.url.clone(),
         status: parsed.status.clone(),

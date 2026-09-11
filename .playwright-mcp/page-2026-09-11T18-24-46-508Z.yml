@@ -1,0 +1,93 @@
+- generic [active] [ref=f6e1]:
+  - navigation [ref=f6e2]:
+    - link "Calendar" [ref=f6e3] [cursor=pointer]:
+      - /url: /
+      - generic [aria-hidden] [ref=f6e4]: 
+      - text: Calendar
+    - generic [ref=f6e5]:
+      - link " Rules" [ref=f6e6] [cursor=pointer]:
+        - /url: /rules
+        - generic [ref=f6e7]: 
+        - text: Rules
+      - button " Share" [ref=f6e8] [cursor=pointer]:
+        - generic [ref=f6e9]: 
+        - text: Share
+      - button "Log out" [ref=f6e10] [cursor=pointer]
+  - generic [ref=f6e12]:
+    - complementary [ref=f6e13]:
+      - generic [ref=f6e14]:
+        - generic [ref=f6e15]: Calendars
+        - button "Add calendar" [ref=f6e16] [cursor=pointer]: +
+      - list [ref=f6e17]:
+        - listitem [ref=f6e18]: personal (owner)
+        - listitem [ref=f6e19]: Work (owner)
+    - main [ref=f6e20]:
+      - generic [ref=f6e22]:
+        - navigation [ref=f6e23]:
+          - button "Menu" [ref=f6e24] [cursor=pointer]:
+            - generic [ref=f6e25]: 
+          - strong [ref=f6e26]: W37 · September 2026
+          - generic [ref=f6e27]:
+            - button "Add" [ref=f6e28] [cursor=pointer]:
+              - generic [ref=f6e29]: 
+            - button "Type and press Enter" [ref=f6e30] [cursor=pointer]:
+              - generic [ref=f6e31]: 
+            - generic [ref=f6e32]:
+              - button "View" [ref=f6e33] [cursor=pointer]:
+                - generic [ref=f6e34]: 
+              - text:       
+        - text:                      
+        - generic [ref=f6e35]:
+          - text:   
+          - generic [ref=f6e38]:
+            - generic [ref=f6e39]:
+              - generic: UTC-4
+              - generic [ref=f6e42] [cursor=pointer]:
+                - generic: Sun
+                - generic: "6"
+              - generic [ref=f6e45] [cursor=pointer]:
+                - generic: Mon
+                - generic: "7"
+              - generic [ref=f6e48] [cursor=pointer]:
+                - generic: Tue
+                - generic: "8"
+              - generic [ref=f6e51] [cursor=pointer]:
+                - generic: Wed
+                - generic: "9"
+              - generic [ref=f6e54] [cursor=pointer]:
+                - generic: Thu
+                - generic: "10"
+              - generic [ref=f6e57] [cursor=pointer]:
+                - generic: Fri
+                - generic: "11"
+              - generic [ref=f6e60] [cursor=pointer]:
+                - generic: Sat
+                - generic: "12"
+            - generic [ref=f6e61]:
+              - generic [ref=f6e63]:
+                - generic [ref=f6e64]: 00:00
+                - generic [ref=f6e65]: 01:00
+                - generic [ref=f6e66]: 02:00
+                - generic [ref=f6e67]: 03:00
+                - generic [ref=f6e68]: 04:00
+                - generic [ref=f6e69]: 05:00
+                - generic [ref=f6e70]: 06:00
+                - generic [ref=f6e71]: 07:00
+                - generic [ref=f6e72]: 08:00
+                - generic [ref=f6e73]: 09:00
+                - generic [ref=f6e74]: 10:00
+                - generic [ref=f6e75]: 11:00
+                - generic [ref=f6e76]: 12:00
+                - generic [ref=f6e77]: 13:00
+                - generic [ref=f6e78]: 14:00
+                - generic [ref=f6e79]: 15:00
+                - generic [ref=f6e80]: 16:00
+                - generic [ref=f6e81]: 17:00
+                - generic [ref=f6e82]: 18:00
+                - generic [ref=f6e83]: 19:00
+                - generic [ref=f6e84]: 20:00
+                - generic [ref=f6e85]: 21:00
+                - generic [ref=f6e86]: 22:00
+                - generic [ref=f6e87]: 23:00
+                - generic [ref=f6e88]: 00:00
+              - generic [ref=f6e197]: 14:24
