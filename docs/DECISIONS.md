@@ -47,3 +47,7 @@ PUT of a VTODO returns 403 with a CalDAV error body. No opaque blob fallback: a 
 ## ADR-012 Hand-rolled recurrence engine
 
 Recurrence expansion is an own iterator over the RFC 5545 subset (freq/interval/BY* rules), not the `rrule` crate: full control over EXDATE/RECURRENCE-ID interplay and DST behavior, since recurrence correctness is core to a calendar server. All expansion runs under a configurable horizon bound so unbounded RRULEs cannot cause unbounded work. Client-supplied VTIMEZONE definitions are stored and honored.
+
+## ADR-013 Rules are optionally calendar-scoped
+
+`rules.calendar_id` is a nullable FK to `calendars`, not a required one: NULL keeps the original ADR-007 tenant-wide behavior, a value scopes the rule to one calendar. Creating a calendar-scoped rule requires Owner capability on that calendar. `run_rules` matches a calendar's own rules plus every tenant-wide (NULL) rule, so existing global rules keep firing unchanged.
