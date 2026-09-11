@@ -5,8 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-uuid.workspace = true
-chrono.workspace = true
-thiserror.workspace = true
+axum.workspace = true
+http.workspace = true
