@@ -39,8 +39,20 @@ MIT licensed.
 
 - **PostgreSQL 16+** — the only runtime dependency.
 - **Rust** (stable toolchain, 2024 edition) — only if building from source.
+- **Docker + Docker Compose** — only if running via Compose.
 
 ## Installation
+
+### Docker Compose
+
+```bash
+git clone https://github.com/btafoya/CalStack.git
+cd CalStack
+cp .env.example .env   # edit as needed
+docker compose up --build -d
+```
+
+This builds the app image and starts it alongside a PostgreSQL 16 container (named volume, healthcheck-gated). The app listens on `${APP_PORT:-8080}` on the host — set `APP_PORT` in `.env` to change it. Migrations run automatically on startup. Put a reverse proxy (nginx, Caddy, Traefik) in front for TLS.
 
 ### Build from source
 
@@ -104,6 +116,15 @@ calendar-server backup > backup.json
 
 # restore into an empty, migrated database
 calendar-server restore backup.json
+
+# create the first admin user
+calendar-server create-admin <username> <email> <password>
+```
+
+Under Docker Compose, run subcommands with `docker compose run --rm app <command> [args]`, e.g.:
+
+```bash
+docker compose run --rm app create-admin admin admin@example.com correcthorsebatterystaple
 ```
 
 `serve` also starts an in-process worker that fires VALARM reminders, sends outbound iTIP invitations, and purges expired data on a schedule — no separate process to run.
@@ -113,6 +134,8 @@ calendar-server restore backup.json
 ### Web UI
 
 Open `http://<BIND_ADDR>/` (redirects to `/login` if unauthenticated). Register an account, create a calendar, and use the built-in week-view calendar to add events.
+
+Self-registration never sets `is_admin` — it's required for the audit log endpoint only. Create it via the CLI (see [Running](#running)) or promote an existing account: `UPDATE users SET is_admin = true WHERE username = '...';`.
 
 ### CalDAV clients
 

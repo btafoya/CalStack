@@ -21,10 +21,8 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/calendar
       BIND_ADDR: 0.0.0.0:8080
-      WEBAUTHN_RP_ID: caldav.premadev.com
-      WEBAUTHN_ORIGIN: https://caldav.premadev.com
     ports:
-      - "8786:8080"
+      - "${APP_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
