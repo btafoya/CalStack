@@ -260,7 +260,12 @@ const RULES_PAGE: &str = r#"<!doctype html>
   <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
 </nav>
 <div class="container p-3">
-  <h1 class="h4 mb-1">Rules</h1>
+  <div class="d-flex align-items-center gap-2 mb-1">
+    <h1 class="h4 mb-0">Rules</h1>
+    <select class="form-select form-select-sm w-auto" id="rule-calendar-select">
+      <option value="">All calendars</option>
+    </select>
+  </div>
   <p id="rules-scope-note" class="text-body-secondary small"></p>
   <form id="rule-form" class="card p-3 mb-4">
     <div class="row g-2 align-items-end">
