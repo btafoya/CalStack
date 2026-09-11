@@ -37,6 +37,7 @@ pub struct IcsEventUpsert {
     pub organizer_email: Option<String>,
     pub organizer_name: Option<String>,
     pub attendees: Vec<IcsAttendee>,
+    pub alarms: Vec<super::alarms::NewAlarm>,
 }
 
 #[derive(Debug, Default)]
@@ -142,6 +143,9 @@ pub async fn create_ics_event_inner(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    if !data.alarms.is_empty() {
+        super::alarms::replace_alarms(pool, event.id, &data.alarms).await?;
+    }
     Ok(event)
 }
 
@@ -240,6 +244,7 @@ pub async fn update_ics_event(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    super::alarms::replace_alarms(pool, event.id, &data.alarms).await?;
     Ok(event)
 }
 

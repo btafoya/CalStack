@@ -1,5 +1,7 @@
 //! PostgreSQL data layer: connection, migrations and repositories.
 
+pub mod alarms;
+pub mod attachments;
 pub mod auth_ext;
 pub mod ics_upsert;
 pub mod jobs;
@@ -1016,4 +1018,13 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
         .zip(b.bytes())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+#[cfg(test)]
+mod migration_tests {
+    #[test]
+    fn embedded_migrations_present() {
+        let migrations = sqlx::migrate!("../../migrations").migrations;
+        assert_eq!(migrations.len(), 2, "expected 0001 and 0002");
+    }
 }
