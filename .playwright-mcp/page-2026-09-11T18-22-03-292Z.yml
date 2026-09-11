@@ -1,9 +1,0 @@
-- generic [ref=e3]:
-  - heading "Calendar" [level=1] [ref=e4]
-  - generic [ref=e5]:
-    - generic [ref=e6]: Username or email
-    - textbox "Username or email" [ref=e7]
-  - generic [ref=e8]:
-    - generic [ref=e9]: Password
-    - textbox "Password" [ref=e10]
-  - button "Sign in" [ref=e11] [cursor=pointer]

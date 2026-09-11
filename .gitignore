@@ -5,4 +5,4 @@ target/
 .codegraph/
 .claude/
 CLAUDE.md
-docs/
+docs/.playwright-mcp/

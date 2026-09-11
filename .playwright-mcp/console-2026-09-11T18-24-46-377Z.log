@@ -1,4 +1,0 @@
-[      27ms] [LOG] JQMIGRATE: Migrate is installed, version 3.5.2 @ http://127.0.0.1:18080/assets/js/jquery-migrate.min.js:1
-[      34ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:18080/assets/css/fonts/bootstrap-icons.woff2?dd67030699838ea613ee6dbda90effa6:0
-[      37ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:18080/assets/css/fonts/bootstrap-icons.woff?dd67030699838ea613ee6dbda90effa6:0
-[   10461ms] [LOG] JQMIGRATE: Migrate is installed, version 3.5.2 @ http://127.0.0.1:18080/assets/js/jquery-migrate.min.js:1
