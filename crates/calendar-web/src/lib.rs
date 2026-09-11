@@ -76,6 +76,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         asset!("js/admin.js"),
         "text/javascript; charset=utf-8",
     ),
+    (
+        "js/providers.js",
+        asset!("js/providers.js"),
+        "text/javascript; charset=utf-8",
+    ),
 ];
 
 async fn assets(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
@@ -169,7 +174,8 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <nav class="navbar bg-body border-bottom px-3">
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
   <div class="ms-auto d-flex gap-2">
-    <a class="btn btn-outline-secondary btn-sm" href="/rules"><i class="bi bi-sliders"></i> Rules</a>
+    <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules"><i class="bi bi-sliders"></i> Rules</a>
+    <a class="btn btn-outline-secondary btn-sm" href="/providers"><i class="bi bi-bell"></i> Providers</a>
     <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
     <button id="share-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-share"></i> Share</button>
     <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
@@ -254,7 +260,8 @@ const RULES_PAGE: &str = r#"<!doctype html>
   <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
 </nav>
 <div class="container p-3">
-  <h1 class="h4 mb-3">Rules</h1>
+  <h1 class="h4 mb-1">Rules</h1>
+  <p id="rules-scope-note" class="text-body-secondary small"></p>
   <form id="rule-form" class="card p-3 mb-4">
     <div class="row g-2 align-items-end">
       <div class="col"><label class="form-label" for="rule-name">Name</label>
@@ -266,6 +273,9 @@ const RULES_PAGE: &str = r#"<!doctype html>
       <div class="col-auto form-check mb-2">
         <input class="form-check-input" type="checkbox" id="rule-enabled" checked>
         <label class="form-check-label" for="rule-enabled">Enabled</label></div>
+      <div id="rule-global-row" class="col-auto form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="rule-global">
+        <label class="form-check-label" for="rule-global">Apply to all calendars</label></div>
     </div>
     <div class="row g-2 mt-1">
       <div class="col"><label class="form-label" for="rule-title">Notification title</label>
@@ -277,7 +287,7 @@ const RULES_PAGE: &str = r#"<!doctype html>
     </div>
   </form>
   <table class="table table-sm bg-body">
-    <thead><tr><th>Name</th><th>Trigger</th><th>Actions</th><th>Enabled</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Trigger</th><th>Scope</th><th>Actions</th><th>Enabled</th><th></th></tr></thead>
     <tbody id="rules-rows"></tbody>
   </table>
 </div>
@@ -326,6 +336,57 @@ const ADMIN_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/api.js"></script>
 <script src="/assets/js/admin.js"></script>
 </body></html>"#;
+
+const PROVIDERS_PAGE: &str = r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar — Providers</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+</head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom px-3">
+  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
+  <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
+</nav>
+<div class="container p-3">
+  <h1 class="h4 mb-3">Notification providers</h1>
+  <form id="provider-form" class="card p-3 mb-4">
+    <div class="row g-2 align-items-end">
+      <div class="col-auto"><label class="form-label" for="provider-kind">Kind</label>
+        <select class="form-select" id="provider-kind">
+          <option value="postmark">Postmark (email)</option>
+          <option value="smtp">SMTP (email)</option>
+          <option value="twilio">Twilio (SMS)</option>
+        </select></div>
+      <div class="col"><label class="form-label" for="provider-name">Name</label>
+        <input class="form-control" id="provider-name" required></div>
+    </div>
+    <div id="provider-fields" class="row g-2 mt-1"></div>
+    <div class="mt-2"><button class="btn btn-primary" type="submit">Add provider</button></div>
+  </form>
+  <table class="table table-sm bg-body">
+    <thead><tr><th>Kind</th><th>Name</th><th>Enabled</th><th></th></tr></thead>
+    <tbody id="provider-rows"></tbody>
+  </table>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/providers.js"></script>
+</body></html>"#;
+
+async fn providers_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        PROVIDERS_PAGE,
+    )
+}
 
 async fn rules_page() -> impl IntoResponse {
     (
@@ -377,5 +438,6 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
         .route("/login", axum::routing::get(login_page))
         .route("/rules", axum::routing::get(rules_page))
         .route("/admin", axum::routing::get(admin_page))
+        .route("/providers", axum::routing::get(providers_page))
         .route("/assets/{*path}", axum::routing::get(assets))
 }
