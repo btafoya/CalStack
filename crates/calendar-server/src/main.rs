@@ -1253,6 +1253,10 @@ fn build_router(state: AppState) -> Router {
         .merge(sharing_api::router())
         .merge(rules_api::router())
         .merge(scheduling::router())
+        .route(
+            "/api/openapi.json",
+            get(|| async { axum::Json(calendar_api::openapi_document()) }),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
