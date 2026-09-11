@@ -28,9 +28,9 @@ CalStack speaks CalDAV to real clients (Apple Calendar, Thunderbird, DAVx5, Outl
 - **Attachments** — capped, stored as `bytea` in PostgreSQL.
 - **Search** — PostgreSQL full-text, no external search service.
 - **Scheduling** — outbound iTIP invitations, inbound iMIP replies via a Postmark webhook.
-- **Rules** — trigger → condition → action automation (event created, RSVP changed, alarm due, …).
-- **Notifications** — Postmark, generic SMTP, Twilio SMS.
-- **Embedded web UI** — Bootstrap 5.3 + jQuery 4 + [bs-calendar](https://github.com/ThomasDev-de/bs-calendar), vendored, no CDN, no build step.
+- **Rules** — trigger → condition → action automation (event created, RSVP changed, alarm due, …), scoped to one calendar or tenant-wide; managed from the web UI.
+- **Notifications** — Postmark, generic SMTP, Twilio SMS provider credentials, configured from the web UI.
+- **Embedded web UI** — Bootstrap 5.3 + jQuery 4 + [bs-calendar](https://github.com/ThomasDev-de/bs-calendar), vendored, no CDN, no build step. Calendar view, per-calendar rules, notification providers, and admin user management.
 - **Backup/restore** — portable JSON export/import, attachments included.
 
 MIT licensed.
@@ -135,7 +135,11 @@ docker compose run --rm app create-admin admin admin@example.com correcthorsebat
 
 Open `http://<BIND_ADDR>/` (redirects to `/login` if unauthenticated). Register an account, create a calendar, and use the built-in week-view calendar to add events.
 
-Self-registration never sets `is_admin` — it's required for the audit log endpoint only. Create it via the CLI (see [Running](#running)) or promote an existing account: `UPDATE users SET is_admin = true WHERE username = '...';`.
+- **Rules** (nav bar, scoped to whichever calendar is selected) — create/enable/disable/delete trigger → action automation, per calendar or tenant-wide.
+- **Providers** (nav bar) — configure Postmark, SMTP, or Twilio credentials used for outbound iTIP mail and (once wired up) SMS.
+- **Admin** (nav bar, visible only to `is_admin` users) — list accounts, create users, promote/demote admin status, enable/disable accounts.
+
+Self-registration never sets `is_admin` — it's required for the Admin page and the audit log endpoint. Create the first admin via the CLI (see [Running](#running)); every admin after that can be promoted from the Admin page itself.
 
 ### CalDAV clients
 
