@@ -115,6 +115,9 @@
   // ============ init ============
   $(function () {
     if (!window.jQuery) { return; }
+    api('GET', '/api/auth/me').done(function (user) {
+      if (user.is_admin) { $('#admin-nav-link').prop('hidden', false); }
+    });
     loadCalendars().done(function () {
       $('#calendar').bsCalendar({
         url: function (requestData) { return eventsUrl(requestData); },

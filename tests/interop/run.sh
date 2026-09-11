@@ -161,4 +161,54 @@ step "iCal export via occurrences + exceptions"
 REC=$(curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/occurrences?from=2026-09-01T00:00:00Z&to=2026-10-01T00:00:00Z")
 echo "$REC" | grep -q '"occurrence"' || fail "occurrence expansion (got: $(echo "$REC" | head -c 200))"
 
+# ============ 5. rules ============
+step "Rules: create, toggle enabled, list reflects it"
+RULE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/rules" \
+  -d '{"name":"r1","trigger_type":"event_created","actions":[{"type":"create_notification","title":"hi"}]}')
+RULE_ID=$(echo "$RULE" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X PATCH "$BASE/api/rules/$RULE_ID" -d '{"enabled":false}')
+[ "$CODE" = 200 ] || fail "rule enable toggle, got $CODE"
+curl -s -b "$DATA/alice.jar" "$BASE/api/rules" | grep -q '"enabled":false' || fail "rule disable not reflected in list"
+
+step "Web UI: /rules and /admin pages exist (no longer 404)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/rules")
+[ "$CODE" = 200 ] || fail "/rules page, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin")
+[ "$CODE" = 200 ] || fail "/admin page, got $CODE"
+
+# ============ 6. admin user management ============
+step "create-admin CLI seeds an is_admin user"
+DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/caltest" "$BIN" create-admin admin admin@example.com adminpass1 >/dev/null
+register admin admin@example.com adminpass1 # username already exists; register 409 is ignored, login still works
+
+step "Non-admin is forbidden from admin API"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" "$BASE/api/admin/users")
+[ "$CODE" = 403 ] || fail "expected 403 for non-admin on /api/admin/users, got $CODE"
+
+step "Admin can list users"
+curl -s -b "$DATA/admin.jar" "$BASE/api/admin/users" | grep -q '"alice"' || fail "admin user list missing alice"
+
+step "Admin can create a user"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" -H "X-CSRF-Token: $(csrf admin)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/admin/users" \
+  -d '{"username":"carol","email":"carol@example.com","password":"password789"}')
+[ "$CODE" = 201 ] || fail "admin create user, got $CODE"
+
+step "Admin can disable a user; disabled user cannot log in"
+CAROL_ID=$(curl -s -b "$DATA/admin.jar" "$BASE/api/admin/users" \
+  | python3 -c "import json,sys;print([u for u in json.load(sys.stdin) if u['username']=='carol'][0]['id'])")
+curl -s -b "$DATA/admin.jar" -H "X-CSRF-Token: $(csrf admin)" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/admin/users/$CAROL_ID" -d '{"disabled":true}' >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" -H 'content-type: application/json' \
+  -d '{"username_or_email":"carol","password":"password789"}')
+[ "$CODE" = 401 ] || fail "disabled user should not log in, got $CODE"
+
+step "Admin cannot demote/disable their own account"
+ADMIN_ID=$(curl -s -b "$DATA/admin.jar" "$BASE/api/auth/me" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" -H "X-CSRF-Token: $(csrf admin)" \
+  -H 'content-type: application/json' -X PATCH "$BASE/api/admin/users/$ADMIN_ID" -d '{"is_admin":false}')
+[ "$CODE" = 400 ] || fail "self-demote should be rejected, got $CODE"
+
 echo "ALL INTEROP CHECKS PASSED"

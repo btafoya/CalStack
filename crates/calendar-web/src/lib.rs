@@ -61,6 +61,21 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         asset!("js/app.js"),
         "text/javascript; charset=utf-8",
     ),
+    (
+        "js/api.js",
+        asset!("js/api.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "js/rules.js",
+        asset!("js/rules.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "js/admin.js",
+        asset!("js/admin.js"),
+        "text/javascript; charset=utf-8",
+    ),
 ];
 
 async fn assets(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
@@ -125,7 +140,10 @@ $(function () {
         totp_code: $('#totp').val() || null,
       }),
     })
-      .done(function () { window.location.href = '/'; })
+      .done(function (resp) {
+        sessionStorage.setItem('csrf', resp.csrf_token);
+        window.location.href = '/';
+      })
       .fail(function (xhr) {
         if (xhr.status === 401 && $('#totp-row').prop('hidden')) {
           $('#totp-row').prop('hidden', false);
@@ -152,6 +170,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
   <div class="ms-auto d-flex gap-2">
     <a class="btn btn-outline-secondary btn-sm" href="/rules"><i class="bi bi-sliders"></i> Rules</a>
+    <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
     <button id="share-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-share"></i> Share</button>
     <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
   </div>
@@ -221,6 +240,115 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <script src="/assets/js/app.js?v=2"></script>
 </body></html>"#;
 
+const RULES_PAGE: &str = r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar — Rules</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+</head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom px-3">
+  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
+  <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
+</nav>
+<div class="container p-3">
+  <h1 class="h4 mb-3">Rules</h1>
+  <form id="rule-form" class="card p-3 mb-4">
+    <div class="row g-2 align-items-end">
+      <div class="col"><label class="form-label" for="rule-name">Name</label>
+        <input class="form-control" id="rule-name" required></div>
+      <div class="col-auto"><label class="form-label" for="rule-trigger">Trigger</label>
+        <select class="form-select" id="rule-trigger">
+          <option value="event_created">event_created</option>
+        </select></div>
+      <div class="col-auto form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="rule-enabled" checked>
+        <label class="form-check-label" for="rule-enabled">Enabled</label></div>
+    </div>
+    <div class="row g-2 mt-1">
+      <div class="col"><label class="form-label" for="rule-title">Notification title</label>
+        <input class="form-control" id="rule-title" required></div>
+      <div class="col"><label class="form-label" for="rule-body">Notification body</label>
+        <input class="form-control" id="rule-body"></div>
+      <div class="col-auto d-flex align-items-end">
+        <button class="btn btn-primary" type="submit">Add rule</button></div>
+    </div>
+  </form>
+  <table class="table table-sm bg-body">
+    <thead><tr><th>Name</th><th>Trigger</th><th>Actions</th><th>Enabled</th><th></th></tr></thead>
+    <tbody id="rules-rows"></tbody>
+  </table>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/rules.js"></script>
+</body></html>"#;
+
+const ADMIN_PAGE: &str = r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar — Admin</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+</head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom px-3">
+  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
+  <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
+</nav>
+<div class="container p-3">
+  <h1 class="h4 mb-3">Users</h1>
+  <form id="user-form" class="card p-3 mb-4">
+    <div class="row g-2 align-items-end">
+      <div class="col"><label class="form-label" for="u-username">Username</label>
+        <input class="form-control" id="u-username" required></div>
+      <div class="col"><label class="form-label" for="u-email">Email</label>
+        <input class="form-control" id="u-email" type="email" required></div>
+      <div class="col"><label class="form-label" for="u-password">Password</label>
+        <input class="form-control" id="u-password" type="password" minlength="8" required></div>
+      <div class="col-auto form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="u-is-admin">
+        <label class="form-check-label" for="u-is-admin">Admin</label></div>
+      <div class="col-auto"><button class="btn btn-primary" type="submit">Add user</button></div>
+    </div>
+  </form>
+  <table class="table table-sm bg-body">
+    <thead><tr><th>Username</th><th>Email</th><th>Admin</th><th>Disabled</th></tr></thead>
+    <tbody id="user-rows"></tbody>
+  </table>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/admin.js"></script>
+</body></html>"#;
+
+async fn rules_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        RULES_PAGE,
+    )
+}
+
+async fn admin_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        ADMIN_PAGE,
+    )
+}
+
 async fn index() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -247,5 +375,7 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
     axum::Router::new()
         .route("/", axum::routing::get(index))
         .route("/login", axum::routing::get(login_page))
+        .route("/rules", axum::routing::get(rules_page))
+        .route("/admin", axum::routing::get(admin_page))
         .route("/assets/{*path}", axum::routing::get(assets))
 }

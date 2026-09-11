@@ -1,5 +1,6 @@
 //! Single production executable: HTTP server, CLI commands.
 
+mod admin_api;
 mod dav;
 mod extras;
 mod jobs;
@@ -1280,6 +1281,7 @@ fn build_router(state: AppState) -> Router {
         .merge(sharing_api::router())
         .merge(rules_api::router())
         .merge(scheduling::router())
+        .merge(admin_api::router())
         .route(
             "/api/openapi.json",
             get(|| async { axum::Json(calendar_api::openapi_document()) }),

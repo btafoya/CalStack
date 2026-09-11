@@ -324,9 +324,14 @@ pub fn openapi_document() -> serde_json::Value {
     );
     put(
         "/api/rules/{id}",
-        json!({"delete": {
-            "summary": "Delete a rule", "responses": {"200": {"description": "removed"}}
-        }}),
+        json!({
+            "patch": {"summary": "Enable/disable a rule",
+                "parameters": [param("id", true)],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}}}}},
+                "responses": {"200": {"description": "updated"}}},
+            "delete": {"summary": "Delete a rule", "responses": {"200": {"description": "removed"}}},
+        }),
     );
     put(
         "/api/notification-providers",
@@ -350,6 +355,30 @@ pub fn openapi_document() -> serde_json::Value {
         "/api/audit",
         json!({"get": {
             "summary": "Audit trail (admin only)", "responses": {"200": {"description": "entries"}}
+        }}),
+    );
+    put(
+        "/api/admin/users",
+        json!({
+            "get": {"summary": "List all users (admin only)", "responses": {"200": {"description": "list"}}},
+            "post": {"summary": "Create a user (admin only)",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "required": ["username", "email", "password"],
+                    "properties": {"username": {"type": "string"}, "email": {"type": "string", "format": "email"},
+                        "password": {"type": "string", "minLength": 8}, "display_name": {"type": ["string", "null"]},
+                        "is_admin": {"type": ["boolean", "null"]}}}}}},
+                "responses": {"201": {"description": "created"}, "400": {"description": "validation error"}}},
+        }),
+    );
+    put(
+        "/api/admin/users/{id}",
+        json!({"patch": {
+            "summary": "Promote/demote or enable/disable a user (admin only)",
+            "parameters": [param("id", true)],
+            "requestBody": {"content": {"application/json": {"schema": {
+                "type": "object",
+                "properties": {"is_admin": {"type": ["boolean", "null"]}, "disabled": {"type": ["boolean", "null"]}}}}}},
+            "responses": {"200": {"description": "updated"}, "400": {"description": "cannot modify own account"}}
         }}),
     );
     put(

@@ -8,7 +8,7 @@ use axum::{
     extract::{Path, State},
     http::HeaderMap,
     response::IntoResponse,
-    routing::{delete, post},
+    routing::{delete, patch, post},
 };
 use calendar_db::{self as db};
 use serde_json::{Value, json};
@@ -252,6 +252,30 @@ async fn list_rules(
     )))
 }
 
+#[derive(serde::Deserialize)]
+struct RuleUpdateBody {
+    enabled: bool,
+}
+
+async fn update_rule(
+    State(AppState { pool, .. }): State<AppState>,
+    headers: HeaderMap,
+    Path(rule_id): Path<Uuid>,
+    Json(body): Json<RuleUpdateBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    require_csrf(&auth, &headers)?;
+    let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
+    sqlx::query("UPDATE rules SET enabled = $1 WHERE id = $2 AND tenant_id = $3")
+        .bind(body.enabled)
+        .bind(rule_id)
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn delete_rule(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -277,5 +301,5 @@ pub fn router() -> axum::Router<crate::AppState> {
         )
         .route("/api/notification-providers/{id}", delete(delete_provider))
         .route("/api/rules", post(create_rule).get(list_rules))
-        .route("/api/rules/{id}", delete(delete_rule))
+        .route("/api/rules/{id}", patch(update_rule).delete(delete_rule))
 }
