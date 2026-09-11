@@ -24,12 +24,6 @@ pub(crate) async fn entry(
         return internal("CalDAV is not configured");
     };
 
-    // Authenticate once; CalDAV clients expect a Basic challenge.
-    let auth = match resolve_auth(&pool, request.headers()).await {
-        Ok(auth) => auth,
-        Err(_) => return unauthorized_basic(),
-    };
-
     let method = request.method().clone();
     let path = request.uri().path().to_string();
 
@@ -47,6 +41,12 @@ pub(crate) async fn entry(
         );
         return response;
     }
+
+    // Authenticate once; CalDAV clients expect a Basic challenge.
+    let auth = match resolve_auth(&pool, request.headers()).await {
+        Ok(auth) => auth,
+        Err(_) => return unauthorized_basic(),
+    };
 
     let (parts, body) = request.into_parts();
     let bytes = match axum::body::to_bytes(body, 256 * 1024 * 1024).await {

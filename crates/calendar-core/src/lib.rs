@@ -703,7 +703,6 @@ mod tests {
     }
 }
 
-
 /// Sanitizes pasted rich content to safe HTML (ADR-005): scripts, event
 /// handlers and active content are stripped, safe formatting is kept.
 pub fn sanitize_html(html: &str) -> String {

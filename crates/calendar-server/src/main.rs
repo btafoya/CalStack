@@ -909,7 +909,10 @@ async fn create_event(
         rdate: body.rdate.clone(),
         exdate: body.exdate.clone(),
         summary: body.summary.clone(),
-        description_html: body.description_html.as_deref().map(calendar_core::sanitize_html),
+        description_html: body
+            .description_html
+            .as_deref()
+            .map(calendar_core::sanitize_html),
         description_text: body.description_text.clone(),
         url: body.url.clone(),
         status: body.status.clone(),
@@ -1102,7 +1105,17 @@ async fn list_occurrences(
             continue;
         }
         if event.rrule.is_none() {
-            out.push(serde_json::json!({"event": event_view(event, &db::event_etag(event), &[])}));
+            let mut view =
+                serde_json::json!({"event": event_view(event, &db::event_etag(event), &[])});
+            view["occurrence"] = match (event.starts_at, event.start_date) {
+                (Some(at), _) => serde_json::json!({"kind": "timed", "at": at}),
+                (None, Some(date)) => {
+                    serde_json::json!({"kind": "all_day", "date": date.to_string()})
+                }
+                _ => serde_json::Value::Null,
+            };
+            view["is_exception"] = serde_json::json!(false);
+            out.push(view);
             continue;
         }
         let dtstart = match (event.starts_at, event.start_date) {
@@ -1246,6 +1259,13 @@ impl From<AuthExtractError> for AppError {
     }
 }
 
+fn security_headers() -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
+    tower_http::set_header::SetResponseHeaderLayer::overriding(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    )
+}
+
 fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(calendar_web::router())
@@ -1287,7 +1307,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/calendars/{id}/occurrences", get(list_occurrences))
         .route(
-            "/events/{id}",
+            "/api/events/{id}",
             get(get_event).patch(patch_event).delete(delete_event),
         )
         .route("/calendars", axum::routing::any(dav::entry))
@@ -1297,6 +1317,7 @@ fn build_router(state: AppState) -> Router {
             "/.well-known/caldav",
             get(|| async { axum::response::Redirect::permanent("/calendars/") }),
         )
+        .layer(security_headers())
         .with_state(state)
 }
 
