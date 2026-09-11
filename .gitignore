@@ -2,3 +2,7 @@ target/
 .env
 *.swp
 .DS_Store
+.codegraph/
+.claude/
+CLAUDE.md
+docs/

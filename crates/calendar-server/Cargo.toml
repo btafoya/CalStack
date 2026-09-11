@@ -25,6 +25,11 @@ calendar-rules = { path = "../calendar-rules" }
 calendar-notify = { path = "../calendar-notify" }
 calendar-web = { path = "../calendar-web" }
 base64.workspace = true
+dav-server.workspace = true
+bytes.workspace = true
+http.workspace = true
+futures-util.workspace = true
+webauthn-rs.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true

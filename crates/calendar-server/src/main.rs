@@ -1,5 +1,8 @@
 //! Single production executable: HTTP server, CLI commands.
 
+mod dav;
+mod mfa;
+
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -46,6 +49,9 @@ struct Config {
     database_max_connections: u32,
     bind_addr: String,
     session_ttl: Duration,
+    encryption_key: Option<String>,
+    webauthn_rp_id: Option<String>,
+    webauthn_origin: Option<String>,
 }
 
 impl Config {
@@ -62,6 +68,9 @@ impl Config {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(24 * 7),
             ),
+            encryption_key: env("APP_ENCRYPTION_KEY"),
+            webauthn_rp_id: env("WEBAUTHN_RP_ID"),
+            webauthn_origin: env("WEBAUTHN_ORIGIN"),
         })
     }
 }
@@ -202,6 +211,44 @@ struct RegisterBody {
 struct LoginBody {
     username_or_email: String,
     password: String,
+    totp_code: Option<String>,
+    recovery_code: Option<String>,
+}
+
+/// If the user confirmed TOTP, a code (or one-time recovery code) is required.
+async fn verify_totp_gate(
+    pool: &PgPool,
+    user: &db::UserRow,
+    totp_code: &Option<String>,
+    recovery_code: &Option<String>,
+    crypto: Option<&calendar_auth::Crypto>,
+) -> Result<(), AppError> {
+    let Some(row) = db::auth_ext::get_totp_secret(pool, user.id)
+        .await?
+        .filter(|r| r.confirmed_at.is_some())
+    else {
+        return Ok(());
+    };
+    if let Some(recovery) = recovery_code.as_deref() {
+        let hash = calendar_auth::crypto::recovery_code_hash(recovery);
+        if db::auth_ext::consume_totp_recovery_code(pool, user.id, &hash).await? {
+            return Ok(());
+        }
+    }
+    let Some(crypto) = crypto else {
+        // Secret is encrypted with a key we do not have: fail closed.
+        return Err(AppError::unauthorized());
+    };
+    let secret = crypto
+        .decrypt(&row.secret_encrypted)
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    match totp_code
+        .as_deref()
+        .map(|code| calendar_auth::totp::verify(&secret, code))
+    {
+        Some(true) => Ok(()),
+        _ => Err(AppError::unauthorized()),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -272,7 +319,10 @@ async fn register(
 
 async fn login(
     State(AppState {
-        pool, session_ttl, ..
+        pool,
+        session_ttl,
+        crypto,
+        ..
     }): State<AppState>,
     Json(body): Json<LoginBody>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -291,6 +341,14 @@ async fn login(
     {
         return Err(AppError::unauthorized());
     }
+    verify_totp_gate(
+        &pool,
+        &user,
+        &body.totp_code,
+        &body.recovery_code,
+        crypto.as_deref(),
+    )
+    .await?;
     calendar_db::delete_expired_sessions(&pool).await.ok(); // ponytail: lazy purge on login
 
     let secret = calendar_auth::generate_session_token();
@@ -1087,9 +1145,13 @@ fn json_to_points(value: &serde_json::Value) -> Vec<calendar_core::DateOrDateTim
 // ============ app state, errors, router ============
 
 #[derive(Clone)]
-struct AppState {
-    pool: PgPool,
-    session_ttl: Duration,
+pub struct AppState {
+    pub pool: PgPool,
+    pub session_ttl: Duration,
+    /// Envelope-encryption key for stored secrets (TOTP seeds, provider creds).
+    pub crypto: Option<std::sync::Arc<calendar_auth::Crypto>>,
+    pub passkeys: Option<std::sync::Arc<mfa::PasskeyStore>>,
+    pub dav: Option<std::sync::Arc<dav_server::DavHandler<calendar_caldav::DavAuth>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1155,37 +1217,45 @@ impl From<AuthExtractError> for AppError {
 
 fn build_router(state: AppState) -> Router {
     Router::new()
+        .merge(mfa::router())
         .route("/healthz", get(|| async { "ok" }))
-        .route("/auth/register", post(register))
-        .route("/auth/login", post(login))
-        .route("/auth/logout", post(logout))
-        .route("/auth/me", get(me))
-        .route("/auth/tokens", post(create_token).get(list_tokens))
-        .route("/auth/tokens/{id}", delete(revoke_token))
+        .route("/api/auth/register", post(register))
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/logout", post(logout))
+        .route("/api/auth/me", get(me))
+        .route("/api/auth/tokens", post(create_token).get(list_tokens))
+        .route("/api/auth/tokens/{id}", delete(revoke_token))
         .route(
-            "/auth/app-passwords",
+            "/api/auth/app-passwords",
             post(create_app_password).get(list_app_passwords),
         )
-        .route("/auth/app-passwords/{id}", delete(revoke_app_password))
-        .route("/calendars", post(create_calendar).get(list_calendars))
+        .route("/api/auth/app-passwords/{id}", delete(revoke_app_password))
+        .route("/api/calendars", post(create_calendar).get(list_calendars))
         .route(
-            "/calendars/{id}",
+            "/api/calendars/{id}",
             get(get_calendar)
                 .patch(patch_calendar)
                 .delete(delete_calendar),
         )
         .route(
-            "/calendars/{id}/acl",
+            "/api/calendars/{id}/acl",
             get(get_calendar_acl).put(put_calendar_acl),
         )
         .route(
-            "/calendars/{id}/events",
+            "/api/calendars/{id}/events",
             post(create_event).get(list_events),
         )
-        .route("/calendars/{id}/occurrences", get(list_occurrences))
+        .route("/api/calendars/{id}/occurrences", get(list_occurrences))
         .route(
             "/events/{id}",
             get(get_event).patch(patch_event).delete(delete_event),
+        )
+        .route("/calendars", axum::routing::any(dav::entry))
+        .route("/calendars/", axum::routing::any(dav::entry))
+        .route("/calendars/{*rest}", axum::routing::any(dav::entry))
+        .route(
+            "/.well-known/caldav",
+            get(|| async { axum::response::Redirect::permanent("/calendars/") }),
         )
         .with_state(state)
 }
@@ -1197,9 +1267,32 @@ async fn serve(cfg: &Config) -> Result<()> {
         .await
         .context("connecting to PostgreSQL")?;
     db::migrate(&pool).await.context("running migrations")?;
+    let crypto = calendar_auth::Crypto::from_hex_or_base64(cfg.encryption_key.as_deref())
+        .map(std::sync::Arc::new)
+        .inspect_err(|e| tracing::warn!("disabling encrypted secrets: {e}"))
+        .ok();
+    let passkeys = match (&cfg.webauthn_rp_id, &cfg.webauthn_origin) {
+        (Some(rp_id), Some(origin)) => calendar_auth::webauthn::PasskeyManager::new(rp_id, origin)
+            .map(|w| std::sync::Arc::new(mfa::PasskeyStore::new(w)))
+            .inspect_err(|e| tracing::warn!("disabling WebAuthn: {e}"))
+            .ok(),
+        _ => {
+            tracing::info!("WebAuthn disabled: WEBAUTHN_RP_ID/WEBAUTHN_ORIGIN not set");
+            None
+        }
+    };
+    let dav = Some(std::sync::Arc::new(
+        dav_server::DavHandler::builder()
+            .filesystem(Box::new(calendar_caldav::PgDavFs { pool: pool.clone() }))
+            .principal("/calendars/")
+            .build_handler(),
+    ));
     let app = build_router(AppState {
         pool,
         session_ttl: cfg.session_ttl,
+        crypto,
+        passkeys,
+        dav,
     });
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await

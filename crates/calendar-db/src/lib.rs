@@ -1,5 +1,11 @@
 //! PostgreSQL data layer: connection, migrations and repositories.
 
+pub mod auth_ext;
+pub mod ics_upsert;
+pub mod jobs;
+pub mod search;
+pub mod sharing;
+
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -1002,7 +1008,7 @@ pub async fn list_attendees(pool: &PgPool, event_id: Uuid) -> Result<Vec<Attende
     .map_err(Into::into)
 }
 
-fn constant_time_eq_str(a: &str, b: &str) -> bool {
+pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }

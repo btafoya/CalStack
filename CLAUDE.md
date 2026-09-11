@@ -43,6 +43,7 @@ For every meaningful feature:
 10. Inspect failures; fix root causes rather than weakening tests.
 11. Repeat until all required checks pass.
 12. Update documentation/API schema/migrations when behavior changes.
+13. Update codegraph index `codegraph index`
 
 Never declare a feature complete merely because it compiles.
 
