@@ -49,11 +49,20 @@
     $('#rules-link').attr('href', cal ? '/rules?calendar_id=' + cal.id : '/rules');
   }
 
+  // Only render the calendar widget once a calendar is actually selected;
+  // otherwise show a placeholder in its place.
+  function updateCalendarVisibility() {
+    var selected = !!state.currentCalendar;
+    $('#calendar').prop('hidden', !selected);
+    $('#calendar-empty').prop('hidden', selected);
+  }
+
   function selectCalendar(cal) {
     state.currentCalendar = cal;
     $('#cal-list li').removeClass('active');
     $('#cal-list li[data-id="' + cal.id + '"]').addClass('active');
     updateRulesLink();
+    updateCalendarVisibility();
     $('#calendar').bsCalendar('refresh');
   }
 
@@ -68,9 +77,9 @@
   function loadCalendars() {
     return api('GET', '/api/calendars').done(function (list) {
       state.calendars = list;
-      if (!state.currentCalendar && list.length) { state.currentCalendar = list[0]; }
       renderCalList(list);
       updateRulesLink();
+      updateCalendarVisibility();
     });
   }
 
@@ -174,12 +183,26 @@
     return /Z$/.test(text) ? text : text + 'Z';
   }
 
+  // bs-calendar reports a view's range as {start, end} where `end` is the
+  // last VISIBLE day itself (e.g. day view: start === end), not one day
+  // past it. The API takes a half-open [from, to) window, so a bare date
+  // used as-is excludes every event on that last day. Advance it by one
+  // day so the window actually covers it.
+  function toIsoExclusiveEnd(value) {
+    if (value && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      var d = new Date(value + 'T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + 1);
+      return d.toISOString();
+    }
+    return toIso(value);
+  }
+
   function eventsUrl(requestData) {
     var cal = state.currentCalendar;
     if (!cal) { return Promise.resolve([]); }
     var params = new URLSearchParams({
       from: toIso(requestData.fromDate),
-      to: toIso(requestData.toDate),
+      to: toIsoExclusiveEnd(requestData.toDate),
     });
     return fetch('/api/calendars/' + cal.id + '/occurrences?' + params)
       .then(function (r) { return r.json(); })
@@ -538,6 +561,47 @@
     modal('search-modal').show();
   });
 
+  // bs-calendar's day/week hour-axis and "now" indicator render fixed
+  // 24-hour labels with no locale/format option; rewrite them to 12-hour
+  // AM/PM after each render (locale: 'en-US' below covers its other,
+  // toLocaleTimeString-based popups/tooltips).
+  function convertCalendarTimesToAmPm() {
+    var re = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+    $('#calendar').find('*').addBack().contents().each(function () {
+      if (this.nodeType !== 3) { return; }
+      var text = this.nodeValue;
+      var trimmed = text.trim();
+      var m = re.exec(trimmed);
+      if (!m) { return; }
+      var h = parseInt(m[1], 10);
+      var suffix = h >= 12 ? 'PM' : 'AM';
+      var h12 = h % 12 || 12;
+      this.nodeValue = text.replace(trimmed, h12 + ':' + m[2] + ' ' + suffix);
+    });
+  }
+
+  // The "current time" indicator re-renders on its own timer, independent
+  // of onAfterLoad, so a one-shot hook misses it. A MutationObserver catches
+  // every render path uniformly; the regex above only matches bare 24h
+  // text, so re-running it against already-converted text is a no-op
+  // (no infinite loop from observing our own writes).
+  var amPmObserverStarted = false;
+  function startAmPmObserver() {
+    if (amPmObserverStarted) { return; }
+    var el = document.getElementById('calendar');
+    if (!el || !window.MutationObserver) { return; }
+    amPmObserverStarted = true;
+    var scheduled = false;
+    new MutationObserver(function () {
+      if (scheduled) { return; }
+      scheduled = true;
+      requestAnimationFrame(function () {
+        scheduled = false;
+        convertCalendarTimesToAmPm();
+      });
+    }).observe(el, { childList: true, subtree: true, characterData: true });
+  }
+
   // ============ init ============
   $(function () {
     if (!window.jQuery) { return; }
@@ -551,6 +615,9 @@
       $('#calendar').bsCalendar({
         url: function (requestData) { return eventsUrl(requestData); },
         startView: 'week',
+        locale: 'en-US',
+        showTasks: false,
+        onAfterLoad: convertCalendarTimesToAmPm,
         onAdd: function (data) {
           openEventModal('create', {
             start: partToLocalInput(data && data.start, '09:00'),
@@ -571,6 +638,7 @@
           }
         },
       });
+      startAmPmObserver();
     });
 
     $('#logout-btn').on('click', function () {
