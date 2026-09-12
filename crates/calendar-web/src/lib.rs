@@ -87,6 +87,26 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "js/swagger-ui-bundle.js",
+        asset!("js/swagger-ui-bundle.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "js/swagger-ui-bundle.js.LICENSE.txt",
+        asset!("js/swagger-ui-bundle.js.LICENSE.txt"),
+        "text/plain; charset=utf-8",
+    ),
+    (
+        "css/swagger-ui.css",
+        asset!("css/swagger-ui.css"),
+        "text/css; charset=utf-8",
+    ),
+    (
+        "css/swagger-ui.css.map",
+        asset!("css/swagger-ui.css.map"),
+        "application/json",
+    ),
+    (
         "css/summernote-bs5.min.css",
         asset!("css/summernote-bs5.min.css"),
         "text/css; charset=utf-8",
@@ -631,6 +651,38 @@ const CREDENTIALS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/credentials.js"></script>
 </body></html>"#;
 
+const SWAGGER_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar — API docs</title>
+<link rel="stylesheet" href="/assets/css/swagger-ui.css">
+<style>body{margin:0}.topbar{display:none}</style>
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="/assets/js/swagger-ui-bundle.js"></script>
+<script>
+SwaggerUIBundle({
+  url: '/api/openapi.json',
+  dom_id: '#swagger-ui',
+  deepLinking: true,
+  tryItOutEnabled: true,
+});
+</script>
+</body></html>"#;
+
+async fn swagger_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        SWAGGER_PAGE,
+    )
+}
+
 async fn credentials_page() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -672,5 +724,6 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
         .route("/admin", axum::routing::get(admin_page))
         .route("/providers", axum::routing::get(providers_page))
         .route("/credentials", axum::routing::get(credentials_page))
+        .route("/docs", axum::routing::get(swagger_page))
         .route("/assets/{*path}", axum::routing::get(assets))
 }

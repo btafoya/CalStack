@@ -165,7 +165,7 @@ The response's `password` field is shown once; use it as the CalDAV Basic-auth p
 
 ### API
 
-The full OpenAPI 3.1 document is served live at `/api/openapi.json` — point Swagger UI, Redoc, or any codegen tool at it directly.
+The full OpenAPI 3.1 document is served live at `/api/openapi.json` — point Swagger UI, Redoc, or any codegen tool at it directly. A vendored Swagger UI (no CDN) is served at `/docs`, wired to that same JSON.
 
 Quick start:
 
