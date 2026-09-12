@@ -2,7 +2,7 @@
 //! simple trigger → optional conditions → actions engine, executed inline on
 //! event mutations, with executions recorded for the audit trail.
 
-use crate::{AppError, AppState, require_capability, require_csrf, resolve_auth};
+use crate::{AppError, AppState, require_admin, require_capability, require_csrf, resolve_auth};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -172,6 +172,7 @@ async fn create_provider(
     Json(body): Json<ProviderBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     if calendar_notify::Provider::from_db_str(&body.kind).is_none() {
         return Err(AppError::bad_request("unknown provider kind"));
@@ -206,6 +207,7 @@ async fn list_providers(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -235,6 +237,7 @@ async fn delete_provider(
     Path(provider_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     sqlx::query("DELETE FROM notification_providers WHERE id = $1 AND tenant_id = $2")
