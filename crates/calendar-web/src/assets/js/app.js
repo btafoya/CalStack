@@ -778,8 +778,8 @@
     $('#ev-desc').summernote({ height: 150 });
 
     api('GET', '/api/auth/me').done(function (user) {
-      // Providers/Credentials/Admin are admin-only (pages redirect, APIs 403).
-      if (user.is_admin) { $('#admin-nav-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
+      // Rules/Providers/Credentials/Admin are admin-only (pages redirect, APIs 403).
+      if (user.is_admin) { $('#admin-nav-link, #rules-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
     });
     loadSubscriptions();
     loadCalendars();

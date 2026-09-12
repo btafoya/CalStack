@@ -266,6 +266,7 @@ async fn create_rule(
     Json(body): Json<RuleBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     if let Some(calendar_id) = body.calendar_id {
         require_capability(&pool, calendar_id, auth.user.id, CalendarCapability::Owner).await?;
@@ -301,6 +302,7 @@ async fn list_rules(
     Query(query): Query<RulesQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     // A rule with calendar_id NULL applies tenant-wide (all calendars).
     let rows: Vec<RuleListRow> = sqlx::query_as(
@@ -335,6 +337,7 @@ async fn update_rule(
     Json(body): Json<RuleUpdateBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     sqlx::query("UPDATE rules SET enabled = $1 WHERE id = $2 AND tenant_id = $3")
@@ -353,6 +356,7 @@ async fn delete_rule(
     Path(rule_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     sqlx::query("DELETE FROM rules WHERE id = $1 AND tenant_id = $2")

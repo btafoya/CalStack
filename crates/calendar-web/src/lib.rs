@@ -232,7 +232,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
   <div class="ms-auto d-flex gap-2">
     <button id="search-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-search"></i> Search</button>
-    <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules"><i class="bi bi-sliders"></i> Rules</a>
+    <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules" hidden><i class="bi bi-sliders"></i> Rules</a>
     <a id="providers-nav-link" class="btn btn-outline-secondary btn-sm" href="/providers" hidden><i class="bi bi-bell"></i> Providers</a>
     <a id="credentials-nav-link" class="btn btn-outline-secondary btn-sm" href="/credentials" hidden><i class="bi bi-key"></i> Credentials</a>
     <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
