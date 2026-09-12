@@ -28,8 +28,25 @@
     return api('GET', '/api/admin/users').done(renderUsers);
   }
 
+  function renderAudit(rows) {
+    var $rows = $('#audit-rows').empty();
+    rows.forEach(function (r) {
+      $('<tr>')
+        .append($('<td>').text(r.created_at))
+        .append($('<td>').text(r.action))
+        .append($('<td>').text(r.object_type))
+        .append($('<td>').text(r.change_summary || ''))
+        .appendTo($rows);
+    });
+  }
+
+  function loadAudit() {
+    return api('GET', '/api/audit').done(renderAudit);
+  }
+
   $(function () {
     loadUsers();
+    loadAudit();
     $('#user-form').on('submit', function (ev) {
       ev.preventDefault();
       api('POST', '/api/admin/users', {

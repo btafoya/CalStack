@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{CalendarRow, DbError, EventRow};
+use super::{DbError, EventRow};
 
 // ============ public shares ============
 
@@ -109,10 +109,13 @@ pub struct SubscriptionRow {
 }
 
 /// A subscription plus the underlying share and calendar, for listing.
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SubscriptionView {
-    pub subscription: SubscriptionRow,
-    pub share: ShareRow,
-    pub calendar: CalendarRow,
+    pub id: Uuid,
+    pub color: Option<String>,
+    pub allows_caldav: bool,
+    pub calendar_name: String,
+    pub calendar_slug: String,
 }
 
 pub async fn create_subscription(
@@ -153,21 +156,18 @@ pub async fn delete_subscription(
 }
 
 /// All subscriptions for a user whose share is still live.
+///
+/// Columns are selected explicitly (not `s.*, sh.*, c.*`): subscriptions,
+/// public_shares, and calendars each have an `id` and `created_at` column,
+/// and sqlx resolves same-named columns by last occurrence, so a wildcard
+/// join here silently returns the calendar's id for every row instead of
+/// the subscription's.
 pub async fn list_subscriptions(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<Vec<SubscriptionView>, DbError> {
-    #[derive(sqlx::FromRow)]
-    struct Joined {
-        #[sqlx(flatten)]
-        subscription: SubscriptionRow,
-        #[sqlx(flatten)]
-        share: ShareRow,
-        #[sqlx(flatten)]
-        calendar: CalendarRow,
-    }
-    let rows = sqlx::query_as::<_, Joined>(
-        "SELECT s.*, sh.*, c.*
+    sqlx::query_as::<_, SubscriptionView>(
+        "SELECT s.id, s.color, sh.allows_caldav, c.name AS calendar_name, c.slug AS calendar_slug
          FROM subscriptions s
          JOIN public_shares sh ON sh.id = s.share_id AND sh.revoked_at IS NULL
              AND (sh.expires_at IS NULL OR sh.expires_at > now())
@@ -177,15 +177,8 @@ pub async fn list_subscriptions(
     )
     .bind(user_id)
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| SubscriptionView {
-            subscription: r.subscription,
-            share: r.share,
-            calendar: r.calendar,
-        })
-        .collect())
+    .await
+    .map_err(Into::into)
 }
 
 // ============ public feed content ============

@@ -123,11 +123,11 @@ async fn list_subscriptions(
         views
             .iter()
             .map(|v| json!({
-                "id": v.subscription.id,
-                "calendar_name": v.calendar.name,
-                "calendar_slug": v.calendar.slug,
-                "color": v.subscription.color,
-                "allows_caldav": v.share.allows_caldav,
+                "id": v.id,
+                "calendar_name": v.calendar_name,
+                "calendar_slug": v.calendar_slug,
+                "color": v.color,
+                "allows_caldav": v.allows_caldav,
             }))
             .collect::<Vec<_>>()
     )))

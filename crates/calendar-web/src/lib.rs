@@ -81,6 +81,31 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         asset!("js/providers.js"),
         "text/javascript; charset=utf-8",
     ),
+    (
+        "css/summernote-bs5.min.css",
+        asset!("css/summernote-bs5.min.css"),
+        "text/css; charset=utf-8",
+    ),
+    (
+        "css/font/summernote.woff2",
+        asset!("css/font/summernote.woff2"),
+        "font/woff2",
+    ),
+    (
+        "css/font/summernote.woff",
+        asset!("css/font/summernote.woff"),
+        "font/woff",
+    ),
+    (
+        "css/font/summernote.ttf",
+        asset!("css/font/summernote.ttf"),
+        "font/ttf",
+    ),
+    (
+        "js/summernote-bs5.min.js",
+        asset!("js/summernote-bs5.min.js"),
+        "text/javascript; charset=utf-8",
+    ),
 ];
 
 async fn assets(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
@@ -169,11 +194,13 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <title>Calendar</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/summernote-bs5.min.css">
 </head>
 <body class="bg-body-tertiary">
 <nav class="navbar bg-body border-bottom px-3">
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
   <div class="ms-auto d-flex gap-2">
+    <button id="search-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-search"></i> Search</button>
     <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules"><i class="bi bi-sliders"></i> Rules</a>
     <a class="btn btn-outline-secondary btn-sm" href="/providers"><i class="bi bi-bell"></i> Providers</a>
     <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
@@ -189,6 +216,14 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
         <button id="add-cal-btn" class="btn btn-sm btn-outline-primary" type="button" aria-label="Add calendar">+</button>
       </div>
       <ul id="cal-list" class="list-group list-group-flush"></ul>
+      <div class="d-flex justify-content-between align-items-center mb-2 mt-4">
+        <span class="fw-semibold">Subscriptions</span>
+      </div>
+      <div class="input-group input-group-sm mb-2">
+        <input id="sub-token" class="form-control" placeholder="Share token">
+        <button id="sub-add-btn" class="btn btn-outline-primary" type="button">Add</button>
+      </div>
+      <ul id="sub-list" class="list-group list-group-flush small"></ul>
     </aside>
     <main class="col-md-9 col-lg-10 p-3">
       <div id="calendar"></div>
@@ -207,8 +242,13 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
         <input class="form-control" id="ev-start" type="datetime-local" required></div>
       <div class="col"><label class="form-label" for="ev-end">End</label>
         <input class="form-control" id="ev-end" type="datetime-local" required></div></div>
-      <div class="mb-3"><label class="form-label" for="ev-desc">Rich description (paste)</label>
-        <div id="ev-desc" class="form-control" contenteditable="true" style="min-height:90px"></div></div>
+      <div class="mb-3"><label class="form-label" for="ev-desc">Description</label>
+        <div id="ev-desc"></div></div>
+      <div class="mb-3" id="ev-attachments-section" hidden>
+        <label class="form-label">Attachments</label>
+        <ul id="ev-attachments" class="list-group list-group-flush mb-2"></ul>
+        <input type="file" id="ev-attach-file" class="form-control form-control-sm">
+      </div>
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-outline-danger me-auto" id="ev-delete" hidden>Delete</button>
@@ -239,11 +279,25 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
     </div>
   </div></div>
 </div>
+<div class="modal fade" id="search-modal" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5">Search</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+      <div class="input-group mb-3">
+        <input id="search-q" class="form-control" placeholder="Search events…">
+        <button id="search-go" class="btn btn-primary" type="button">Search</button>
+      </div>
+      <ul id="search-results" class="list-group"></ul>
+    </div>
+  </div></div>
+</div>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/bs-calendar.min.js"></script>
-<script src="/assets/js/app.js?v=2"></script>
+<script src="/assets/js/summernote-bs5.min.js"></script>
+<script src="/assets/js/app.js?v=6"></script>
 </body></html>"#;
 
 const RULES_PAGE: &str = r#"<!doctype html>
@@ -341,6 +395,11 @@ const ADMIN_PAGE: &str = r#"<!doctype html>
   <table class="table table-sm bg-body">
     <thead><tr><th>Username</th><th>Email</th><th>Admin</th><th>Disabled</th></tr></thead>
     <tbody id="user-rows"></tbody>
+  </table>
+  <h1 class="h4 mb-3 mt-4">Audit log</h1>
+  <table class="table table-sm bg-body">
+    <thead><tr><th>When</th><th>Action</th><th>Object</th><th>Summary</th></tr></thead>
+    <tbody id="audit-rows"></tbody>
   </table>
 </div>
 <script src="/assets/js/jquery.min.js"></script>
