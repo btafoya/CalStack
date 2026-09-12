@@ -263,6 +263,27 @@ async fn token_scope_guard(
     Ok(next.run(req).await)
 }
 
+/// The /admin, /providers and /credentials pages are admin-only. Signed-out
+/// visitors go to /login, signed-in non-admins to /. Their APIs are gated
+/// per handler; this only guards the HTML pages.
+async fn admin_page_guard(
+    State(AppState { pool, .. }): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if matches!(req.uri().path(), "/admin" | "/providers" | "/credentials") {
+        let verdict = match resolve_auth(&pool, req.headers()).await {
+            Ok(auth) if auth.user.is_admin => None,
+            Ok(_) => Some("/"),
+            Err(_) => Some("/login"),
+        };
+        if let Some(dest) = verdict {
+            return axum::response::Redirect::to(dest).into_response();
+        }
+    }
+    next.run(req).await
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -475,6 +496,7 @@ async fn create_token(
     Json(body): Json<TokenBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     let scopes = body.scopes.unwrap_or_default();
     if scopes
@@ -510,6 +532,7 @@ async fn list_tokens(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     let tokens = db::list_api_tokens(&pool, auth.user.id).await?;
     Ok(Json(serde_json::json!(tokens
         .iter()
@@ -523,6 +546,7 @@ async fn revoke_token(
     Path(token_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     db::revoke_api_token(&pool, auth.user.id, token_id).await?;
     Ok(Json(serde_json::json!({"ok": true})))
@@ -539,6 +563,7 @@ async fn create_app_password(
     Json(body): Json<AppPasswordBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     let password = calendar_auth::generate_secret();
     let hash =
@@ -563,6 +588,7 @@ async fn list_app_passwords(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     let rows = db::list_app_passwords(&pool, auth.user.id).await?;
     Ok(Json(serde_json::json!(rows
         .iter()
@@ -576,6 +602,7 @@ async fn revoke_app_password(
     Path(password_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     db::revoke_app_password(&pool, auth.user.id, password_id).await?;
     Ok(Json(serde_json::json!({"ok": true})))
@@ -818,6 +845,15 @@ async fn require_capability(
         return Err(AppError::Forbidden);
     }
     Ok(db::get_calendar(pool, calendar_id).await?)
+}
+
+/// Admin gate: 403 for signed-in non-admins.
+pub(crate) fn require_admin(auth: &Auth) -> Result<(), AppError> {
+    if auth.user.is_admin {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
 }
 
 async fn create_calendar(
@@ -1622,6 +1658,10 @@ fn build_router(state: AppState) -> Router {
             "/.well-known/caldav",
             get(|| async { axum::response::Redirect::permanent("/calendars/") }),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_page_guard,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             token_scope_guard,

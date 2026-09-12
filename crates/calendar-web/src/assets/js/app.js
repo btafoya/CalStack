@@ -778,7 +778,8 @@
     $('#ev-desc').summernote({ height: 150 });
 
     api('GET', '/api/auth/me').done(function (user) {
-      if (user.is_admin) { $('#admin-nav-link').prop('hidden', false); }
+      // Providers/Credentials/Admin are admin-only (pages redirect, APIs 403).
+      if (user.is_admin) { $('#admin-nav-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
     });
     loadSubscriptions();
     loadCalendars();

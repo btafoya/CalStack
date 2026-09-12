@@ -233,8 +233,8 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
   <div class="ms-auto d-flex gap-2">
     <button id="search-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-search"></i> Search</button>
     <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules"><i class="bi bi-sliders"></i> Rules</a>
-    <a class="btn btn-outline-secondary btn-sm" href="/providers"><i class="bi bi-bell"></i> Providers</a>
-    <a class="btn btn-outline-secondary btn-sm" href="/credentials"><i class="bi bi-key"></i> Credentials</a>
+    <a id="providers-nav-link" class="btn btn-outline-secondary btn-sm" href="/providers" hidden><i class="bi bi-bell"></i> Providers</a>
+    <a id="credentials-nav-link" class="btn btn-outline-secondary btn-sm" href="/credentials" hidden><i class="bi bi-key"></i> Credentials</a>
     <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
     <button id="share-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-share"></i> Share</button>
     <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
