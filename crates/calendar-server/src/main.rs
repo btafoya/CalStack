@@ -263,15 +263,18 @@ async fn token_scope_guard(
     Ok(next.run(req).await)
 }
 
-/// The /admin, /providers and /credentials pages are admin-only. Signed-out
-/// visitors go to /login, signed-in non-admins to /. Their APIs are gated
-/// per handler; this only guards the HTML pages.
+/// The /admin, /rules, /providers and /credentials pages are admin-only.
+/// Signed-out visitors go to /login, signed-in non-admins to /. Their APIs
+/// are gated per handler; this only guards the HTML pages.
 async fn admin_page_guard(
     State(AppState { pool, .. }): State<AppState>,
     req: Request,
     next: Next,
 ) -> Response {
-    if matches!(req.uri().path(), "/admin" | "/providers" | "/credentials") {
+    if matches!(
+        req.uri().path(),
+        "/admin" | "/rules" | "/providers" | "/credentials"
+    ) {
         let verdict = match resolve_auth(&pool, req.headers()).await {
             Ok(auth) if auth.user.is_admin => None,
             Ok(_) => Some("/"),
