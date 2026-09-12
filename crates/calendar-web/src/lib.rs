@@ -195,9 +195,15 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/summernote-bs5.min.css">
+<style>
+  /* ponytail: bs-calendar's own left-hand nav drawer (button[data-bs-toggle="sidebar"])
+     duplicates our calendars sidebar and slides in on top of it; simplest fix
+     is to not offer the redundant second drawer at all. */
+  #calendar [data-bs-toggle="sidebar"] { display: none !important; }
+</style>
 </head>
-<body class="bg-body-tertiary">
-<nav class="navbar bg-body border-bottom px-3">
+<body class="bg-body-tertiary vh-100 overflow-hidden d-flex flex-column">
+<nav class="navbar bg-body border-bottom px-3 flex-shrink-0">
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
   <div class="ms-auto d-flex gap-2">
     <button id="search-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-search"></i> Search</button>
@@ -208,9 +214,9 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
     <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
   </div>
 </nav>
-<div class="container-fluid">
-  <div class="row">
-    <aside class="col-md-3 col-lg-2 p-3 border-end">
+<div class="container-fluid flex-grow-1 overflow-hidden">
+  <div class="row h-100">
+    <aside class="col-md-3 col-lg-2 p-3 border-end h-100 overflow-auto">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <span class="fw-semibold">Calendars</span>
         <button id="add-cal-btn" class="btn btn-sm btn-outline-primary" type="button" aria-label="Add calendar">+</button>
@@ -225,8 +231,9 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
       </div>
       <ul id="sub-list" class="list-group list-group-flush small"></ul>
     </aside>
-    <main class="col-md-9 col-lg-10 p-3">
-      <div id="calendar"></div>
+    <main class="col-md-9 col-lg-10 p-3 h-100 overflow-auto">
+      <div id="calendar" hidden></div>
+      <p id="calendar-empty" class="text-body-secondary text-center mt-5">Select a calendar to view its events.</p>
     </main>
   </div>
 </div>
