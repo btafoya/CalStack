@@ -51,3 +51,7 @@ Recurrence expansion is an own iterator over the RFC 5545 subset (freq/interval/
 ## ADR-013 Rules are optionally calendar-scoped
 
 `rules.calendar_id` is a nullable FK to `calendars`, not a required one: NULL keeps the original ADR-007 tenant-wide behavior, a value scopes the rule to one calendar. Creating a calendar-scoped rule requires Owner capability on that calendar. `run_rules` matches a calendar's own rules plus every tenant-wide (NULL) rule, so existing global rules keep firing unchanged.
+
+## ADR-014 Place autocomplete is a server-side proxy, never Maps JS
+
+Google Places integration (web UI event form autocomplete) runs entirely server-side: the browser calls authenticated `/api/places/autocomplete` and `/api/places/{place_id}` endpoints, which proxy the Places API (New) REST endpoints using the optional `GOOGLE_MAPS_API_KEY` env var. The key never reaches the browser, the web UI loads no third-party script (the no-CDN rule holds), and unset key means the feature is off with free-text locations unchanged. Structured place data maps onto the existing Google Places-style `locations` model; locations without a provider ID remain fully valid.
