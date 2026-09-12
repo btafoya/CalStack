@@ -282,6 +282,8 @@ Do not build a heavyweight SPA unless required by actual UX needs.
 
 Full OpenAPI CRUD and operations.
 
+The OpenAPI 3.1 document is served at `/api/openapi.json`. A vendored Swagger UI at `/docs` renders it for interactive exploration; both are unauthenticated, like the JSON document itself.
+
 The API is not a thin wrapper around CalDAV. It exposes the normalized domain model directly.
 
 ## 20. Backup
