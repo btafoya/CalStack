@@ -82,6 +82,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "js/categories.js",
+        asset!("js/categories.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "js/admin.js",
         asset!("js/admin.js"),
         "text/javascript; charset=utf-8",
@@ -246,6 +251,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
   <div class="ms-auto d-flex gap-2">
     <button id="search-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-search"></i> Search</button>
+    <a class="btn btn-outline-secondary btn-sm" href="/categories"><i class="bi bi-tags"></i> Categories</a>
     <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules" hidden><i class="bi bi-sliders"></i> Rules</a>
     <a id="providers-nav-link" class="btn btn-outline-secondary btn-sm" href="/providers" hidden><i class="bi bi-bell"></i> Providers</a>
     <a id="credentials-nav-link" class="btn btn-outline-secondary btn-sm" href="/credentials" hidden><i class="bi bi-key"></i> Credentials</a>
@@ -335,8 +341,8 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
             <option value="TRANSPARENT">Free</option>
           </select></div>
       </div>
-      <div class="mb-3"><label class="form-label" for="ev-categories">Categories (comma-separated)</label>
-        <input class="form-control" id="ev-categories"></div>
+      <div class="mb-3"><label class="form-label">Categories</label>
+        <div id="ev-categories-box"></div></div>
       <div class="row mb-3">
         <div class="col"><label class="form-label" for="ev-repeat">Repeat</label>
           <select class="form-select" id="ev-repeat">
@@ -486,6 +492,56 @@ const RULES_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/rules.js"></script>
 </body></html>"#;
 
+const CATEGORIES_PAGE: &str = r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar — Categories</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<script src="/assets/js/theme.js"></script>
+</head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom px-3">
+  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
+  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
+    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
+</nav>
+<div class="container p-3">
+  <div class="d-flex align-items-center gap-2 mb-1">
+    <h1 class="h4 mb-0">Categories</h1>
+    <select class="form-select form-select-sm w-auto" id="cat-calendar-select">
+      <option value="">All calendars</option>
+    </select>
+  </div>
+  <p id="cat-scope-note" class="text-body-secondary small"></p>
+  <form id="cat-form" class="card p-3 mb-4">
+    <div class="row g-2 align-items-end">
+      <div class="col"><label class="form-label" for="cat-name">Name</label>
+        <input class="form-control" id="cat-name" required></div>
+      <div class="col"><label class="form-label" for="cat-slug">Slug</label>
+        <input class="form-control" id="cat-slug" pattern="[a-z0-9][a-z0-9-]*" required></div>
+      <div class="col-auto"><label class="form-label" for="cat-color">Color</label>
+        <select class="form-select" id="cat-color"></select></div>
+      <div class="col-auto form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="cat-global">
+        <label class="form-check-label" for="cat-global">Apply to all calendars</label></div>
+      <div class="col-auto d-flex align-items-end">
+        <button class="btn btn-primary" type="submit">Add category</button></div>
+    </div>
+  </form>
+  <table class="table table-sm bg-body">
+    <thead><tr><th>Preview</th><th>Name</th><th>Slug</th><th>Scope</th><th></th></tr></thead>
+    <tbody id="cat-rows"></tbody>
+  </table>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/categories.js"></script>
+</body></html>"#;
+
 const ADMIN_PAGE: &str = r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
@@ -596,6 +652,17 @@ async fn rules_page() -> impl IntoResponse {
             HeaderValue::from_static("text/html; charset=utf-8"),
         )],
         RULES_PAGE,
+    )
+}
+
+async fn categories_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        CATEGORIES_PAGE,
     )
 }
 
@@ -748,6 +815,7 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
         .route("/", axum::routing::get(index))
         .route("/login", axum::routing::get(login_page))
         .route("/rules", axum::routing::get(rules_page))
+        .route("/categories", axum::routing::get(categories_page))
         .route("/admin", axum::routing::get(admin_page))
         .route("/providers", axum::routing::get(providers_page))
         .route("/credentials", axum::routing::get(credentials_page))

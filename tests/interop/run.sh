@@ -167,6 +167,15 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/bob.jar" "$BASE/api/cale
 [ "$CODE" = 404 ] || fail "bob should not see alice's calendar (got $CODE)"
 
 # ============ 3. CalDAV ============
+# App passwords are admin-only since 00a9e13; seed an admin, promote alice,
+# then mint her CalDAV app password.
+DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/caltest" "$BIN" create-admin admin admin@example.com adminpass1 >/dev/null
+register admin admin@example.com adminpass1
+ADMIN_ID=$(curl -s -b "$DATA/admin.jar" "$BASE/api/auth/me" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+ALICE_ID=$(curl -s -b "$DATA/alice.jar" "$BASE/api/auth/me" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+curl -s -b "$DATA/admin.jar" -H "X-CSRF-Token: $(csrf admin)" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/admin/users/$ALICE_ID" -d '{"is_admin":true}' >/dev/null
+
 step "App password Basic auth on CalDAV"
 curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
   -H 'content-type: application/json' -X POST "$BASE/api/auth/app-passwords" \
@@ -277,12 +286,11 @@ curl -s -b "$DATA/alice.jar" "$BASE/api/rules?calendar_id=$CAL" | grep -q '"glob
 curl -s -b "$DATA/alice.jar" "$BASE/api/rules" | grep -q '"cal-r"' && fail "calendar-scoped rule leaked into global-only (unscoped) list"
 curl -s -b "$DATA/alice.jar" "$BASE/api/rules" | grep -q '"global-r"' || fail "global rule missing from unscoped list"
 
-step "Rules: cannot scope a rule to a calendar you do not own"
+step "Rules API is admin-gated: non-admin cannot scope a rule at all (403 from the admin gate)"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/bob.jar" -H "X-CSRF-Token: $(csrf bob)" \
   -H 'content-type: application/json' -X POST "$BASE/api/rules" \
   -d "{\"name\":\"nope\",\"trigger_type\":\"event_created\",\"calendar_id\":\"$CAL\"}")
-# require_capability 404s on no visibility at all (same as calendar reads elsewhere), not 403
-[ "$CODE" = 404 ] || fail "bob should not create a rule on alice's calendar, got $CODE"
+[ "$CODE" = 403 ] || fail "bob should not create a rule on alice's calendar, got $CODE"
 
 step "SMS rule action: skipped (not silently ignored) with no Twilio provider configured"
 SMS_RULE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
@@ -313,18 +321,93 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-To
   -X DELETE "$BASE/api/notification-providers/$PROV_ID")
 [ "$CODE" = 200 ] || fail "delete twilio provider, got $CODE"
 
-step "Web UI: /rules, /admin and /providers pages exist (no longer 404)"
+step "Web UI: /rules, /admin and /providers pages exist (admin-gated since 00a9e13/3275b18)"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/rules")
+[ "$CODE" = 303 ] || fail "anonymous /rules should redirect, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" "$BASE/rules")
 [ "$CODE" = 200 ] || fail "/rules page, got $CODE"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" "$BASE/admin")
 [ "$CODE" = 200 ] || fail "/admin page, got $CODE"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/providers")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" "$BASE/providers")
 [ "$CODE" = 200 ] || fail "/providers page, got $CODE"
+
+# Alice stays admin through the rules/providers sections (both admin-gated
+# since 3275b18/00a9e13); demote her again so the categories and section-6
+# checks exercise the non-admin path. The tenant-wide category must be minted
+# while she is still admin — categories live in the creator's tenant.
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/categories" -d '{"slug":"holiday","name":"Holiday","color":"green"}' >/dev/null
+curl -s -b "$DATA/admin.jar" -H "X-CSRF-Token: $(csrf admin)" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/admin/users/$ALICE_ID" -d '{"is_admin":false}' >/dev/null
+
+# ============ 5b. categories ============
+step "Categories: create calendar-scoped row as owner, enriches event responses"
+CAT=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/categories" \
+  -d "{\"calendar_id\":\"$CAL\",\"slug\":\"client\",\"name\":\"Client work\",\"color\":\"blue\"}")
+CAT_ID=$(echo "$CAT" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+[ -n "$CAT_ID" ] || fail "category create failed: $CAT"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/events" \
+  -d '{"summary":"Categorized event","categories":["client","unregistered"],"starts_at":"2026-09-23T10:00:00Z","ends_at":"2026-09-23T11:00:00Z"}' >/dev/null
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/events?from=2026-09-01T00:00:00Z&to=2026-10-01T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+ev = next(e for e in rows if e.get('summary') == 'Categorized event')
+assert ev['category_details'] == [{'slug': 'client', 'name': 'Client work', 'color': 'blue'}], ev['category_details']
+assert ev['categories'] == ['client', 'unregistered'], ev['categories']
+" || fail "category_details missing from event list"
+
+step "Rename cascades: events re-tagged in the row's scope"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/categories/$CAT_ID" -d '{"slug":"customers"}' >/dev/null
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/events?from=2026-09-01T00:00:00Z&to=2026-10-01T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+ev = next(e for e in rows if e.get('summary') == 'Categorized event')
+assert 'client' not in ev['categories'] and 'customers' in ev['categories'], ev['categories']
+assert ev['category_details'] == [{'slug': 'customers', 'name': 'Client work', 'color': 'blue'}], ev['category_details']
+" || fail "rename did not cascade to events"
+
+step "Category delete leaves event strings intact"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -X DELETE "$BASE/api/categories/$CAT_ID" -o /dev/null
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/events?from=2026-09-01T00:00:00Z&to=2026-10-01T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+ev = next(e for e in rows if e.get('summary') == 'Categorized event')
+assert 'customers' in ev['categories'] and ev.get('category_details') == [], ev
+" || fail "delete unexpectedly changed event data"
+
+step "Tenant-wide category create requires admin; bad color rejected"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/bob.jar" -H "X-CSRF-Token: $(csrf bob)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/categories" -d '{"slug":"x","name":"X","color":"blue"}')
+[ "$CODE" = 403 ] || fail "non-admin tenant-wide create should 403, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/categories" \
+  -d "{\"calendar_id\":\"$CAL\",\"slug\":\"x\",\"name\":\"X\",\"color\":\"#ff0000\"}")
+[ "$CODE" = 400 ] || fail "off-palette color should 400, got $CODE"
+
+step "Tenant-wide categories show in calendar-scoped lists; PATCH carries categories"
+# 'holiday' was minted tenant-wide while alice was admin (pre-demote)
+TENANT_CAT=$(curl -s -b "$DATA/alice.jar" "$BASE/api/categories?calendar_id=$CAL" \
+  | python3 -c "import json,sys;print([c['slug'] for c in json.load(sys.stdin) if c['slug']=='holiday' and c['calendar_id'] is None][0])")
+[ "$TENANT_CAT" = "holiday" ] || fail "tenant-wide category missing from calendar-scoped list"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H "If-Match: $ETAG" \
+  -H 'content-type: application/json' -X PATCH "$BASE/api/events/$EV_ID" \
+  -d '{"summary":"API event","categories":["holiday"]}' \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['categories']==['holiday'], d['categories']" \
+  || fail "PATCH did not apply categories"
+
+step "/categories page exists"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/categories")
+[ "$CODE" = 200 ] || fail "/categories page, got $CODE"
 
 # ============ 6. admin user management ============
 step "create-admin CLI seeds an is_admin user"
-DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/caltest" "$BIN" create-admin admin admin@example.com adminpass1 >/dev/null
-register admin admin@example.com adminpass1 # username already exists; register 409 is ignored, login still works
+register admin admin@example.com adminpass1 # already promoted in section 3; login refreshes the session
 
 step "Non-admin is forbidden from admin API"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" "$BASE/api/admin/users")
