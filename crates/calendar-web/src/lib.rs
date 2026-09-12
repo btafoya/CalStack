@@ -22,6 +22,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "text/css; charset=utf-8",
     ),
     (
+        "css/app.css",
+        asset!("css/app.css"),
+        "text/css; charset=utf-8",
+    ),
+    (
         "css/bootstrap-icons.css",
         asset!("css/bootstrap-icons.css"),
         "text/css; charset=utf-8",
@@ -35,6 +40,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "fonts/bootstrap-icons.woff",
         asset!("fonts/bootstrap-icons.woff"),
         "font/woff",
+    ),
+    (
+        "js/theme.js",
+        asset!("js/theme.js"),
+        "text/javascript; charset=utf-8",
     ),
     (
         "js/bootstrap.bundle.min.js",
@@ -163,6 +173,8 @@ const LOGIN_PAGE: &str = r#"<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Calendar — Sign in</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<script src="/assets/js/theme.js"></script>
 </head>
 <body class="d-flex align-items-center bg-body-tertiary" style="min-height:100vh">
 <div class="container" style="max-width:420px">
@@ -220,6 +232,8 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/summernote-bs5.min.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<script src="/assets/js/theme.js"></script>
 <style>
   /* ponytail: bs-calendar's own left-hand nav drawer (button[data-bs-toggle="sidebar"])
      duplicates our calendars sidebar and slides in on top of it; simplest fix
@@ -238,6 +252,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
     <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
     <button id="share-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-share"></i> Share</button>
     <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
+    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
   </div>
 </nav>
 <div class="container-fluid flex-grow-1 overflow-hidden">
@@ -412,11 +427,14 @@ const RULES_PAGE: &str = r#"<!doctype html>
 <title>Calendar — Rules</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
 <nav class="navbar bg-body border-bottom px-3">
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
+  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
+    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
 </nav>
 <div class="container p-3">
   <div class="d-flex align-items-center gap-2 mb-1">
@@ -475,11 +493,14 @@ const ADMIN_PAGE: &str = r#"<!doctype html>
 <title>Calendar — Admin</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
 <nav class="navbar bg-body border-bottom px-3">
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
+  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
+    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
 </nav>
 <div class="container p-3">
   <h1 class="h4 mb-3">Users</h1>
@@ -520,11 +541,14 @@ const PROVIDERS_PAGE: &str = r#"<!doctype html>
 <title>Calendar — Providers</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
 <nav class="navbar bg-body border-bottom px-3">
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
+  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
+    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
 </nav>
 <div class="container p-3">
   <h1 class="h4 mb-3">Notification providers</h1>
@@ -593,11 +617,14 @@ const CREDENTIALS_PAGE: &str = r#"<!doctype html>
 <title>Calendar — Credentials</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
 <nav class="navbar bg-body border-bottom px-3">
   <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
+  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
+    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
 </nav>
 <div class="container p-3">
   <div id="secret-banner" class="alert alert-warning d-none" role="alert">
