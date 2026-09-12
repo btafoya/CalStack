@@ -609,6 +609,93 @@ pub async fn revoke_app_password(
     Ok(())
 }
 
+// ============ locations ============
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct LocationRow {
+    pub id: Uuid,
+    pub provider: Option<String>,
+    pub provider_place_id: Option<String>,
+    pub display_name: Option<String>,
+    pub formatted_address: Option<String>,
+    pub street_address: Option<String>,
+    pub locality: Option<String>,
+    pub administrative_area: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub website: Option<String>,
+    pub phone: Option<String>,
+    pub provider_metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct NewLocation {
+    pub provider: Option<String>,
+    pub provider_place_id: Option<String>,
+    pub display_name: Option<String>,
+    pub formatted_address: Option<String>,
+    pub street_address: Option<String>,
+    pub locality: Option<String>,
+    pub administrative_area: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub website: Option<String>,
+    pub phone: Option<String>,
+    pub provider_metadata: Option<serde_json::Value>,
+}
+
+/// Locations are append-only: editing an event's location writes a new row
+/// rather than mutating a shared one, since a location may already be
+/// referenced by other events' history.
+/// ponytail: old rows are never purged; add a sweep if orphan growth matters.
+pub async fn create_location(pool: &PgPool, loc: &NewLocation) -> Result<LocationRow, DbError> {
+    sqlx::query_as::<_, LocationRow>(
+        "INSERT INTO locations (
+            id, provider, provider_place_id, display_name, formatted_address,
+            street_address, locality, administrative_area, postal_code, country,
+            latitude, longitude, website, phone, provider_metadata
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING *",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&loc.provider)
+    .bind(&loc.provider_place_id)
+    .bind(&loc.display_name)
+    .bind(&loc.formatted_address)
+    .bind(&loc.street_address)
+    .bind(&loc.locality)
+    .bind(&loc.administrative_area)
+    .bind(&loc.postal_code)
+    .bind(&loc.country)
+    .bind(loc.latitude)
+    .bind(loc.longitude)
+    .bind(&loc.website)
+    .bind(&loc.phone)
+    .bind(&loc.provider_metadata)
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
+}
+
+pub async fn get_location(pool: &PgPool, id: Uuid) -> Result<Option<LocationRow>, DbError> {
+    sqlx::query_as::<_, LocationRow>("SELECT * FROM locations WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(Into::into)
+}
+
+/// Resolves an event's location for export/display; None when unset or gone.
+pub async fn location_for_event(pool: &PgPool, event: &EventRow) -> Option<LocationRow> {
+    let id = event.location_id?;
+    get_location(pool, id).await.ok().flatten()
+}
+
 // ============ events ============
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -829,11 +916,17 @@ pub struct EventPatch {
     pub url: Option<String>,
     pub starts_at: Option<DateTime<Utc>>,
     pub ends_at: Option<DateTime<Utc>>,
+    pub start_date: Option<chrono::NaiveDate>,
+    pub end_date: Option<chrono::NaiveDate>,
+    pub all_day: Option<bool>,
     pub tzid: Option<String>,
     pub status: Option<String>,
     pub priority: Option<i16>,
     pub class: Option<String>,
     pub transp: Option<String>,
+    pub location_id: Option<Uuid>,
+    /// Some(_) replaces the attendee set entirely; None leaves it untouched.
+    pub attendees: Option<Vec<NewAttendee>>,
 }
 
 /// Updates an event guarded by its ETag. Returns (row, etag); DbError::NotFound
@@ -857,19 +950,41 @@ pub async fn update_event(
     {
         return Err(DbError::Conflict("etag mismatch".into()));
     }
+    // starts_at/start_date (and ends_at/end_date) are mutually exclusive
+    // (CHECK constraint): switching timed <-> all-day must clear the other
+    // column, so these four are resolved here rather than left to COALESCE.
+    let (starts_at, start_date) = if patch.start_date.is_some() {
+        (None, patch.start_date)
+    } else if patch.starts_at.is_some() {
+        (patch.starts_at, None)
+    } else {
+        (current.starts_at, current.start_date)
+    };
+    let (ends_at, end_date) = if patch.end_date.is_some() {
+        (None, patch.end_date)
+    } else if patch.ends_at.is_some() {
+        (patch.ends_at, None)
+    } else {
+        (current.ends_at, current.end_date)
+    };
+    let all_day = patch.all_day.unwrap_or(current.all_day);
     let event = sqlx::query_as::<_, EventRow>(
         "UPDATE events SET
             summary = COALESCE($2, summary),
             description_html = COALESCE($3, description_html),
             description_text = COALESCE($4, description_text),
             url = COALESCE($5, url),
-            starts_at = COALESCE($6, starts_at),
-            ends_at = COALESCE($7, ends_at),
-            tzid = COALESCE($8, tzid),
-            status = COALESCE($9, status),
-            priority = COALESCE($10, priority),
-            class = COALESCE($11, class),
-            transp = COALESCE($12, transp),
+            starts_at = $6,
+            ends_at = $7,
+            start_date = $8,
+            end_date = $9,
+            all_day = $10,
+            tzid = COALESCE($11, tzid),
+            status = COALESCE($12, status),
+            priority = COALESCE($13, priority),
+            class = COALESCE($14, class),
+            transp = COALESCE($15, transp),
+            location_id = COALESCE($16, location_id),
             sequence = sequence + 1,
             updated_at = now()
          WHERE id = $1
@@ -880,15 +995,44 @@ pub async fn update_event(
     .bind(&patch.description_html)
     .bind(&patch.description_text)
     .bind(&patch.url)
-    .bind(patch.starts_at)
-    .bind(patch.ends_at)
+    .bind(starts_at)
+    .bind(ends_at)
+    .bind(start_date)
+    .bind(end_date)
+    .bind(all_day)
     .bind(&patch.tzid)
     .bind(&patch.status)
     .bind(patch.priority)
     .bind(&patch.class)
     .bind(&patch.transp)
+    .bind(patch.location_id)
     .fetch_one(&mut *tx)
     .await?;
+    if let Some(attendees) = &patch.attendees {
+        sqlx::query("DELETE FROM event_attendees WHERE event_id = $1")
+            .bind(event.id)
+            .execute(&mut *tx)
+            .await?;
+        for a in attendees {
+            sqlx::query(
+                "INSERT INTO event_attendees
+                    (id, event_id, user_id, email, display_name, telephone, role, partstat, rsvp)
+                 VALUES ($1, $2, $3, $4, $5, $6,
+                    COALESCE($7, 'REQ-PARTICIPANT'), COALESCE($8, 'NEEDS-ACTION'), $9)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(event.id)
+            .bind(a.user_id)
+            .bind(&a.email)
+            .bind(&a.display_name)
+            .bind(&a.telephone)
+            .bind(a.role.as_deref())
+            .bind(a.partstat.as_deref())
+            .bind(a.rsvp)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
     let new_etag = etag_for(event.calendar_id, event.sequence, event.updated_at);
     sqlx::query("UPDATE events SET etag = $2 WHERE id = $1")
         .bind(event.id)

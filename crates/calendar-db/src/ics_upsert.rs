@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::{DbError, EventRow};
+use super::{DbError, EventRow, NewLocation};
 
 /// Normalized event fields for the upsert path. Mirrors the events table; the
 /// mapping from RFC 5545 properties lives in calendar-caldav.
@@ -26,6 +26,7 @@ pub struct IcsEventUpsert {
     pub description_text: Option<String>,
     pub description_html: Option<String>,
     pub url: Option<String>,
+    pub location_text: Option<String>,
     pub status: Option<String>,
     pub priority: Option<i16>,
     pub class: Option<String>,
@@ -49,6 +50,29 @@ pub struct IcsAttendee {
     pub rsvp: Option<bool>,
 }
 
+/// Resolves a parsed LOCATION property to a location row id: creates a new
+/// row (locations are append-only, matching the web UI's write path) when
+/// text is present, or None when the resource carries no LOCATION.
+async fn resolve_location(
+    pool: &sqlx::PgPool,
+    location_text: &Option<String>,
+) -> Result<Option<Uuid>, DbError> {
+    match location_text {
+        Some(text) if !text.is_empty() => {
+            let loc = super::create_location(
+                pool,
+                &NewLocation {
+                    display_name: Some(text.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            Ok(Some(loc.id))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Creates the event row. When `resource_id` is given (the CalDAV URL's
 /// uuid) the row id matches the URL; conflicts on (calendar, uid,
 /// occurrence) surface as DbError::Conflict.
@@ -61,6 +85,7 @@ pub async fn create_ics_event_inner(
     resource_id: Option<Uuid>,
     data: &IcsEventUpsert,
 ) -> Result<EventRow, DbError> {
+    let location_id = resolve_location(pool, &data.location_text).await?;
     let mut tx = pool.begin().await?;
     let event = sqlx::query_as::<_, EventRow>(
         "INSERT INTO events (
@@ -68,15 +93,15 @@ pub async fn create_ics_event_inner(
             starts_at, ends_at, start_date, end_date, duration, tzid, all_day,
             rrule, rdate, exdate,
             summary, description_html, description_text, url,
-            status, priority, class, transp, categories,
+            status, priority, class, transp, categories, location_id,
             organizer_user_id, organizer_email, organizer_name, created_by
          ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $9, $10, $11, $12,
             $13, $14, $15,
             $16, $17, $18, $19,
-            $20, $21, $22, $23, $24,
-            $25, $26, $27, $28, $29
+            $20, $21, $22, $23, $24, $25,
+            $26, $27, $28, $29, $30
          )
          RETURNING *",
     )
@@ -112,6 +137,7 @@ pub async fn create_ics_event_inner(
     .bind(&data.class)
     .bind(&data.transp)
     .bind(&data.categories)
+    .bind(location_id)
     .bind(organizer_user_id)
     .bind(&data.organizer_email)
     .bind(&data.organizer_name)
@@ -173,6 +199,10 @@ pub async fn update_ics_event(
     {
         return Err(DbError::Conflict("etag mismatch".into()));
     }
+    // A PUT replaces the whole resource, so an absent LOCATION clears it
+    // (unlike the partial-patch API, which leaves fields it doesn't mention
+    // untouched).
+    let location_id = resolve_location(pool, &data.location_text).await?;
     // Recurring masters: RRULE updates are fine; exceptions never carry RRULE.
     let event = sqlx::query_as::<_, EventRow>(
         "UPDATE events SET
@@ -184,6 +214,7 @@ pub async fn update_ics_event(
             status = $17, priority = $18, class = $19, transp = $20, categories = $21,
             organizer_email = $22, organizer_name = $23,
             sequence = GREATEST($24, sequence) + 1,
+            location_id = $25,
             updated_at = now()
          WHERE id = $1
          RETURNING *",
@@ -219,6 +250,7 @@ pub async fn update_ics_event(
     .bind(data.organizer_email.clone())
     .bind(&data.organizer_name)
     .bind(data.sequence.unwrap_or(0))
+    .bind(location_id)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query("DELETE FROM event_attendees WHERE event_id = $1")

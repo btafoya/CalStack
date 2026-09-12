@@ -426,6 +426,20 @@ pub fn openapi_document() -> serde_json::Value {
                     "starts_at": {"type": ["string", "null"], "format": "date-time"},
                     "start_date": {"type": ["string", "null"], "format": "date"},
                     "all_day": {"type": "boolean"},
+                    "location": {"$ref": "#/components/schemas/Location"},
+                    "attendees": {"type": "array", "items": {"type": "object", "properties": {
+                        "email": {"type": "string"}, "display_name": {"type": ["string", "null"]},
+                        "role": {"type": "string"}, "partstat": {"type": "string"},
+                        "rsvp": {"type": ["boolean", "null"]},
+                    }}},
+                }},
+                "Location": {"type": ["object", "null"], "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "provider": {"type": ["string", "null"]},
+                    "display_name": {"type": ["string", "null"]},
+                    "formatted_address": {"type": ["string", "null"]},
+                    "latitude": {"type": ["number", "null"]}, "longitude": {"type": ["number", "null"]},
+                    "website": {"type": ["string", "null"]}, "phone": {"type": ["string", "null"]},
                 }},
                 "Calendar": {"type": "object", "properties": {
                     "id": {"type": "string", "format": "uuid"}, "slug": {"type": "string"},

@@ -24,6 +24,7 @@ pub(crate) fn upsert_data(parsed: &crate::ParsedEvent) -> IcsEventUpsert {
             .map(calendar_core::sanitize_html),
         description_text: parsed.description_text.clone(),
         url: parsed.url.clone(),
+        location_text: parsed.location_text.clone(),
         status: parsed.status.clone(),
         priority: parsed.priority,
         class: parsed.class.clone(),

@@ -12,7 +12,7 @@ use calendar_core::DateOrDateTime;
 use calendar_db::{AttendeeRow, EventRow};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
-use icalendar::{Calendar, Component, DatePerhapsTime, Event};
+use icalendar::{Calendar, Component, DatePerhapsTime, Event, EventLike};
 
 #[derive(Debug, thiserror::Error)]
 pub enum IcsError {
@@ -103,11 +103,12 @@ fn recurrence_id_property(event: &EventRow) -> Option<icalendar::Property> {
     }
 }
 
-/// One exportable resource: event row, attendees and its VALARM set.
+/// One exportable resource: event row, attendees, location and its VALARM set.
 pub struct ExportRow {
     pub event: EventRow,
     pub attendees: Vec<AttendeeRow>,
     pub alarms: Vec<calendar_db::alarms::AlarmRow>,
+    pub location: Option<calendar_db::LocationRow>,
 }
 
 impl From<(EventRow, Vec<AttendeeRow>)> for ExportRow {
@@ -116,6 +117,7 @@ impl From<(EventRow, Vec<AttendeeRow>)> for ExportRow {
             event,
             attendees,
             alarms: vec![],
+            location: None,
         }
     }
 }
@@ -208,6 +210,19 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
         }
         if !event.categories.is_empty() {
             ev.add_property("CATEGORIES", event.categories.join(","));
+        }
+        if let Some(loc) = &row.location {
+            let text = loc
+                .display_name
+                .clone()
+                .or_else(|| loc.formatted_address.clone())
+                .unwrap_or_default();
+            if !text.is_empty() {
+                ev.location(&text);
+            }
+            if let (Some(lat), Some(lon)) = (loc.latitude, loc.longitude) {
+                ev.append_property(icalendar::Property::new("GEO", format!("{lat};{lon}")));
+            }
         }
         let mut organizer =
             icalendar::Property::new("ORGANIZER", format!("mailto:{}", event.organizer_email));
@@ -315,6 +330,7 @@ pub struct ParsedEvent {
     pub description_text: Option<String>,
     pub description_html: Option<String>,
     pub url: Option<String>,
+    pub location_text: Option<String>,
     pub starts_at: Option<DateTime<Utc>>,
     pub ends_at: Option<DateTime<Utc>>,
     pub start_date: Option<NaiveDate>,
@@ -408,6 +424,7 @@ fn parse_event(event: icalendar::Event) -> Result<ParsedEvent, IcsError> {
         summary: event.get_summary().map(|s| s.to_string()),
         description_text: event.get_description().map(|s| s.to_string()),
         url: event.get_url().map(|s| s.to_string()),
+        location_text: event.property_value("LOCATION").map(|s| s.to_string()),
         class: event.property_value("CLASS").map(|s| s.to_string()),
         sequence: event.get_sequence().map(|s| s as i32),
         status: event.property_value("STATUS").map(|s| s.to_string()),
@@ -718,6 +735,7 @@ DTSTART;TZID=America/Denver:20260105T090000\r\n\
 DTEND;TZID=America/Denver:20260105T100000\r\n\
 SUMMARY:Standup\r\n\
 DESCRIPTION:plain text\r\n\
+LOCATION:Union Station\r\n\
 RRULE:FREQ=WEEKLY;BYDAY=MO\r\n\
 EXDATE;TZID=America/Denver:20260112T090000\r\n\
 CLASS:PRIVATE\r\n\
@@ -738,6 +756,7 @@ END:VCALENDAR\r\n";
         let ev = &events[0];
         assert_eq!(ev.uid, "test-1");
         assert_eq!(ev.summary.as_deref(), Some("Standup"));
+        assert_eq!(ev.location_text.as_deref(), Some("Union Station"));
         assert_eq!(ev.status.as_deref(), Some("CONFIRMED"));
         assert_eq!(ev.class.as_deref(), Some("PRIVATE"));
         assert_eq!(ev.transp.as_deref(), Some("TRANSPARENT"));
@@ -752,6 +771,40 @@ END:VCALENDAR\r\n";
         assert_eq!(ev.rrule.as_deref(), Some("FREQ=WEEKLY;BYDAY=MO"));
         assert_eq!(ev.exdate.len(), 1);
         assert_eq!(ev.sequence, Some(2));
+    }
+
+    fn sample_location() -> calendar_db::LocationRow {
+        calendar_db::LocationRow {
+            id: uuid::Uuid::new_v4(),
+            provider: Some("google_places".into()),
+            provider_place_id: Some("place-1".into()),
+            display_name: Some("Union Station".into()),
+            formatted_address: Some("1701 Wynkoop St, Denver, CO".into()),
+            street_address: None,
+            locality: None,
+            administrative_area: None,
+            postal_code: None,
+            country: None,
+            latitude: Some(39.7534),
+            longitude: Some(-105.0016),
+            website: None,
+            phone: None,
+            provider_metadata: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn location_appears_in_ics() {
+        let event = sample_event_row();
+        let ics = events_to_ics(&[ExportRow {
+            event,
+            attendees: vec![],
+            alarms: vec![],
+            location: Some(sample_location()),
+        }]);
+        assert!(ics.contains("LOCATION:Union Station"));
+        assert!(ics.contains("GEO:39.7534;-105.0016"));
     }
 
     #[test]
@@ -829,6 +882,7 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
             event,
             attendees,
             alarms: vec![],
+            location: None,
         }]);
         eprintln!("GENERATED ICS:\n{}<<END>>", ics);
         let parsed = parse_ics(&ics).unwrap();
@@ -858,6 +912,7 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
             event,
             attendees: vec![],
             alarms: vec![],
+            location: None,
         }]);
         assert!(ics.contains("RECURRENCE-ID"));
         let parsed = parse_ics(&ics).unwrap();

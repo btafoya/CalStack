@@ -778,6 +778,24 @@ async fn put_calendar_acl(
 // ============ events ============
 
 #[derive(serde::Deserialize)]
+struct LocationBody {
+    provider: Option<String>,
+    provider_place_id: Option<String>,
+    display_name: Option<String>,
+    formatted_address: Option<String>,
+    street_address: Option<String>,
+    locality: Option<String>,
+    administrative_area: Option<String>,
+    postal_code: Option<String>,
+    country: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    website: Option<String>,
+    phone: Option<String>,
+    provider_metadata: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
 struct EventBody {
     uid: Option<String>,
     summary: String,
@@ -799,16 +817,64 @@ struct EventBody {
     transp: Option<String>,
     categories: Option<Vec<String>>,
     attendees: Option<Vec<db::NewAttendee>>,
+    location: Option<LocationBody>,
     // exception support
     master_event_id: Option<Uuid>,
     recurrence_id: Option<chrono::NaiveDateTime>,
     recurrence_id_date: Option<chrono::NaiveDate>,
 }
 
+/// Locations are append-only (calendar-db::create_location); a location on
+/// the body always writes a new row, whose id then goes on the event.
+async fn create_location_from_body(
+    pool: &PgPool,
+    body: LocationBody,
+) -> Result<db::LocationRow, AppError> {
+    let new_loc = db::NewLocation {
+        provider: body.provider,
+        provider_place_id: body.provider_place_id,
+        display_name: body.display_name,
+        formatted_address: body.formatted_address,
+        street_address: body.street_address,
+        locality: body.locality,
+        administrative_area: body.administrative_area,
+        postal_code: body.postal_code,
+        country: body.country,
+        latitude: body.latitude,
+        longitude: body.longitude,
+        website: body.website,
+        phone: body.phone,
+        provider_metadata: body.provider_metadata,
+    };
+    db::create_location(pool, &new_loc)
+        .await
+        .map_err(Into::into)
+}
+
+fn location_view(loc: &db::LocationRow) -> serde_json::Value {
+    serde_json::json!({
+        "id": loc.id,
+        "provider": loc.provider,
+        "provider_place_id": loc.provider_place_id,
+        "display_name": loc.display_name,
+        "formatted_address": loc.formatted_address,
+        "street_address": loc.street_address,
+        "locality": loc.locality,
+        "administrative_area": loc.administrative_area,
+        "postal_code": loc.postal_code,
+        "country": loc.country,
+        "latitude": loc.latitude,
+        "longitude": loc.longitude,
+        "website": loc.website,
+        "phone": loc.phone,
+    })
+}
+
 fn event_view(
     event: &db::EventRow,
     etag: &str,
     attendees: &[db::AttendeeRow],
+    location: Option<&db::LocationRow>,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": event.id,
@@ -836,6 +902,7 @@ fn event_view(
         "transp": event.transp,
         "categories": event.categories,
         "location_id": event.location_id,
+        "location": location.map(location_view),
         "organizer_email": event.organizer_email,
         "sequence": event.sequence,
         "etag": etag,
@@ -888,7 +955,7 @@ async fn create_event(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
     Path(calendar_id): Path<Uuid>,
-    Json(body): Json<EventBody>,
+    Json(mut body): Json<EventBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_csrf(&auth, &headers)?;
@@ -900,6 +967,10 @@ async fn create_event(
     )
     .await?;
     validate_event_body(&body)?;
+    let location = match body.location.take() {
+        Some(loc_body) => Some(create_location_from_body(&pool, loc_body).await?),
+        None => None,
+    };
     let uid = body
         .uid
         .clone()
@@ -927,7 +998,7 @@ async fn create_event(
         class: body.class.clone(),
         transp: body.transp.clone(),
         categories: body.categories.clone().unwrap_or_default(),
-        location_id: None,
+        location_id: location.as_ref().map(|l| l.id),
         organizer_user_id: Some(auth.user.id),
         organizer_email: auth.user.email.clone(),
         organizer_name: auth.user.display_name.clone(),
@@ -954,7 +1025,10 @@ async fn create_event(
         .await;
     }
     let rows = db::list_attendees(&pool, event.id).await?;
-    Ok((StatusCode::CREATED, Json(event_view(&event, &etag, &rows))))
+    Ok((
+        StatusCode::CREATED,
+        Json(event_view(&event, &etag, &rows, location.as_ref())),
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -981,10 +1055,11 @@ async fn list_events(
     let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let events = db::list_events_in_range(&pool, calendar_id, from, to).await?;
-    let out: Vec<serde_json::Value> = events
-        .iter()
-        .map(|e| event_view(e, &db::event_etag(e), &[]))
-        .collect();
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(events.len());
+    for e in &events {
+        let location = db::location_for_event(&pool, e).await;
+        out.push(event_view(e, &db::event_etag(e), &[], location.as_ref()));
+    }
     Ok(Json(serde_json::json!(out)))
 }
 
@@ -1003,7 +1078,8 @@ async fn get_event(
     )
     .await?;
     let rows = db::list_attendees(&pool, event.id).await?;
-    Ok(Json(event_view(&event, &etag, &rows)))
+    let location = db::location_for_event(&pool, &event).await;
+    Ok(Json(event_view(&event, &etag, &rows, location.as_ref())))
 }
 
 async fn patch_event(
@@ -1011,7 +1087,7 @@ async fn patch_event(
     headers: HeaderMap,
     Path(event_id): Path<Uuid>,
     if_match: IfMatch,
-    Json(body): Json<EventBody>,
+    Json(mut body): Json<EventBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_csrf(&auth, &headers)?;
@@ -1023,6 +1099,10 @@ async fn patch_event(
         calendar_core::CalendarCapability::ReadWrite,
     )
     .await?;
+    let location_id = match body.location.take() {
+        Some(loc_body) => Some(create_location_from_body(&pool, loc_body).await?.id),
+        None => None,
+    };
     let patch = db::EventPatch {
         summary: Some(body.summary),
         description_html: body.description_html,
@@ -1030,15 +1110,21 @@ async fn patch_event(
         url: body.url,
         starts_at: body.starts_at,
         ends_at: body.ends_at,
+        start_date: body.start_date,
+        end_date: body.end_date,
+        all_day: body.all_day,
         tzid: body.tzid,
         status: body.status,
         priority: body.priority,
         class: body.class,
         transp: body.transp,
+        location_id,
+        attendees: body.attendees,
     };
     let (event, etag) = db::update_event(&pool, event_id, if_match.0.as_deref(), &patch).await?;
     let rows = db::list_attendees(&pool, event.id).await?;
-    Ok(Json(event_view(&event, &etag, &rows)))
+    let location = db::location_for_event(&pool, &event).await;
+    Ok(Json(event_view(&event, &etag, &rows, location.as_ref())))
 }
 
 async fn delete_event(
@@ -1114,8 +1200,10 @@ async fn list_occurrences(
             continue;
         }
         if event.rrule.is_none() {
-            let mut view =
-                serde_json::json!({"event": event_view(event, &db::event_etag(event), &[])});
+            let location = db::location_for_event(&pool, event).await;
+            let mut view = serde_json::json!({
+                "event": event_view(event, &db::event_etag(event), &[], location.as_ref())
+            });
             view["occurrence"] = match (event.starts_at, event.start_date) {
                 (Some(at), _) => serde_json::json!({"kind": "timed", "at": at}),
                 (None, Some(date)) => {
@@ -1155,7 +1243,8 @@ async fn list_occurrences(
                 .iter()
                 .find(|ex| ex.master_event_id == Some(event.id) && ex.recurrence_id == Some(wall));
             let (source, is_exception) = matched.map_or((event, false), |ex| (ex, true));
-            let mut view = event_view(source, &db::event_etag(source), &[]);
+            let location = db::location_for_event(&pool, source).await;
+            let mut view = event_view(source, &db::event_etag(source), &[], location.as_ref());
             view["occurrence"] = match point {
                 calendar_core::DateOrDateTime::Timed(at) => {
                     serde_json::json!({"kind": "timed", "at": at})

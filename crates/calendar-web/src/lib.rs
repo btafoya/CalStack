@@ -242,8 +242,69 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
         <input class="form-control" id="ev-start" type="datetime-local" required></div>
       <div class="col"><label class="form-label" for="ev-end">End</label>
         <input class="form-control" id="ev-end" type="datetime-local" required></div></div>
+      <div class="form-check mb-3">
+        <input class="form-check-input" type="checkbox" id="ev-all-day">
+        <label class="form-check-label" for="ev-all-day">All day</label>
+      </div>
+      <div class="row mb-3">
+        <div class="col"><label class="form-label" for="ev-location-name">Location</label>
+          <input class="form-control" id="ev-location-name" placeholder="Name"></div>
+        <div class="col"><label class="form-label" for="ev-location-address">&nbsp;</label>
+          <input class="form-control" id="ev-location-address" placeholder="Address"></div>
+      </div>
+      <div class="mb-3"><label class="form-label" for="ev-url">URL</label>
+        <input class="form-control" id="ev-url" type="url"></div>
+      <div class="row mb-3">
+        <div class="col"><label class="form-label" for="ev-status">Status</label>
+          <select class="form-select" id="ev-status">
+            <option value="">(none)</option>
+            <option value="CONFIRMED">Confirmed</option>
+            <option value="TENTATIVE">Tentative</option>
+            <option value="CANCELLED">Cancelled</option>
+          </select></div>
+        <div class="col"><label class="form-label" for="ev-class">Visibility</label>
+          <select class="form-select" id="ev-class">
+            <option value="">(none)</option>
+            <option value="PUBLIC">Public</option>
+            <option value="PRIVATE">Private</option>
+            <option value="CONFIDENTIAL">Confidential</option>
+          </select></div>
+        <div class="col"><label class="form-label" for="ev-transp">Show as</label>
+          <select class="form-select" id="ev-transp">
+            <option value="">(none)</option>
+            <option value="OPAQUE">Busy</option>
+            <option value="TRANSPARENT">Free</option>
+          </select></div>
+      </div>
+      <div class="mb-3"><label class="form-label" for="ev-categories">Categories (comma-separated)</label>
+        <input class="form-control" id="ev-categories"></div>
+      <div class="row mb-3">
+        <div class="col"><label class="form-label" for="ev-repeat">Repeat</label>
+          <select class="form-select" id="ev-repeat">
+            <option value="">Does not repeat</option>
+            <option value="DAILY">Daily</option>
+            <option value="WEEKLY">Weekly</option>
+            <option value="MONTHLY">Monthly</option>
+            <option value="YEARLY">Yearly</option>
+          </select></div>
+        <div class="col" id="ev-repeat-interval-row" hidden>
+          <label class="form-label" for="ev-repeat-interval">Every</label>
+          <input class="form-control" id="ev-repeat-interval" type="number" min="1" value="1"></div>
+        <div class="col" id="ev-repeat-until-row" hidden>
+          <label class="form-label" for="ev-repeat-until">Until</label>
+          <input class="form-control" id="ev-repeat-until" type="date"></div>
+      </div>
       <div class="mb-3"><label class="form-label" for="ev-desc">Description</label>
         <div id="ev-desc"></div></div>
+      <div class="mb-3">
+        <label class="form-label">Attendees</label>
+        <ul id="ev-attendees" class="list-group list-group-flush mb-2"></ul>
+        <div class="input-group input-group-sm">
+          <input id="ev-attendee-email" class="form-control" type="email" placeholder="Email">
+          <input id="ev-attendee-name" class="form-control" placeholder="Name (optional)">
+          <button id="ev-attendee-add" class="btn btn-outline-primary" type="button">Add</button>
+        </div>
+      </div>
       <div class="mb-3" id="ev-attachments-section" hidden>
         <label class="form-label">Attachments</label>
         <ul id="ev-attachments" class="list-group list-group-flush mb-2"></ul>

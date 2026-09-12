@@ -17,11 +17,16 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Renders the iTIP REQUEST body for an event (VCALENDAR with METHOD).
-pub(crate) fn request_body(event: &db::EventRow, attendees: &[db::AttendeeRow]) -> String {
+pub(crate) fn request_body(
+    event: &db::EventRow,
+    attendees: &[db::AttendeeRow],
+    location: Option<db::LocationRow>,
+) -> String {
     calendar_caldav::events_to_ics(&[calendar_caldav::ExportRow {
         event: event.clone(),
         attendees: attendees.to_vec(),
         alarms: vec![],
+        location,
     }])
     .replacen("BEGIN:VCALENDAR", "BEGIN:VCALENDAR\nMETHOD:REQUEST", 1)
 }
@@ -141,7 +146,8 @@ pub(crate) async fn send_pending(pool: &sqlx::PgPool, crypto: Option<&Crypto>) {
             break; // no provider configured: leave messages pending
         };
         let attendees = db::list_attendees(pool, event.id).await.unwrap_or_default();
-        let body = request_body(&event, &attendees);
+        let location = db::location_for_event(pool, &event).await;
+        let body = request_body(&event, &attendees, location);
         match provider
             .send(&message.attendee_email, &event.summary, &body)
             .await

@@ -208,10 +208,12 @@ impl PgDavFs {
                 let alarms = db::alarms::list_alarms(&self.pool, *id)
                     .await
                     .unwrap_or_default();
+                let event_location = db::location_for_event(&self.pool, &event).await;
                 let ics = events_to_ics(&[ExportRow {
                     event: event.clone(),
                     attendees,
                     alarms,
+                    location: event_location,
                 }]);
                 Ok((
                     location,
@@ -259,10 +261,12 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                         let alarms = db::alarms::list_alarms(&self.pool, id)
                             .await
                             .unwrap_or_default();
+                        let location = db::location_for_event(&self.pool, &event).await;
                         let ics = events_to_ics(&[ExportRow {
                             event: event.clone(),
                             attendees,
                             alarms,
+                            location,
                         }]);
                         let modified: SystemTime = event.updated_at.into();
                         let meta = Meta {
@@ -372,10 +376,12 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                         let alarms = db::alarms::list_alarms(&self.pool, event.id)
                             .await
                             .unwrap_or_default();
+                        let event_location = db::location_for_event(&self.pool, &event).await;
                         let ics = events_to_ics(&[ExportRow {
                             event: event.clone(),
                             attendees,
                             alarms,
+                            location: event_location,
                         }]);
                         entries.push(Entry {
                             name: format!("{}.ics", event.id).into_bytes(),
