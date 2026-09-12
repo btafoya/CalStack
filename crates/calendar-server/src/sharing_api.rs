@@ -167,10 +167,12 @@ pub(crate) async fn public_feed(
         let alarms = db::alarms::list_alarms(&pool, event.id)
             .await
             .unwrap_or_default();
+        let location = db::location_for_event(&pool, &event).await;
         exports.push(ExportRow {
             attendees: vec![],
             event,
             alarms,
+            location,
         });
     }
     let ics = calendar_caldav::events_to_ics(&exports);

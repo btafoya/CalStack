@@ -81,6 +81,19 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-To
   -H 'content-type: application/json' -X POST "$BASE/api/calendars" -d '{"slug":"My Calendar","name":"My Calendar"}')
 [ "$CODE" = 400 ] || fail "expected 400 for invalid slug, got $CODE"
 
+step "Calendar PATCH updates name; DELETE soft-deletes (subsequent GET 404s)"
+SCRATCH_CAL=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars" \
+  -d '{"slug":"scratch","name":"Scratch"}' | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X PATCH "$BASE/api/calendars/$SCRATCH_CAL" \
+  -d '{"name":"Renamed"}' | python3 -c "import json,sys;assert json.load(sys.stdin)['name']=='Renamed'" \
+  || fail "calendar PATCH did not apply"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -X DELETE "$BASE/api/calendars/$SCRATCH_CAL" -o /dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" "$BASE/api/calendars/$SCRATCH_CAL")
+[ "$CODE" = 404 ] || fail "deleted calendar should 404 (got $CODE)"
+
 step "Event create + ETag If-Match update + 409 on stale"
 EV=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
   -H 'content-type: application/json' -X POST "$BASE/api/calendars/$CAL/events" \
@@ -91,6 +104,61 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-To
   -H "If-Match: \"stale\"" -H 'content-type: application/json' \
   -X PATCH "$BASE/api/events/$EV_ID" -d '{"summary":"nope"}')
 [ "$CODE" = 409 ] || fail "expected 409 on stale etag, got $CODE"
+
+step "Event create carries structured location + attendees; PATCH replaces both"
+EV2=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars/$CAL/events" \
+  -d '{"summary":"Located event","starts_at":"2026-09-21T10:00:00Z","ends_at":"2026-09-21T11:00:00Z",
+       "location":{"display_name":"Union Station"},"attendees":[{"email":"carol@example.com"}]}')
+EV2_ID=$(echo "$EV2" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+echo "$EV2" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['location']['display_name'] == 'Union Station'
+assert d['attendees'][0]['email'] == 'carol@example.com'
+" || fail "create did not carry location/attendees"
+EV2_ETAG=$(echo "$EV2" | python3 -c "import json,sys;print(json.load(sys.stdin)['etag'])")
+EV2_PATCHED=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H "If-Match: $EV2_ETAG" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/events/$EV2_ID" \
+  -d '{"summary":"Located event","starts_at":"2026-09-21T10:00:00Z","ends_at":"2026-09-21T11:00:00Z",
+       "location":{"display_name":"New Venue"},"attendees":[{"email":"dave@example.com"}]}')
+echo "$EV2_PATCHED" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['location']['display_name'] == 'New Venue'
+assert len(d['attendees']) == 1 and d['attendees'][0]['email'] == 'dave@example.com'
+" || fail "patch did not replace location/attendees"
+
+step "PATCH can switch a timed event to all-day and back (mutually exclusive columns)"
+EV3=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars/$CAL/events" \
+  -d '{"summary":"Switchable","starts_at":"2026-09-22T10:00:00Z","ends_at":"2026-09-22T11:00:00Z"}')
+EV3_ID=$(echo "$EV3" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+EV3_ETAG=$(echo "$EV3" | python3 -c "import json,sys;print(json.load(sys.stdin)['etag'])")
+EV3_ALLDAY=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H "If-Match: $EV3_ETAG" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/events/$EV3_ID" \
+  -d '{"summary":"Switchable","all_day":true,"start_date":"2026-09-22","end_date":"2026-09-23"}')
+echo "$EV3_ALLDAY" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['all_day'] is True
+assert d['start_date'] == '2026-09-22'
+assert d['starts_at'] is None
+" || fail "switch to all-day did not clear starts_at"
+EV3_ETAG2=$(echo "$EV3_ALLDAY" | python3 -c "import json,sys;print(json.load(sys.stdin)['etag'])")
+EV3_TIMED=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H "If-Match: $EV3_ETAG2" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/events/$EV3_ID" \
+  -d '{"summary":"Switchable","all_day":false,"starts_at":"2026-09-22T14:00:00Z","ends_at":"2026-09-22T15:00:00Z"}')
+echo "$EV3_TIMED" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert d['all_day'] is False
+assert d['start_date'] is None
+assert d['starts_at'] is not None
+" || fail "switch back to timed did not clear start_date"
 
 step "Second account + free-busy isolation"
 register bob bob@example.com password456
@@ -116,6 +184,26 @@ printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//interop//EN\r\nBEGIN:VEVENT\
 curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/work/$UUID.ics" -H 'content-type: text/calendar' \
   --data-binary @"$DATA/ev.ics" -D- -o /dev/null | grep -q "201" || fail "CalDAV PUT"
 curl -s -u "$AUTH" "$BASE/calendars/alice/work/$UUID.ics" | grep -q "TZID=America/Denver" || fail "TZID round-trip"
+
+step "CalDAV export includes LOCATION for an event with a structured location"
+curl -s -u "$AUTH" "$BASE/calendars/alice/work/$EV2_ID.ics" | grep -q "LOCATION:New Venue" \
+  || fail "LOCATION missing from CalDAV export"
+
+step "CalDAV PUT parses LOCATION into a structured location row (import)"
+LOC_UUID=$(uuidgen)
+printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//interop//EN\r\nBEGIN:VEVENT\r\nUID:cal-dav-loc@interop\r\nDTSTAMP:20260911T120000Z\r\nDTSTART;TZID=America/Denver:20260916T090000\r\nDTEND;TZID=America/Denver:20260916T100000\r\nSUMMARY:DAV location event\r\nLOCATION:Imported Venue\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n' > "$DATA/ev-loc.ics"
+curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/work/$LOC_UUID.ics" -H 'content-type: text/calendar' \
+  --data-binary @"$DATA/ev-loc.ics" -D- -o /dev/null | grep -q "201" || fail "CalDAV PUT with LOCATION"
+curl -s -u "$AUTH" "$BASE/calendars/alice/work/$LOC_UUID.ics" | grep -q "LOCATION:Imported Venue" \
+  || fail "LOCATION did not round-trip through CalDAV PUT/GET"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/events?from=2026-09-15T00:00:00Z&to=2026-09-17T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+match = next((e for e in rows if e['summary'] == 'DAV location event'), None)
+assert match, 'imported event not found via API'
+assert match['location']['display_name'] == 'Imported Venue'
+" || fail "API did not surface the location parsed from CalDAV PUT"
 
 step "Calendar multiget REPORT returns calendar-data"
 curl -s -u "$AUTH" -X REPORT "$BASE/calendars/alice/work/" -H 'content-type: application/xml' \

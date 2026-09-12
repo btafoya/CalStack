@@ -15,6 +15,11 @@
     eventCache: {},
     editingEventId: null,
     editingEtag: null,
+    editingAttendees: [],
+    // ponytail: RRULE editing only understands FREQ/INTERVAL/UNTIL; an
+    // existing rule using BYDAY/COUNT/etc is left alone (flag set, key
+    // omitted from the save body) rather than risk mangling it.
+    editingRruleUnknown: false,
     currentAcl: [],
     currentShares: [],
   };
@@ -69,13 +74,41 @@
     });
   }
 
+  function renameCalendar(cal) {
+    var name = window.prompt('Calendar name:', cal.name);
+    if (!name || name === cal.name) { return; }
+    api('PATCH', '/api/calendars/' + cal.id, { name: name }).done(loadCalendars);
+  }
+
+  function deleteCalendar(cal) {
+    if (!window.confirm('Delete calendar "' + cal.name + '"? This cannot be undone.')) { return; }
+    api('DELETE', '/api/calendars/' + cal.id).done(function () {
+      if (state.currentCalendar && state.currentCalendar.id === cal.id) { state.currentCalendar = null; }
+      loadCalendars();
+    });
+  }
+
   function renderCalList(list) {
     $('#cal-list').empty();
     list.forEach(function (cal) {
-      var item = $('<li class="list-group-item list-group-item-action">')
-        .attr('data-id', cal.id)
-        .text(cal.name + ' (' + cal.my_capability + ')');
+      var item = $('<li class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">')
+        .attr('data-id', cal.id);
+      item.append($('<span>').text(cal.name + ' (' + cal.my_capability + ')'));
       item.on('click', function () { selectCalendar(cal); });
+      if (cal.my_capability === 'owner' || cal.my_capability === 'read_write') {
+        var btns = $('<span class="btn-group btn-group-sm">');
+        btns.append(
+          $('<button class="btn btn-outline-secondary" type="button" title="Rename"><i class="bi bi-pencil"></i></button>')
+            .on('click', function (e) { e.stopPropagation(); renameCalendar(cal); })
+        );
+        if (cal.my_capability === 'owner') {
+          btns.append(
+            $('<button class="btn btn-outline-danger" type="button" title="Delete"><i class="bi bi-trash"></i></button>')
+              .on('click', function (e) { e.stopPropagation(); deleteCalendar(cal); })
+          );
+        }
+        item.append(btns);
+      }
       $('#cal-list').append(item);
     });
   }
@@ -94,6 +127,7 @@
   // UTC ISO instant -> datetime-local value in the browser's local time zone.
   function isoToLocalInput(iso) {
     if (!iso) { return ''; }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) { return iso + 'T00:00'; }
     var d = new Date(iso);
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
       'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
@@ -204,25 +238,111 @@
     reader.readAsDataURL(file);
   });
 
+  function renderAttendees() {
+    var list = $('#ev-attendees').empty();
+    state.editingAttendees.forEach(function (a, i) {
+      var item = $('<li class="list-group-item d-flex justify-content-between align-items-center">');
+      item.append($('<span>').text(a.display_name ? a.display_name + ' <' + a.email + '>' : a.email));
+      var btn = $('<button class="btn btn-sm btn-outline-danger" type="button">Remove</button>');
+      btn.on('click', function () {
+        state.editingAttendees.splice(i, 1);
+        renderAttendees();
+      });
+      item.append(btn);
+      list.append(item);
+    });
+  }
+
+  $('#ev-attendee-add').on('click', function () {
+    var email = $('#ev-attendee-email').val().trim();
+    if (!email) { return; }
+    state.editingAttendees.push({ email: email, display_name: $('#ev-attendee-name').val() || null });
+    $('#ev-attendee-email').val('');
+    $('#ev-attendee-name').val('');
+    renderAttendees();
+  });
+
+  $('#ev-repeat').on('change', function () {
+    var show = !!$(this).val();
+    $('#ev-repeat-interval-row, #ev-repeat-until-row').prop('hidden', !show);
+  });
+
+  // Only a FREQ/INTERVAL/UNTIL rule can round-trip through the simple
+  // picker; returns false (and blanks the picker) for anything richer, so
+  // saveEvent knows to leave the underlying RRULE untouched.
+  function applyRruleToForm(rrule) {
+    $('#ev-repeat-interval-row, #ev-repeat-until-row').prop('hidden', true);
+    if (!rrule) {
+      $('#ev-repeat').val('');
+      return true;
+    }
+    var parts = {};
+    rrule.split(';').forEach(function (p) {
+      var kv = p.split('=');
+      parts[kv[0]] = kv[1];
+    });
+    var known = ['FREQ', 'INTERVAL', 'UNTIL'];
+    var onlyKnown = Object.keys(parts).every(function (k) { return known.indexOf(k) !== -1; });
+    if (!onlyKnown || !parts.FREQ) {
+      $('#ev-repeat').val('');
+      return false;
+    }
+    $('#ev-repeat').val(parts.FREQ);
+    $('#ev-repeat-interval').val(parts.INTERVAL || 1);
+    $('#ev-repeat-until').val(parts.UNTIL
+      ? parts.UNTIL.slice(0, 4) + '-' + parts.UNTIL.slice(4, 6) + '-' + parts.UNTIL.slice(6, 8)
+      : '');
+    $('#ev-repeat-interval-row, #ev-repeat-until-row').prop('hidden', false);
+    return true;
+  }
+
+  function buildRrule() {
+    var freq = $('#ev-repeat').val();
+    if (!freq) { return null; }
+    var parts = ['FREQ=' + freq];
+    var interval = parseInt($('#ev-repeat-interval').val(), 10);
+    if (interval > 1) { parts.push('INTERVAL=' + interval); }
+    var until = $('#ev-repeat-until').val();
+    if (until) { parts.push('UNTIL=' + until.replace(/-/g, '') + 'T235959Z'); }
+    return parts.join(';');
+  }
+
   function openEventModal(mode, payload) {
     $('#event-form')[0].reset();
     $('#ev-delete').prop('hidden', mode !== 'edit');
     $('#ev-attachments-section').prop('hidden', mode !== 'edit');
+    state.editingAttendees = [];
     if (mode === 'edit') {
       state.editingEventId = payload.id;
       state.editingEtag = payload.etag;
+      state.editingRruleUnknown = !applyRruleToForm(payload.rrule);
       $('#ev-title').val(payload.summary || '');
-      $('#ev-start').val(isoToLocalInput(payload.starts_at));
-      $('#ev-end').val(isoToLocalInput(payload.ends_at));
+      $('#ev-start').val(isoToLocalInput(payload.starts_at || payload.start_date));
+      $('#ev-end').val(isoToLocalInput(payload.ends_at || payload.end_date));
+      $('#ev-all-day').prop('checked', !!payload.all_day);
+      $('#ev-url').val(payload.url || '');
+      $('#ev-status').val(payload.status || '');
+      $('#ev-class').val(payload.class || '');
+      $('#ev-transp').val(payload.transp || '');
+      $('#ev-categories').val((payload.categories || []).join(', '));
+      var loc = payload.location || {};
+      $('#ev-location-name').val(loc.display_name || '');
+      $('#ev-location-address').val(loc.formatted_address || '');
+      state.editingAttendees = (payload.attendees || []).map(function (a) {
+        return { email: a.email, display_name: a.display_name || null };
+      });
       $('#ev-desc').summernote('code', payload.description_html || '');
       loadAttachments();
     } else {
       state.editingEventId = null;
       state.editingEtag = null;
+      state.editingRruleUnknown = false;
+      applyRruleToForm(null);
       $('#ev-start').val(payload.start || '');
       $('#ev-end').val(payload.end || '');
       $('#ev-desc').summernote('code', '');
     }
+    renderAttendees();
     modal('event-modal').show();
   }
 
@@ -230,13 +350,34 @@
     e.preventDefault();
     if (!state.currentCalendar) { return; }
     var html = $('#ev-desc').summernote('isEmpty') ? null : $('#ev-desc').summernote('code');
+    var allDay = $('#ev-all-day').is(':checked');
+    var locationName = $('#ev-location-name').val();
+    var locationAddress = $('#ev-location-address').val();
+    var categories = $('#ev-categories').val();
     var body = {
       summary: $('#ev-title').val(),
-      starts_at: localInputToIso($('#ev-start').val()),
-      ends_at: localInputToIso($('#ev-end').val()),
       description_html: html,
       description_text: html ? $('<div>').html(html).text() : null,
+      url: $('#ev-url').val() || null,
+      status: $('#ev-status').val() || null,
+      class: $('#ev-class').val() || null,
+      transp: $('#ev-transp').val() || null,
+      categories: categories ? categories.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [],
+      attendees: state.editingAttendees,
+      location: (locationName || locationAddress)
+        ? { display_name: locationName || null, formatted_address: locationAddress || null }
+        : null,
     };
+    if (allDay) {
+      body.all_day = true;
+      body.start_date = $('#ev-start').val().slice(0, 10);
+      body.end_date = $('#ev-end').val().slice(0, 10);
+    } else {
+      body.all_day = false;
+      body.starts_at = localInputToIso($('#ev-start').val());
+      body.ends_at = localInputToIso($('#ev-end').val());
+    }
+    if (!state.editingRruleUnknown) { body.rrule = buildRrule(); }
     var req = state.editingEventId
       ? api('PATCH', '/api/events/' + state.editingEventId, body,
           state.editingEtag ? { 'If-Match': state.editingEtag } : {})
