@@ -1,0 +1,108 @@
+/* Tabler color scheme (github.com/tabler/tabler, @tabler/core 1.4.0 dist CSS)
+   mapped onto Bootstrap 5.3. No build step, so the compiled Bootstrap rules
+   that bake the default blue in are overridden here. Light + dark. */
+
+[data-bs-theme="light"] {
+  --bs-body-color: #1f2937; /* tabler gray-800 */
+  --bs-body-bg: #ffffff; /* card/table surface */
+  --bs-tertiary-bg: #f9fafb; /* gray-50: page background */
+  --bs-border-color: #e5e7eb; /* gray-200 */
+  --bs-secondary-color: #6b7280; /* gray-500: tabler muted */
+  --bs-primary-rgb: 6, 111, 209; /* tabler primary #066fd1 */
+  --bs-link-color-rgb: 6, 111, 209;
+  --bs-link-hover-color-rgb: 5, 96, 182;
+}
+
+[data-bs-theme="dark"] {
+  --bs-body-color: #e5e7eb; /* gray-200 */
+  --bs-body-bg: #1f2937; /* gray-800: card/table surface */
+  --bs-tertiary-bg: #111827; /* gray-900: page background */
+  --bs-border-color: #2d3d51; /* tabler dark border */
+  --bs-secondary-color: #9ca3af; /* gray-400 */
+  --bs-primary-rgb: 6, 111, 209;
+  --bs-link-color-rgb: 66, 153, 225; /* tabler info blue, lighter on dark */
+  --bs-link-hover-color-rgb: 107, 178, 235;
+}
+
+/* Primary accents (Bootstrap 5.3.3 bakes #0d6efd into these) */
+.btn-primary {
+  --bs-btn-bg: #066fd1;
+  --bs-btn-border-color: #066fd1;
+  --bs-btn-hover-bg: #0560b6;
+  --bs-btn-hover-border-color: #055aab;
+  --bs-btn-active-bg: #055aab;
+  --bs-btn-active-border-color: #0555a1;
+  --bs-btn-disabled-bg: #066fd1;
+  --bs-btn-disabled-border-color: #066fd1;
+  --bs-btn-focus-shadow-rgb: 6, 111, 209;
+}
+
+.btn-outline-primary {
+  --bs-btn-color: #066fd1;
+  --bs-btn-border-color: #066fd1;
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: #066fd1;
+  --bs-btn-hover-border-color: #066fd1;
+  --bs-btn-active-color: #fff;
+  --bs-btn-active-bg: #066fd1;
+  --bs-btn-active-border-color: #066fd1;
+  --bs-btn-disabled-color: #066fd1;
+  --bs-btn-disabled-border-color: #066fd1;
+  --bs-btn-focus-shadow-rgb: 6, 111, 209;
+}
+
+[data-bs-theme="dark"] .btn-outline-primary {
+  --bs-btn-color: #6ea8dc;
+  --bs-btn-border-color: #3a6ea5;
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: #066fd1;
+  --bs-btn-hover-border-color: #066fd1;
+  --bs-btn-active-color: #fff;
+  --bs-btn-active-bg: #066fd1;
+  --bs-btn-active-border-color: #066fd1;
+  --bs-btn-disabled-color: #3a6ea5;
+  --bs-btn-disabled-border-color: #3a6ea5;
+}
+
+.btn-outline-secondary {
+  --bs-btn-color: #6b7280;
+  --bs-btn-border-color: #6b7280;
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: #6b7280;
+  --bs-btn-hover-border-color: #6b7280;
+  --bs-btn-active-color: #fff;
+  --bs-btn-active-bg: #6b7280;
+  --bs-btn-active-border-color: #6b7280;
+  --bs-btn-disabled-color: #6b7280;
+  --bs-btn-disabled-border-color: #6b7280;
+  --bs-btn-focus-shadow-rgb: 107, 114, 128;
+}
+
+[data-bs-theme="dark"] .btn-outline-secondary {
+  --bs-btn-color: #9ca3af;
+  --bs-btn-border-color: #4b5563;
+  --bs-btn-hover-color: #e5e7eb;
+  --bs-btn-hover-bg: #374151;
+  --bs-btn-hover-border-color: #4b5563;
+  --bs-btn-active-color: #e5e7eb;
+  --bs-btn-active-bg: #374151;
+  --bs-btn-active-border-color: #4b5563;
+  --bs-btn-disabled-color: #4b5563;
+  --bs-btn-disabled-border-color: #4b5563;
+}
+
+.form-control:focus,
+.form-select:focus {
+  border-color: rgba(6, 111, 209, 0.4);
+  box-shadow: 0 0 0 0.25rem rgba(6, 111, 209, 0.25);
+}
+
+.form-check-input:checked {
+  background-color: #066fd1;
+  border-color: #066fd1;
+}
+
+.form-check-input:focus {
+  border-color: rgba(6, 111, 209, 0.4);
+  box-shadow: 0 0 0 0.25rem rgba(6, 111, 209, 0.25);
+}

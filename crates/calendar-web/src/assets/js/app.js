@@ -256,7 +256,7 @@
       start: fmt(start),
       end: fmt(end),
       allDay: !!ev.start_date,
-      color: (state.currentCalendar && state.currentCalendar.color) || '#0d6efd',
+      color: (state.currentCalendar && state.currentCalendar.color) || '#066fd1',
     };
   }
 
