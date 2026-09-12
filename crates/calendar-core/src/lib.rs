@@ -23,6 +23,8 @@ pub enum ValidationError {
     Event(String),
     #[error("invalid attendee: {0}")]
     Attendee(String),
+    #[error("invalid category color: {0}")]
+    Color(String),
 }
 
 // ============ tenancy ============
@@ -458,6 +460,21 @@ pub fn validate_slug(slug: &str) -> Result<(), ValidationError> {
     }
 }
 
+/// Fixed category color palette: Tabler theme color keys, rendered by the web
+/// UI as `bg-{color}-lt` badges so light/dark theming stays consistent.
+pub const CATEGORY_COLORS: &[&str] = &[
+    "blue", "azure", "indigo", "purple", "pink", "red", "orange", "yellow", "lime", "green",
+    "teal", "cyan",
+];
+
+pub fn validate_category_color(color: &str) -> Result<(), ValidationError> {
+    if CATEGORY_COLORS.contains(&color) {
+        Ok(())
+    } else {
+        Err(ValidationError::Color(color.to_string()))
+    }
+}
+
 pub fn validate_username(username: &str) -> Result<(), ValidationError> {
     let ok = !username.is_empty()
         && username.len() <= 64
@@ -533,6 +550,15 @@ mod tests {
     #[test]
     fn valid_timed_event() {
         assert!(timed_event().validate().is_ok());
+    }
+
+    #[test]
+    fn category_colors_accept_palette_keys_only() {
+        for color in CATEGORY_COLORS {
+            assert!(validate_category_color(color).is_ok());
+        }
+        assert!(validate_category_color("#ff0000").is_err());
+        assert!(validate_category_color("").is_err());
     }
 
     #[test]

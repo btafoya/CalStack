@@ -4,6 +4,7 @@ pub mod alarms;
 pub mod attachments;
 pub mod auth_ext;
 pub mod backup;
+pub mod categories;
 pub mod ics_upsert;
 pub mod jobs;
 pub mod scheduling;
@@ -925,6 +926,8 @@ pub struct EventPatch {
     pub class: Option<String>,
     pub transp: Option<String>,
     pub location_id: Option<Uuid>,
+    /// Some(_) replaces the category list; None leaves it untouched.
+    pub categories: Option<Vec<String>>,
     /// Some(_) replaces the attendee set entirely; None leaves it untouched.
     pub attendees: Option<Vec<NewAttendee>>,
 }
@@ -985,6 +988,7 @@ pub async fn update_event(
             class = COALESCE($14, class),
             transp = COALESCE($15, transp),
             location_id = COALESCE($16, location_id),
+            categories = COALESCE($17, categories),
             sequence = sequence + 1,
             updated_at = now()
          WHERE id = $1
@@ -1006,6 +1010,7 @@ pub async fn update_event(
     .bind(&patch.class)
     .bind(&patch.transp)
     .bind(patch.location_id)
+    .bind(&patch.categories)
     .fetch_one(&mut *tx)
     .await?;
     if let Some(attendees) = &patch.attendees {

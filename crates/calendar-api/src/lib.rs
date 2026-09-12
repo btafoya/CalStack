@@ -25,6 +25,7 @@ fn json_response(description: &str, schema: serde_json::Value) -> serde_json::Va
 pub fn openapi_document() -> serde_json::Value {
     let user = || serde_json::json!({"$ref": "#/components/schemas/User"});
     let calendar = || serde_json::json!({"$ref": "#/components/schemas/Calendar"});
+    let category = || serde_json::json!({"$ref": "#/components/schemas/Category"});
     let event = || serde_json::json!({"$ref": "#/components/schemas/Event"});
 
     let mut paths = serde_json::Map::new();
@@ -360,6 +361,35 @@ pub fn openapi_document() -> serde_json::Value {
         }),
     );
     put(
+        "/api/categories",
+        json!({
+            "post": {"summary": "Create a category registry row (calendar-scoped: owner; tenant-wide: admin)",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CategoryCreate"}}}},
+                "responses": {"201": {"description": "created", "content": {"application/json": {"schema": category()}}},
+                    "400": {"description": "validation error"}, "409": {"description": "slug already in scope"}}},
+            "get": {"summary": "List registry rows: tenant-wide plus rows on calendars visible to the caller",
+                "parameters": [param("calendar_id", false)],
+                "responses": {"200": {"description": "list", "content": {"application/json": {"schema": {
+                    "type": "array", "items": {"$ref": "#/components/schemas/Category"}}}}}}},
+        }),
+    );
+    put(
+        "/api/categories/{id}",
+        json!({
+            "patch": {"summary": "Update a row; a slug change cascades to events in the row's scope",
+                "parameters": [param("id", true)],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object",
+                    "properties": {"slug": {"type": "string"}, "name": {"type": "string"},
+                        "color": {"type": "string", "enum": ["blue", "azure", "indigo", "purple", "pink",
+                            "red", "orange", "yellow", "lime", "green", "teal", "cyan"]},
+                        "sort_order": {"type": "integer"}}}}}},
+                "responses": {"200": {"description": "updated"}, "404": {"description": "absent"}}},
+            "delete": {"summary": "Delete a row (event category strings are untouched)",
+                "responses": {"200": {"description": "removed"}}},
+        }),
+    );
+    put(
         "/api/notification-providers",
         json!({
             "post": {"summary": "Configure a notification provider (credentials stored encrypted)",
@@ -445,11 +475,31 @@ pub fn openapi_document() -> serde_json::Value {
                     "start_date": {"type": ["string", "null"], "format": "date"},
                     "all_day": {"type": "boolean"},
                     "location": {"$ref": "#/components/schemas/Location"},
+                    "categories": {"type": "array", "items": {"type": "string"}},
+                    "category_details": {"type": "array", "items": {"$ref": "#/components/schemas/CategoryDetail"}},
                     "attendees": {"type": "array", "items": {"type": "object", "properties": {
                         "email": {"type": "string"}, "display_name": {"type": ["string", "null"]},
                         "role": {"type": "string"}, "partstat": {"type": "string"},
                         "rsvp": {"type": ["boolean", "null"]},
                     }}},
+                }},
+                "Category": {"type": "object", "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "tenant_id": {"type": "string", "format": "uuid"},
+                    "calendar_id": {"type": ["string", "null"], "format": "uuid",
+                        "description": "null = tenant-wide"},
+                    "slug": {"type": "string"}, "name": {"type": "string"},
+                    "color": {"type": "string"}, "sort_order": {"type": "integer"},
+                }},
+                "CategoryCreate": {"type": "object", "required": ["slug", "name", "color"],
+                    "properties": {"calendar_id": {"type": ["string", "null"], "format": "uuid",
+                        "description": "omit/null for tenant-wide (admin only)"},
+                        "slug": {"type": "string"}, "name": {"type": "string"},
+                        "color": {"type": "string", "enum": ["blue", "azure", "indigo", "purple", "pink",
+                            "red", "orange", "yellow", "lime", "green", "teal", "cyan"]},
+                        "sort_order": {"type": "integer"}}},
+                "CategoryDetail": {"type": "object", "properties": {
+                    "slug": {"type": "string"}, "name": {"type": "string"}, "color": {"type": "string"},
                 }},
                 "Location": {"type": ["object", "null"], "properties": {
                     "id": {"type": "string", "format": "uuid"},

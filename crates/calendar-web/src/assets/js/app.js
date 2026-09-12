@@ -23,6 +23,8 @@
     currentAcl: [],
     currentShares: [],
     calendarActivated: false,
+    categoryRegistry: [],
+    eventCategories: [],
   };
 
   function api(method, url, data, extraHeaders) {
@@ -38,6 +40,66 @@
       if (xhr.status === 401) { window.location.href = '/login'; return; }
       window.alert((xhr.responseJSON && xhr.responseJSON.error) || 'Request failed');
     });
+  }
+
+  // ============ categories (checkbox list over the registry) ============
+  // Grid hex values for the Tabler palette keys (calendar grid needs real
+  // colors, not the bg-*-lt CSS tokens the badges use).
+  var CATEGORY_HEX = {
+    blue: '#206bc4', azure: '#4299e1', indigo: '#4263eb', purple: '#ae3ec9',
+    pink: '#d6336c', red: '#d63939', orange: '#f76707', yellow: '#f7b731',
+    lime: '#74b816', green: '#2fb344', teal: '#0ca678', cyan: '#17a2b8',
+  };
+
+  function categoryColorHex(ev) {
+    var details = ev.category_details || [];
+    for (var i = 0; i < details.length; i++) {
+      if (CATEGORY_HEX[details[i].color]) { return CATEGORY_HEX[details[i].color]; }
+    }
+    return null;
+  }
+
+  // Silent $.getJSON: an unreachable registry must not alert() on modal open.
+  function loadCategoryRegistry(calendarId) {
+    $.getJSON('/api/categories', { calendar_id: calendarId }).done(function (rows) {
+      state.categoryRegistry = rows || [];
+    });
+  }
+
+  // One checkbox per registry row, plus one for each imported tag that is not
+  // in the registry (so imported events can be untagged). Checked = tagged.
+  function renderCategoryCheckboxes() {
+    var $box = $('#ev-categories-box').empty();
+    var selected = {};
+    (state.eventCategories || []).forEach(function (s) { selected[s] = true; });
+    var items = (state.categoryRegistry || []).concat((state.eventCategories || [])
+      .filter(function (s) {
+        return !(state.categoryRegistry || []).some(function (r) { return r.slug === s; });
+      }).map(function (slug) { return { slug: slug, name: slug, color: null }; }));
+    items.forEach(function (row) {
+      var $check = $('<div class="form-check">');
+      var $input = $('<input type="checkbox" class="form-check-input" id="ev-cat-' + row.slug + '">')
+        .prop('checked', !!selected[row.slug])
+        .on('change', function () {
+          toggleCategory(row.slug, $input.is(':checked'));
+        });
+      var $label = $('<label class="form-check-label" for="ev-cat-' + row.slug + '">');
+      if (row.color) {
+        $label.append($('<span class="d-inline-block rounded-circle me-1" style="width:10px;height:10px">')
+          .css('background-color', CATEGORY_HEX[row.color] || '#adb5bd'));
+      }
+      $label.append(document.createTextNode(row.name));
+      if (!row.color) { $label.addClass('text-body-secondary'); }
+      $check.append($input, $label).appendTo($box);
+    });
+    $box.prop('hidden', $box.is(':empty'));
+  }
+
+  function toggleCategory(slug, on) {
+    var i = state.eventCategories.indexOf(slug);
+    if (on && i < 0) { state.eventCategories.push(slug); }
+    if (!on && i >= 0) { state.eventCategories.splice(i, 1); }
+    renderCategoryCheckboxes();
   }
 
   function modal(id) {
@@ -64,6 +126,7 @@
     $('#cal-list li[data-id="' + cal.id + '"]').addClass('active');
     updateRulesLink();
     updateCalendarVisibility();
+    loadCategoryRegistry(cal.id);
     if (!state.calendarActivated) {
       // Constructing bs-calendar while #calendar is still hidden (no
       // calendar selected yet) bakes in a wrong internal event-fetch date
@@ -256,7 +319,9 @@
       start: fmt(start),
       end: fmt(end),
       allDay: !!ev.start_date,
-      color: (state.currentCalendar && state.currentCalendar.color) || '#066fd1',
+      // First registered category wins the event color; untagged events keep
+      // the calendar color.
+      color: categoryColorHex(ev) || (state.currentCalendar && state.currentCalendar.color) || '#066fd1',
     };
   }
 
@@ -450,7 +515,7 @@
       $('#ev-status').val(payload.status || '');
       $('#ev-class').val(payload.class || '');
       $('#ev-transp').val(payload.transp || '');
-      $('#ev-categories').val((payload.categories || []).join(', '));
+      state.eventCategories = (payload.categories || []).slice();
       var loc = payload.location || {};
       $('#ev-location').val(locationDisplayText(loc));
       // Carrying a place-picked location through: reuse its structured fields
@@ -468,12 +533,14 @@
       state.editingEventId = null;
       state.editingEtag = null;
       state.editingRruleUnknown = false;
+      state.eventCategories = [];
       applyRruleToForm(null);
       setTimeControls('start', payload.start || '');
       setTimeControls('end', payload.end || '');
       $('#ev-desc').summernote('code', '');
     }
     renderAttendees();
+    renderCategoryCheckboxes();
     modal('event-modal').show();
   }
 
@@ -541,7 +608,6 @@
     var html = $('#ev-desc').summernote('isEmpty') ? null : $('#ev-desc').summernote('code');
     var allDay = $('#ev-all-day').is(':checked');
     var locationText = $('#ev-location').val();
-    var categories = $('#ev-categories').val();
     var body = {
       summary: $('#ev-title').val(),
       description_html: html,
@@ -550,7 +616,7 @@
       status: $('#ev-status').val() || null,
       class: $('#ev-class').val() || null,
       transp: $('#ev-transp').val() || null,
-      categories: categories ? categories.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [],
+      categories: state.eventCategories,
       attendees: state.editingAttendees,
       // Picked place: structured fields (name + full address) as Google
       // returned them; the text is just the visible address. Otherwise the

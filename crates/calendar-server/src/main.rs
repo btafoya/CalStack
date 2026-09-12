@@ -1,6 +1,7 @@
 //! Single production executable: HTTP server, CLI commands.
 
 mod admin_api;
+mod categories_api;
 mod dav;
 mod extras;
 mod jobs;
@@ -1118,6 +1119,7 @@ fn event_view(
     etag: &str,
     attendees: &[db::AttendeeRow],
     location: Option<&db::LocationRow>,
+    registry: &db::categories::CategoryRegistry,
 ) -> serde_json::Value {
     serde_json::json!({
         "id": event.id,
@@ -1144,6 +1146,11 @@ fn event_view(
         "class": event.class,
         "transp": event.transp,
         "categories": event.categories,
+        "category_details": event.categories.iter().filter_map(|slug| {
+            registry.get(slug).map(|info| serde_json::json!({
+                "slug": slug, "name": info.name, "color": info.color,
+            }))
+        }).collect::<Vec<_>>(),
         "location_id": event.location_id,
         "location": location.map(location_view),
         "organizer_email": event.organizer_email,
@@ -1268,9 +1275,16 @@ async fn create_event(
         .await;
     }
     let rows = db::list_attendees(&pool, event.id).await?;
+    let registry = db::categories::registry_for_calendar(&pool, calendar_id).await?;
     Ok((
         StatusCode::CREATED,
-        Json(event_view(&event, &etag, &rows, location.as_ref())),
+        Json(event_view(
+            &event,
+            &etag,
+            &rows,
+            location.as_ref(),
+            &registry,
+        )),
     ))
 }
 
@@ -1298,10 +1312,17 @@ async fn list_events(
     let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let events = db::list_events_in_range(&pool, calendar_id, from, to).await?;
+    let registry = db::categories::registry_for_calendar(&pool, calendar_id).await?;
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(events.len());
     for e in &events {
         let location = db::location_for_event(&pool, e).await;
-        out.push(event_view(e, &db::event_etag(e), &[], location.as_ref()));
+        out.push(event_view(
+            e,
+            &db::event_etag(e),
+            &[],
+            location.as_ref(),
+            &registry,
+        ));
     }
     Ok(Json(serde_json::json!(out)))
 }
@@ -1322,7 +1343,14 @@ async fn get_event(
     .await?;
     let rows = db::list_attendees(&pool, event.id).await?;
     let location = db::location_for_event(&pool, &event).await;
-    Ok(Json(event_view(&event, &etag, &rows, location.as_ref())))
+    let registry = db::categories::registry_for_calendar(&pool, event.calendar_id).await?;
+    Ok(Json(event_view(
+        &event,
+        &etag,
+        &rows,
+        location.as_ref(),
+        &registry,
+    )))
 }
 
 async fn patch_event(
@@ -1362,12 +1390,20 @@ async fn patch_event(
         class: body.class,
         transp: body.transp,
         location_id,
+        categories: body.categories,
         attendees: body.attendees,
     };
     let (event, etag) = db::update_event(&pool, event_id, if_match.0.as_deref(), &patch).await?;
     let rows = db::list_attendees(&pool, event.id).await?;
     let location = db::location_for_event(&pool, &event).await;
-    Ok(Json(event_view(&event, &etag, &rows, location.as_ref())))
+    let registry = db::categories::registry_for_calendar(&pool, event.calendar_id).await?;
+    Ok(Json(event_view(
+        &event,
+        &etag,
+        &rows,
+        location.as_ref(),
+        &registry,
+    )))
 }
 
 async fn delete_event(
@@ -1429,6 +1465,7 @@ async fn list_occurrences(
     let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let rows = db::list_events_in_range(&pool, calendar_id, from, to).await?;
+    let registry = db::categories::registry_for_calendar(&pool, calendar_id).await?;
     let master_ids: Vec<Uuid> = rows
         .iter()
         .filter(|r| r.master_event_id.is_none())
@@ -1445,7 +1482,7 @@ async fn list_occurrences(
         if event.rrule.is_none() {
             let location = db::location_for_event(&pool, event).await;
             let mut view = serde_json::json!({
-                "event": event_view(event, &db::event_etag(event), &[], location.as_ref())
+                "event": event_view(event, &db::event_etag(event), &[], location.as_ref(), &registry)
             });
             view["occurrence"] = match (event.starts_at, event.start_date) {
                 (Some(at), _) => serde_json::json!({"kind": "timed", "at": at}),
@@ -1487,7 +1524,13 @@ async fn list_occurrences(
                 .find(|ex| ex.master_event_id == Some(event.id) && ex.recurrence_id == Some(wall));
             let (source, is_exception) = matched.map_or((event, false), |ex| (ex, true));
             let location = db::location_for_event(&pool, source).await;
-            let mut view = event_view(source, &db::event_etag(source), &[], location.as_ref());
+            let mut view = event_view(
+                source,
+                &db::event_etag(source),
+                &[],
+                location.as_ref(),
+                &registry,
+            );
             view["occurrence"] = match point {
                 calendar_core::DateOrDateTime::Timed(at) => {
                     serde_json::json!({"kind": "timed", "at": at})
@@ -1614,6 +1657,7 @@ fn build_router(state: AppState) -> Router {
         .merge(extras::router())
         .merge(sharing_api::router())
         .merge(rules_api::router())
+        .merge(categories_api::router())
         .merge(scheduling::router())
         .merge(admin_api::router())
         .route(
