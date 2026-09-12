@@ -122,6 +122,8 @@ Location is structured around Google Places-style concepts:
 
 Do not require Google at runtime. A location can exist without a provider ID.
 
+Optionally, a server-configured Google Places API (New) key (`GOOGLE_MAPS_API_KEY`) powers place autocomplete in the web UI through an authenticated server-side proxy; the key is never exposed to browsers. Without the key, locations are free text.
+
 Serialize compatible standard iCalendar location fields.
 
 ## 9. Attendees and scheduling
@@ -206,8 +208,8 @@ Support:
 - password authentication
 - WebAuthn/passkeys
 - TOTP 2FA
-- scoped API bearer tokens
-- client-compatible app passwords
+- scoped API bearer tokens (scopes: `read` = GET only, `write` = all methods and implies `read`, `full` or empty = unrestricted; enforced by HTTP-verb router middleware)
+- client-compatible app passwords (never scoped)
 
 The web UI authenticates with DB-backed sessions (HttpOnly cookie) and CSRF protection.
 

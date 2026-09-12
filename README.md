@@ -94,6 +94,7 @@ Configuration is environment-variable only — no config files, no CLI flags for
 | `ATTACHMENT_MAX_BYTES` | no | `52428800` (50 MB) | Per-attachment size cap |
 | `RETENTION_DAYS` | no | `30` | Soft-deleted resources are purged after this many days |
 | `POSTMARK_INBOUND_SECRET` | no | — | Shared secret validating Postmark's inbound iMIP webhook |
+| `GOOGLE_MAPS_API_KEY` | no | — | Google Places API (New) key enabling place autocomplete in the web UI event form. Key stays server-side; browsers call the `/api/places/*` proxy. Without it, the location field is free text. |
 
 \* `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGIN` must both be set to enable passkey login; otherwise it's disabled and every other auth method still works.
 
@@ -193,7 +194,17 @@ curl -s -b cookies.txt -H "X-CSRF-Token: $CSRF" \
   -d '{"summary":"Standup","starts_at":"2026-09-20T09:00:00Z","ends_at":"2026-09-20T09:15:00Z"}'
 ```
 
-Session cookies require the `X-CSRF-Token` header on every mutating request. Alternatively, skip cookies entirely and use a scoped bearer token (`POST /api/auth/tokens`) with `Authorization: Bearer <token>` — no CSRF header needed for token auth.
+Session cookies require the `X-CSRF-Token` header on every mutating request. Alternatively, skip cookies entirely and use a scoped bearer token with `Authorization: Bearer <token>` — no CSRF header needed for token auth. Manage tokens and app passwords from the **Credentials** page (`/credentials`) or the API (`POST /api/auth/tokens`).
+
+Token scopes (the `scopes` array at creation, validated server-side):
+
+| Scope | Grants |
+|---|---|
+| *(empty)* or `full` | Everything (legacy tokens have empty scopes) |
+| `write` | All methods, including reads |
+| `read` | GET/HEAD only — safe for read-only integrations |
+
+Scopes are enforced by an HTTP-verb router middleware: non-GET with a `read`-only token returns 403. App passwords are not scoped.
 
 ### Public sharing
 
