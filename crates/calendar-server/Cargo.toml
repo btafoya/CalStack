@@ -37,3 +37,4 @@ sqlx.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 dotenvy.workspace = true
+reqwest.workspace = true

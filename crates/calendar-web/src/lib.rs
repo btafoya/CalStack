@@ -82,6 +82,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "js/credentials.js",
+        asset!("js/credentials.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "css/summernote-bs5.min.css",
         asset!("css/summernote-bs5.min.css"),
         "text/css; charset=utf-8",
@@ -209,6 +214,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
     <button id="search-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-search"></i> Search</button>
     <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules"><i class="bi bi-sliders"></i> Rules</a>
     <a class="btn btn-outline-secondary btn-sm" href="/providers"><i class="bi bi-bell"></i> Providers</a>
+    <a class="btn btn-outline-secondary btn-sm" href="/credentials"><i class="bi bi-key"></i> Credentials</a>
     <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
     <button id="share-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-share"></i> Share</button>
     <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
@@ -245,19 +251,30 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
     <div class="modal-body">
       <div class="mb-3"><label class="form-label" for="ev-title">Title</label>
         <input class="form-control" id="ev-title" required></div>
-      <div class="row mb-3"><div class="col"><label class="form-label" for="ev-start">Start</label>
-        <input class="form-control" id="ev-start" type="datetime-local" required></div>
-      <div class="col"><label class="form-label" for="ev-end">End</label>
-        <input class="form-control" id="ev-end" type="datetime-local" required></div></div>
+      <div class="mb-3"><label class="form-label" for="ev-start-date">Start</label>
+        <div class="row g-2">
+          <div class="col-5"><input class="form-control" id="ev-start-date" type="date" required></div>
+          <div class="col-3"><select class="form-select" id="ev-start-hour"></select></div>
+          <div class="col-2"><select class="form-select" id="ev-start-min"></select></div>
+          <div class="col-2"><select class="form-select" id="ev-start-ampm"><option value="AM">AM</option><option value="PM">PM</option></select></div>
+        </div>
+        <input type="hidden" id="ev-start"></div>
+      <div class="mb-3"><label class="form-label" for="ev-end-date">End</label>
+        <div class="row g-2">
+          <div class="col-5"><input class="form-control" id="ev-end-date" type="date" required></div>
+          <div class="col-3"><select class="form-select" id="ev-end-hour"></select></div>
+          <div class="col-2"><select class="form-select" id="ev-end-min"></select></div>
+          <div class="col-2"><select class="form-select" id="ev-end-ampm"><option value="AM">AM</option><option value="PM">PM</option></select></div>
+        </div>
+        <input type="hidden" id="ev-end"></div>
       <div class="form-check mb-3">
         <input class="form-check-input" type="checkbox" id="ev-all-day">
         <label class="form-check-label" for="ev-all-day">All day</label>
       </div>
       <div class="row mb-3">
-        <div class="col"><label class="form-label" for="ev-location-name">Location</label>
-          <input class="form-control" id="ev-location-name" placeholder="Name"></div>
-        <div class="col"><label class="form-label" for="ev-location-address">&nbsp;</label>
-          <input class="form-control" id="ev-location-address" placeholder="Address"></div>
+        <div class="col position-relative"><label class="form-label" for="ev-location">Location</label>
+          <input class="form-control" id="ev-location" placeholder="Type a place or address" autocomplete="off">
+          <div id="ev-places-menu" class="list-group position-absolute shadow" style="top:100%;left:0;right:0;z-index:1060" hidden></div></div>
       </div>
       <div class="mb-3"><label class="form-label" for="ev-url">URL</label>
         <input class="form-control" id="ev-url" type="url"></div>
@@ -549,6 +566,82 @@ async fn admin_page() -> impl IntoResponse {
     )
 }
 
+const CREDENTIALS_PAGE: &str = r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar — Credentials</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+</head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom px-3">
+  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
+  <div class="ms-auto"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a></div>
+</nav>
+<div class="container p-3">
+  <div id="secret-banner" class="alert alert-warning d-none" role="alert">
+    <div class="fw-bold mb-1">Copy it now — it will not be shown again.</div>
+    <code id="secret-value"></code>
+  </div>
+
+  <h1 class="h4 mb-3">API tokens</h1>
+  <p class="text-body-secondary small">
+    Bearer tokens for third-party apps (<code>Authorization: Bearer</code>).
+    Scopes: empty or <code>full</code> = everything, <code>write</code> implies read,
+    <code>read</code> = GET only.
+  </p>
+  <form id="token-form" class="card p-3 mb-4">
+    <div class="row g-2 align-items-end">
+      <div class="col"><label class="form-label" for="token-name">Name</label>
+        <input class="form-control" id="token-name" required></div>
+      <div class="col-auto form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="token-readonly">
+        <label class="form-check-label" for="token-readonly">Read-only</label></div>
+      <div class="col-auto"><label class="form-label" for="token-expires">Expires (optional)</label>
+        <input class="form-control" id="token-expires" type="date"></div>
+      <div class="col-auto"><button class="btn btn-primary" type="submit">Create token</button></div>
+    </div>
+  </form>
+  <table class="table table-sm bg-body">
+    <thead><tr><th>Name</th><th>Scopes</th><th>Created</th><th>Expires</th><th></th></tr></thead>
+    <tbody id="token-rows"></tbody>
+  </table>
+
+  <h1 class="h4 mb-3 mt-4">App passwords</h1>
+  <p class="text-body-secondary small">
+    For CalDAV clients that only speak Basic auth. Username is your normal account
+    username; the password is generated here.
+  </p>
+  <form id="app-password-form" class="card p-3 mb-4">
+    <div class="row g-2 align-items-end">
+      <div class="col"><label class="form-label" for="ap-name">Name</label>
+        <input class="form-control" id="ap-name" required></div>
+      <div class="col-auto"><button class="btn btn-primary" type="submit">Create app password</button></div>
+    </div>
+  </form>
+  <table class="table table-sm bg-body">
+    <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
+    <tbody id="ap-rows"></tbody>
+  </table>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/credentials.js"></script>
+</body></html>"#;
+
+async fn credentials_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        CREDENTIALS_PAGE,
+    )
+}
+
 async fn index() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -578,5 +671,6 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
         .route("/rules", axum::routing::get(rules_page))
         .route("/admin", axum::routing::get(admin_page))
         .route("/providers", axum::routing::get(providers_page))
+        .route("/credentials", axum::routing::get(credentials_page))
         .route("/assets/{*path}", axum::routing::get(assets))
 }

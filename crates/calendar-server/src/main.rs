@@ -12,9 +12,10 @@ mod sharing_api;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use base64::Engine;
@@ -70,6 +71,8 @@ pub struct Config {
     pub attachment_max_bytes: i64,
     /// Soft-deleted calendar resources live this long before purge.
     pub retention_days: i64,
+    /// Google Places API key; enables place autocomplete in the web UI.
+    pub places_api_key: Option<String>,
 }
 
 impl Config {
@@ -95,6 +98,7 @@ impl Config {
             retention_days: env("RETENTION_DAYS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            places_api_key: env("GOOGLE_MAPS_API_KEY").filter(|k| !k.is_empty()),
         })
     }
 }
@@ -113,6 +117,8 @@ struct Auth {
 enum AuthExtractError {
     #[error("unauthorized")]
     Unauthorized,
+    #[error("token scope does not permit this operation")]
+    Forbidden,
     #[error(transparent)]
     Db(#[from] db::DbError),
 }
@@ -121,6 +127,7 @@ impl IntoResponse for AuthExtractError {
     fn into_response(self) -> axum::response::Response {
         let status = match self {
             AuthExtractError::Unauthorized => StatusCode::UNAUTHORIZED,
+            AuthExtractError::Forbidden => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(serde_json::json!({"error": self.to_string()}))).into_response()
@@ -212,6 +219,48 @@ fn require_csrf(auth: &Auth, headers: &HeaderMap) -> Result<(), AuthExtractError
         }
     }
     Ok(())
+}
+
+/// Token scope model: empty (legacy) or "full" = everything; "write" implies
+/// "read"; "read" grants GET/HEAD only. Enforced for Bearer tokens by
+/// [`token_scope_guard`]; session-cookie requests are not scoped.
+fn scope_allows(scopes: &[String], required: &str) -> bool {
+    scopes.is_empty()
+        || scopes
+            .iter()
+            .any(|s| s == "full" || s == required || (required == "read" && s == "write"))
+}
+
+/// Bearer tokens are scoped by HTTP verb: reads need "read", everything else
+/// "write". Sessions and Basic auth are untouched. Runs before the handlers,
+/// which resolve auth again — one extra indexed token lookup per Bearer
+/// request (ponytail: central check beats 62 per-handler edits; dedupe by
+/// stashing the token row in request extensions if lookup ever shows up).
+async fn token_scope_guard(
+    State(AppState { pool, .. }): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, AuthExtractError> {
+    let bearer = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if let Some(bearer) = bearer {
+        let token = db::find_live_api_token(&pool, &calendar_auth::sha256(bearer.as_bytes()))
+            .await
+            .map_err(|_| AuthExtractError::Unauthorized)?;
+        let required = match *req.method() {
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS => {
+                "read"
+            }
+            _ => "write",
+        };
+        if !scope_allows(&token.scopes, required) {
+            return Err(AuthExtractError::Forbidden);
+        }
+    }
+    Ok(next.run(req).await)
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -427,13 +476,22 @@ async fn create_token(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_csrf(&auth, &headers)?;
+    let scopes = body.scopes.unwrap_or_default();
+    if scopes
+        .iter()
+        .any(|s| !matches!(s.as_str(), "read" | "write" | "full"))
+    {
+        return Err(AppError::bad_request(
+            "unknown scope; allowed: read, write, full",
+        ));
+    }
     let secret = calendar_auth::generate_secret();
     let token = db::create_api_token(
         &pool,
         auth.user.id,
         &body.name,
         &calendar_auth::sha256(secret.as_bytes()),
-        body.scopes.as_deref().unwrap_or(&[]),
+        &scopes,
         body.expires_at,
     )
     .await?;
@@ -521,6 +579,152 @@ async fn revoke_app_password(
     require_csrf(&auth, &headers)?;
     db::revoke_app_password(&pool, auth.user.id, password_id).await?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ============ places (Google Places proxy; GOOGLE_MAPS_API_KEY) ============
+
+/// The key stays server-side; the browser only sees our authenticated proxy.
+fn places_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::Client::builder().build().unwrap())
+}
+
+fn places_key(config: &Config) -> Result<&str, AppError> {
+    config
+        .places_api_key
+        .as_deref()
+        .ok_or_else(|| AppError::bad_request("place autocomplete is not configured"))
+}
+
+async fn places_autocomplete(
+    State(AppState { pool, config, .. }): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<AutocompleteQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    resolve_auth(&pool, &headers).await?;
+    let key = places_key(&config)?;
+    let resp = places_client()
+        .post("https://places.googleapis.com/v1/places:autocomplete")
+        .header("X-Goog-Api-Key", key)
+        .header(
+            "X-Goog-FieldMask",
+            "suggestions.placePrediction.placeId,suggestions.placePrediction.text,suggestions.placePrediction.structuredFormat",
+        )
+        .json(&serde_json::json!({"input": q.q}))
+        .send()
+        .await
+        .map_err(|e| AppError::bad_request(format!("places lookup failed: {e}")))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "places lookup failed ({status})"
+        )));
+    }
+    let items: Vec<serde_json::Value> = body["suggestions"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|s| {
+            let p = &s["placePrediction"];
+            let label = format!(
+                "{} {}",
+                p["structuredFormat"]["mainText"]["text"]
+                    .as_str()
+                    .unwrap_or(""),
+                p["structuredFormat"]["secondaryText"]["text"]
+                    .as_str()
+                    .unwrap_or("")
+            )
+            .trim()
+            .to_string();
+            p["placeId"]
+                .as_str()
+                .map(|id| serde_json::json!({"label": label, "place_id": id}))
+        })
+        .collect();
+    Ok(Json(serde_json::json!(items)))
+}
+
+#[derive(serde::Deserialize)]
+struct AutocompleteQuery {
+    q: String,
+}
+
+/// First address component carrying `types` contains; short selects shortText.
+fn address_component(details: &serde_json::Value, ty: &str, short: bool) -> Option<String> {
+    details["addressComponents"]
+        .as_array()?
+        .iter()
+        .find(|c| {
+            c["types"]
+                .as_array()
+                .map(|ts| ts.iter().any(|t| t.as_str() == Some(ty)))
+                .unwrap_or(false)
+        })
+        .and_then(|c| {
+            c[if short { "shortText" } else { "longText" }]
+                .as_str()
+                .map(String::from)
+        })
+}
+
+/// Maps a Places API (New) place details response onto the event
+/// LocationBody shape, which create_location_from_body already stores.
+fn place_details_to_location(details: &serde_json::Value) -> serde_json::Value {
+    let street = match (
+        address_component(details, "street_number", false),
+        address_component(details, "route", false),
+    ) {
+        (Some(n), Some(r)) => Some(format!("{n} {r}")),
+        (None, Some(r)) => Some(r),
+        _ => None,
+    };
+    serde_json::json!({
+        "provider": "google_places",
+        "provider_place_id": details["id"].as_str(),
+        "display_name": details["displayName"]["text"].as_str(),
+        "formatted_address": details["formattedAddress"].as_str(),
+        "street_address": street,
+        "locality": address_component(details, "locality", false)
+            .or_else(|| address_component(details, "sublocality", false)),
+        "administrative_area": address_component(details, "administrative_area_level_1", true),
+        "postal_code": address_component(details, "postal_code", false),
+        "country": address_component(details, "country", true),
+        "latitude": details["location"]["latitude"].as_f64(),
+        "longitude": details["location"]["longitude"].as_f64(),
+        "website": details["websiteUri"].as_str(),
+        "phone": details["nationalPhoneNumber"].as_str(),
+    })
+}
+
+async fn place_details(
+    State(AppState { pool, config, .. }): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(place_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    resolve_auth(&pool, &headers).await?;
+    let key = places_key(&config)?;
+    let resp = places_client()
+        .get(format!(
+            "https://places.googleapis.com/v1/places/{place_id}?languageCode=en"
+        ))
+        .header("X-Goog-Api-Key", key)
+        .header(
+            "X-Goog-FieldMask",
+            "id,displayName,formattedAddress,addressComponents,location,websiteUri,nationalPhoneNumber",
+        )
+        .send()
+        .await
+        .map_err(|e| AppError::bad_request(format!("places lookup failed: {e}")))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "places lookup failed ({status})"
+        )));
+    }
+    Ok(Json(place_details_to_location(&body)))
 }
 
 // ============ calendars ============
@@ -1390,6 +1594,8 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/api/auth/app-passwords/{id}", delete(revoke_app_password))
         .route("/api/calendars", post(create_calendar).get(list_calendars))
+        .route("/api/places/autocomplete", get(places_autocomplete))
+        .route("/api/places/{place_id}", get(place_details))
         .route(
             "/api/calendars/{id}",
             get(get_calendar)
@@ -1416,6 +1622,10 @@ fn build_router(state: AppState) -> Router {
             "/.well-known/caldav",
             get(|| async { axum::response::Redirect::permanent("/calendars/") }),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            token_scope_guard,
+        ))
         .layer(security_headers())
         .with_state(state)
 }
@@ -1547,5 +1757,98 @@ async fn main() -> anyhow::Result<()> {
             email,
             password,
         } => run_create_admin(&cfg, &username, &email, &password).await,
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::scope_allows;
+
+    fn scopes(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_scopes_are_full_access() {
+        assert!(scope_allows(&[], "read"));
+        assert!(scope_allows(&[], "write"));
+    }
+
+    #[test]
+    fn full_scope_grants_everything() {
+        assert!(scope_allows(&scopes(&["full"]), "read"));
+        assert!(scope_allows(&scopes(&["full"]), "write"));
+    }
+
+    #[test]
+    fn read_scope_denies_writes() {
+        assert!(scope_allows(&scopes(&["read"]), "read"));
+        assert!(!scope_allows(&scopes(&["read"]), "write"));
+    }
+
+    #[test]
+    fn write_scope_implies_read() {
+        assert!(scope_allows(&scopes(&["write"]), "write"));
+        assert!(scope_allows(&scopes(&["write"]), "read"));
+    }
+
+    #[test]
+    fn unknown_scopes_grant_nothing() {
+        assert!(!scope_allows(&scopes(&["admin"]), "read"));
+        assert!(!scope_allows(&scopes(&["admin"]), "write"));
+    }
+}
+
+#[cfg(test)]
+mod places_tests {
+    use super::{address_component, place_details_to_location};
+    use serde_json::json;
+
+    #[test]
+    fn maps_place_details_to_location_body() {
+        let details = json!({
+            "id": "ChIJabc",
+            "displayName": {"text": "Union Station"},
+            "formattedAddress": "1701 Wynkoop St, Denver, CO 80202, USA",
+            "addressComponents": [
+                {"longText": "1701", "shortText": "1701", "types": ["street_number"]},
+                {"longText": "Wynkoop Street", "shortText": "Wynkoop St", "types": ["route"]},
+                {"longText": "Denver", "shortText": "Denver", "types": ["locality"]},
+                {"longText": "Colorado", "shortText": "CO", "types": ["administrative_area_level_1"]},
+                {"longText": "80202", "shortText": "80202", "types": ["postal_code"]},
+                {"longText": "United States", "shortText": "US", "types": ["country"]}
+            ],
+            "location": {"latitude": 39.7534, "longitude": -105.0016},
+            "websiteUri": "https://example.com",
+            "nationalPhoneNumber": "(303) 555-0100"
+        });
+        let loc = place_details_to_location(&details);
+        assert_eq!(loc["provider"], "google_places");
+        assert_eq!(loc["provider_place_id"], "ChIJabc");
+        assert_eq!(loc["display_name"], "Union Station");
+        assert_eq!(loc["street_address"], "1701 Wynkoop Street");
+        assert_eq!(loc["locality"], "Denver");
+        assert_eq!(loc["administrative_area"], "CO");
+        assert_eq!(loc["country"], "US");
+        assert_eq!(loc["latitude"], 39.7534);
+        assert_eq!(loc["website"], "https://example.com");
+    }
+
+    #[test]
+    fn missing_components_stay_null() {
+        let loc = place_details_to_location(&json!({"id": "x", "location": {}}));
+        assert_eq!(loc["street_address"], serde_json::Value::Null);
+        assert_eq!(loc["country"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn sublocality_falls_back_for_locality() {
+        let details = json!({"addressComponents": [
+            {"longText": "Brooklyn", "shortText": "Brooklyn", "types": ["sublocality"]}
+        ]});
+        assert_eq!(
+            address_component(&details, "sublocality", false),
+            Some("Brooklyn".into())
+        );
     }
 }

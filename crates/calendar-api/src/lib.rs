@@ -96,7 +96,9 @@ pub fn openapi_document() -> serde_json::Value {
                 "post": {"summary": format!("Create {summary}"),
                     "requestBody": {"content": {"application/json": {"schema": {
                         "type": "object", "required": ["name"],
-                        "properties": {"name": {"type": "string"}, "scopes": {"type": "array", "items": {"type": "string"}},
+                        "properties": {"name": {"type": "string"}, "scopes": {"type": "array", "items": {"type": "string",
+                            "enum": ["read", "write", "full"]},
+                            "description": "empty = full access; write implies read; read grants GET only"},
                             "expires_at": {"type": ["string", "null"], "format": "date-time"}}}}}},
                     "responses": secret_responses},
                 "get": {"summary": format!("List {summary}"), "responses": {"200": {"description": "list"}}},
@@ -266,6 +268,22 @@ pub fn openapi_document() -> serde_json::Value {
             "get": {"summary": "Download an attachment", "responses": {"200": {"description": "bytes"}}},
             "delete": {"summary": "Delete an attachment", "responses": {"200": {"description": "deleted"}}},
         }),
+    );
+    put(
+        "/api/places/autocomplete",
+        json!({"get": {
+            "summary": "Google Places autocomplete proxy (requires GOOGLE_MAPS_API_KEY)",
+            "parameters": [{"name": "q", "in": "query", "required": true, "schema": {"type": "string"}}],
+            "responses": {"200": {"description": "suggestions: [{label, place_id}]"}}
+        }}),
+    );
+    put(
+        "/api/places/{place_id}",
+        json!({"get": {
+            "summary": "Resolve a Google place into the structured event location shape",
+            "parameters": [param("place_id", true)],
+            "responses": {"200": {"description": "location fields"}}
+        }}),
     );
     put(
         "/api/search",

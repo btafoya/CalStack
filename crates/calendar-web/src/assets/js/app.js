@@ -22,6 +22,7 @@
     editingRruleUnknown: false,
     currentAcl: [],
     currentShares: [],
+    calendarActivated: false,
   };
 
   function api(method, url, data, extraHeaders) {
@@ -63,7 +64,50 @@
     $('#cal-list li[data-id="' + cal.id + '"]').addClass('active');
     updateRulesLink();
     updateCalendarVisibility();
-    $('#calendar').bsCalendar('refresh');
+    if (!state.calendarActivated) {
+      // Constructing bs-calendar while #calendar is still hidden (no
+      // calendar selected yet) bakes in a wrong internal event-fetch date
+      // range that no refresh()/setToday()/navigation call afterwards ever
+      // corrects (confirmed: grid renders the correct week, but every
+      // fetch keeps targeting a different one). Deferring construction
+      // until the container is actually shown avoids the bad state
+      // entirely. Later calendar switches just refresh() the existing
+      // instance to keep whatever period the user has navigated to.
+      state.calendarActivated = true;
+      initCalendarWidget();
+    } else {
+      $('#calendar').bsCalendar('refresh');
+    }
+  }
+
+  function initCalendarWidget() {
+    $('#calendar').bsCalendar({
+      url: function (requestData) { return eventsUrl(requestData); },
+      startView: 'month',
+      locale: 'en-US',
+      showTasks: false,
+      onAfterLoad: convertCalendarTimesToAmPm,
+      onAdd: function (data) {
+        openEventModal('create', {
+          start: partToLocalInput(data && data.start, '09:00'),
+          end: partToLocalInput(data && data.end, '10:00'),
+        });
+      },
+      // ponytail: editing/deleting a recurring occurrence acts on the whole
+      // series (the shared master event) — per-occurrence exceptions need
+      // their own RECURRENCE-ID UI, add when single-instance edits matter.
+      onEdit: function (appointment) {
+        var ev = state.eventCache[appointment.id];
+        if (ev) { openEventModal('edit', ev); }
+      },
+      onDelete: function (appointment) {
+        var ev = state.eventCache[appointment.id];
+        if (ev && window.confirm('Delete "' + (ev.summary || 'this event') + '"?')) {
+          deleteEvent(ev.id, ev.etag);
+        }
+      },
+    });
+    startAmPmObserver();
   }
 
   $('#add-cal-btn').on('click', function () {
@@ -147,6 +191,46 @@
     return value ? new Date(value).toISOString() : null;
   }
 
+  // ============ AM/PM start/end time controls ============
+  // Native type="datetime-local"/"time" pickers render 12h vs 24h per the
+  // browser/OS locale, not per-page — there's no attribute to force AM/PM.
+  // These build our own date+hour+minute+AM/PM controls; #ev-start/#ev-end
+  // stay hidden inputs holding the same "YYYY-MM-DDTHH:MM" value the rest
+  // of the code already reads/writes, so save/load logic is untouched.
+  function populateTimeSelectOptions() {
+    ['start', 'end'].forEach(function (prefix) {
+      var hourSel = $('#ev-' + prefix + '-hour').empty();
+      for (var h = 1; h <= 12; h++) { hourSel.append($('<option>').val(pad(h)).text(pad(h))); }
+      var minSel = $('#ev-' + prefix + '-min').empty();
+      for (var m = 0; m < 60; m++) { minSel.append($('<option>').val(pad(m)).text(pad(m))); }
+    });
+  }
+
+  function setTimeControls(prefix, value) {
+    $('#ev-' + prefix).val(value || '');
+    var d = value ? new Date(value) : null;
+    var valid = d && !isNaN(d.getTime());
+    $('#ev-' + prefix + '-date').val(valid ? value.slice(0, 10) : '');
+    var h24 = valid ? d.getHours() : 9;
+    $('#ev-' + prefix + '-hour').val(pad(h24 % 12 || 12));
+    $('#ev-' + prefix + '-min').val(valid ? pad(d.getMinutes()) : '00');
+    $('#ev-' + prefix + '-ampm').val(h24 >= 12 ? 'PM' : 'AM');
+  }
+
+  function syncTimeControls(prefix) {
+    var date = $('#ev-' + prefix + '-date').val();
+    var h12 = parseInt($('#ev-' + prefix + '-hour').val(), 10) || 12;
+    var min = $('#ev-' + prefix + '-min').val() || '00';
+    var h24 = $('#ev-' + prefix + '-ampm').val() === 'PM' ? (h12 % 12) + 12 : h12 % 12;
+    $('#ev-' + prefix).val(date ? date + 'T' + pad(h24) + ':' + min : '');
+  }
+
+  populateTimeSelectOptions();
+  ['start', 'end'].forEach(function (prefix) {
+    $('#ev-' + prefix + '-date, #ev-' + prefix + '-hour, #ev-' + prefix + '-min, #ev-' + prefix + '-ampm')
+      .on('change', function () { syncTimeControls(prefix); });
+  });
+
   // ============ bs-calendar data feed ============
   function toAppointment(ev, occurrence) {
     var start, end;
@@ -197,12 +281,28 @@
     return toIso(value);
   }
 
+  // bs-calendar 2.4.0's week view passes a wrong fromDate/toDate to url()
+  // (verified: consistently off by 1-2 weeks regardless of construction
+  // options or setDate()/setToday() calls) while still rendering the
+  // correct day-header cells. Read the actually-displayed week straight
+  // from those headers instead of trusting the plugin's own range.
+  function weekViewDateRange(requestData) {
+    if (requestData.view === 'week') {
+      var dates = $('#calendar .wc-day-header[data-date]').map(function () {
+        return $(this).attr('data-date');
+      }).get().sort();
+      if (dates.length) { return { from: dates[0], to: dates[dates.length - 1] }; }
+    }
+    return { from: requestData.fromDate, to: requestData.toDate };
+  }
+
   function eventsUrl(requestData) {
     var cal = state.currentCalendar;
     if (!cal) { return Promise.resolve([]); }
+    var range = weekViewDateRange(requestData);
     var params = new URLSearchParams({
-      from: toIso(requestData.fromDate),
-      to: toIsoExclusiveEnd(requestData.toDate),
+      from: toIso(range.from),
+      to: toIsoExclusiveEnd(range.to),
     });
     return fetch('/api/calendars/' + cal.id + '/occurrences?' + params)
       .then(function (r) { return r.json(); })
@@ -335,13 +435,16 @@
     $('#ev-delete').prop('hidden', mode !== 'edit');
     $('#ev-attachments-section').prop('hidden', mode !== 'edit');
     state.editingAttendees = [];
+    state.placeLocation = null;
+    pickedPlace = null;
+    hidePlaceMenu();
     if (mode === 'edit') {
       state.editingEventId = payload.id;
       state.editingEtag = payload.etag;
       state.editingRruleUnknown = !applyRruleToForm(payload.rrule);
       $('#ev-title').val(payload.summary || '');
-      $('#ev-start').val(isoToLocalInput(payload.starts_at || payload.start_date));
-      $('#ev-end').val(isoToLocalInput(payload.ends_at || payload.end_date));
+      setTimeControls('start', isoToLocalInput(payload.starts_at || payload.start_date));
+      setTimeControls('end', isoToLocalInput(payload.ends_at || payload.end_date));
       $('#ev-all-day').prop('checked', !!payload.all_day);
       $('#ev-url').val(payload.url || '');
       $('#ev-status').val(payload.status || '');
@@ -349,8 +452,13 @@
       $('#ev-transp').val(payload.transp || '');
       $('#ev-categories').val((payload.categories || []).join(', '));
       var loc = payload.location || {};
-      $('#ev-location-name').val(loc.display_name || '');
-      $('#ev-location-address').val(loc.formatted_address || '');
+      $('#ev-location').val(locationDisplayText(loc));
+      // Carrying a place-picked location through: reuse its structured fields
+      // unless the user edits the text afterwards.
+      if (loc.provider_place_id) {
+        state.placeLocation = $.extend({}, loc);
+        pickedText = locationDisplayText(loc);
+      }
       state.editingAttendees = (payload.attendees || []).map(function (a) {
         return { email: a.email, display_name: a.display_name || null };
       });
@@ -361,21 +469,78 @@
       state.editingEtag = null;
       state.editingRruleUnknown = false;
       applyRruleToForm(null);
-      $('#ev-start').val(payload.start || '');
-      $('#ev-end').val(payload.end || '');
+      setTimeControls('start', payload.start || '');
+      setTimeControls('end', payload.end || '');
       $('#ev-desc').summernote('code', '');
     }
     renderAttendees();
     modal('event-modal').show();
   }
 
+  // ============ place autocomplete (server-side Google proxy) ============
+  // Silent $.getJSON: typing shouldn't alert() when the proxy is unconfigured.
+  var placeTimer = null;
+  var pickedPlace = null;
+  // The field text as the picker wrote it; typing anything else drops the
+  // structured place and the text becomes a plain free-text location.
+  var pickedText = null;
+
+  function hidePlaceMenu() {
+    $('#ev-places-menu').empty().prop('hidden', true);
+  }
+
+  // What the single Location field shows for a structured place: name and
+  // full address (Google's formatted_address alone often drops the name).
+  function locationDisplayText(loc) {
+    var name = loc.display_name || '';
+    var address = loc.formatted_address || '';
+    if (name && address && name !== address) { return name + ' — ' + address; }
+    return name || address;
+  }
+
+  $('#ev-location').on('input', function () {
+    hidePlaceMenu();
+    if (pickedPlace && $(this).val() !== pickedText) {
+      state.placeLocation = null;
+      pickedPlace = null;
+      pickedText = null;
+    }
+    var q = $(this).val();
+    if (q.length < 2) { return; }
+    clearTimeout(placeTimer);
+    placeTimer = setTimeout(function () {
+      $.getJSON('/api/places/autocomplete', { q: q }).done(function (list) {
+        if (!list || !list.length) { return; }
+        var $menu = $('#ev-places-menu').empty();
+        list.forEach(function (item) {
+          $menu.append($('<a href="#" class="list-group-item list-group-item-action py-1">')
+            .text(item.label)
+            .data('placeId', item.place_id));
+        });
+        $menu.prop('hidden', false);
+      });
+    }, 300);
+  });
+
+  $('#ev-places-menu').on('click', 'a', function (ev) {
+    ev.preventDefault();
+    var id = $(this).data('placeId');
+    hidePlaceMenu();
+    $.getJSON('/api/places/' + encodeURIComponent(id)).done(function (loc) {
+      state.placeLocation = loc;
+      pickedPlace = loc;
+      // Show name and full address; both stay in the structured fields.
+      pickedText = locationDisplayText(loc);
+      $('#ev-location').val(pickedText);
+    });
+  });
+
   function saveEvent(e) {
     e.preventDefault();
     if (!state.currentCalendar) { return; }
     var html = $('#ev-desc').summernote('isEmpty') ? null : $('#ev-desc').summernote('code');
     var allDay = $('#ev-all-day').is(':checked');
-    var locationName = $('#ev-location-name').val();
-    var locationAddress = $('#ev-location-address').val();
+    var locationText = $('#ev-location').val();
     var categories = $('#ev-categories').val();
     var body = {
       summary: $('#ev-title').val(),
@@ -387,9 +552,14 @@
       transp: $('#ev-transp').val() || null,
       categories: categories ? categories.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : [],
       attendees: state.editingAttendees,
-      location: (locationName || locationAddress)
-        ? { display_name: locationName || null, formatted_address: locationAddress || null }
-        : null,
+      // Picked place: structured fields (name + full address) as Google
+      // returned them; the text is just the visible address. Otherwise the
+      // text IS the location (free text, no structured parts).
+      location: state.placeLocation
+        ? $.extend({}, state.placeLocation)
+        : locationText
+          ? { display_name: locationText }
+          : null,
     };
     if (allDay) {
       body.all_day = true;
@@ -611,35 +781,7 @@
       if (user.is_admin) { $('#admin-nav-link').prop('hidden', false); }
     });
     loadSubscriptions();
-    loadCalendars().done(function () {
-      $('#calendar').bsCalendar({
-        url: function (requestData) { return eventsUrl(requestData); },
-        startView: 'week',
-        locale: 'en-US',
-        showTasks: false,
-        onAfterLoad: convertCalendarTimesToAmPm,
-        onAdd: function (data) {
-          openEventModal('create', {
-            start: partToLocalInput(data && data.start, '09:00'),
-            end: partToLocalInput(data && data.end, '10:00'),
-          });
-        },
-        // ponytail: editing/deleting a recurring occurrence acts on the whole
-        // series (the shared master event) — per-occurrence exceptions need
-        // their own RECURRENCE-ID UI, add when single-instance edits matter.
-        onEdit: function (appointment) {
-          var ev = state.eventCache[appointment.id];
-          if (ev) { openEventModal('edit', ev); }
-        },
-        onDelete: function (appointment) {
-          var ev = state.eventCache[appointment.id];
-          if (ev && window.confirm('Delete "' + (ev.summary || 'this event') + '"?')) {
-            deleteEvent(ev.id, ev.etag);
-          }
-        },
-      });
-      startAmPmObserver();
-    });
+    loadCalendars();
 
     $('#logout-btn').on('click', function () {
       api('POST', '/api/auth/logout').done(function () {
