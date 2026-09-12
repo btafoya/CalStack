@@ -41,6 +41,7 @@ calendar-caldav
 
 calendar-api
 - OpenAPI models and handlers
+- the generated document is served at `/api/openapi.json`; a vendored Swagger UI renders it at `/docs` (no CDN)
 
 calendar-rules
 - triggers, conditions and actions
