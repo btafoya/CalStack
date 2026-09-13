@@ -141,21 +141,6 @@ async fn list_attendees(pool: &PgPool, event_id: Uuid) -> Result<Vec<AttendeeRow
     .map_err(Into::into)
 }
 
-pub async fn find_attendee(
-    pool: &PgPool,
-    event_id: Uuid,
-    email: &str,
-) -> Result<Option<AttendeeRow>, DbError> {
-    sqlx::query_as::<_, AttendeeRow>(
-        "SELECT * FROM event_attendees WHERE event_id = $1 AND email = $2",
-    )
-    .bind(event_id)
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(Into::into)
-}
-
 pub async fn update_partstat(
     pool: &PgPool,
     event_id: Uuid,

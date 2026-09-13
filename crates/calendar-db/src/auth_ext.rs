@@ -1,7 +1,7 @@
 //! TOTP and WebAuthn repositories (schema in 0001/0002).
 
 use super::DbError;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -177,55 +177,4 @@ pub async fn delete_webauthn_credential(
         return Err(DbError::NotFound);
     }
     Ok(())
-}
-
-// ============ challenge state ============
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ChallengeRow {
-    pub id: Uuid,
-    pub user_id: Option<Uuid>,
-    pub username: Option<String>,
-    pub kind: String,
-    pub state: serde_json::Value,
-    pub expires_at: chrono::DateTime<Utc>,
-}
-
-pub async fn create_challenge(
-    pool: &PgPool,
-    user_id: Option<Uuid>,
-    username: Option<&str>,
-    kind: &str,
-    state: serde_json::Value,
-) -> Result<Uuid, DbError> {
-    let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO webauthn_challenges (id, user_id, username, kind, state, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(id)
-    .bind(user_id)
-    .bind(username)
-    .bind(kind)
-    .bind(state)
-    .bind(Utc::now() + Duration::minutes(10))
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
-pub async fn get_challenge(pool: &PgPool, id: Uuid) -> Result<ChallengeRow, DbError> {
-    let row = sqlx::query_as::<_, ChallengeRow>(
-        "SELECT * FROM webauthn_challenges WHERE id = $1 AND expires_at > now()",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(DbError::NotFound)?;
-    // Challenges are single-use.
-    sqlx::query("DELETE FROM webauthn_challenges WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(row)
 }
