@@ -230,7 +230,7 @@ make verify   # fmt + check + lint + test
 make interop  # end-to-end suite against a throwaway PostgreSQL instance
 ```
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/PRD.md`](docs/PRD.md), [`docs/DECISIONS.md`](docs/DECISIONS.md), and [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for design rationale and client-compatibility notes.
+See [`docs/README.md`](docs/README.md) for design rationale, ADRs, and client-compatibility notes.
 
 ## License
 
