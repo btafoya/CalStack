@@ -68,8 +68,9 @@ $(function () {
   $(document).on('click', '[data-kind][data-id]', function () {
     var kind = $(this).data('kind');
     var id = $(this).data('id');
-    if (!window.confirm('Revoke this credential? Apps using it will stop working.')) { return; }
-    api('DELETE', '/api/auth/' + kind + 's/' + id).done(load);
+    confirmDialog('Revoke this credential? Apps using it will stop working.').done(function () {
+      api('DELETE', '/api/auth/' + kind + 's/' + id).done(load);
+    });
   });
 
   load();
