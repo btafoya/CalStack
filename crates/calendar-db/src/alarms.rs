@@ -2,7 +2,7 @@
 //! calendar-server). Alarm triggers are computed per occurrence in Rust —
 //! recurrence expansion is not SQL's job (ADR-002).
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -160,9 +160,4 @@ pub async fn create_notification_deduped(
 
 pub fn now() -> DateTime<Utc> {
     Utc::now()
-}
-
-/// Horizon helper shared with the recurrence engine's callers.
-pub fn scan_window_lookback() -> Duration {
-    Duration::minutes(2)
 }

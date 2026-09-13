@@ -200,14 +200,6 @@ pub struct ContactTelRow {
     pub is_primary: bool,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
-pub struct GroupMemberRow {
-    pub group_contact_id: Uuid,
-    pub raw_member: String,
-    pub member_contact_id: Option<Uuid>,
-    pub member_user_id: Option<Uuid>,
-}
-
 /// A resolved group member, for API display: whichever of contact/user it
 /// pointed at, plus that member's display name.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -489,20 +481,6 @@ pub async fn list_tels(pool: &PgPool, contact_id: Uuid) -> Result<Vec<ContactTel
          WHERE contact_id = $1 ORDER BY is_primary DESC",
     )
     .bind(contact_id)
-    .fetch_all(pool)
-    .await
-    .map_err(Into::into)
-}
-
-pub async fn list_group_members(
-    pool: &PgPool,
-    group_contact_id: Uuid,
-) -> Result<Vec<GroupMemberRow>, DbError> {
-    sqlx::query_as::<_, GroupMemberRow>(
-        "SELECT group_contact_id, raw_member, member_contact_id, member_user_id
-         FROM contact_group_members WHERE group_contact_id = $1",
-    )
-    .bind(group_contact_id)
     .fetch_all(pool)
     .await
     .map_err(Into::into)
