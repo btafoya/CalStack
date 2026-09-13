@@ -220,7 +220,7 @@ macro_rules! subpage_header {
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
-    <a class="navbar-brand" href="/"><img src="/assets/img/logo.png" alt="Calendar" height="32"></a>
+    <a class="navbar-brand" href="/"><img src="/assets/img/logo.png" alt="CalStack" height="32"></a>
     <div class="navbar-nav flex-row order-md-last">
       <div class="nav-item me-2">
         <button type="button" id="theme-toggle" class="nav-link px-0" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
@@ -290,7 +290,7 @@ const LOGIN_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar — Sign in</title>
+<title>CalStack — Sign in</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/app.css">
 <script src="/assets/js/theme.js"></script>
@@ -299,7 +299,7 @@ const LOGIN_PAGE: &str = concat!(
 <div class="flex-grow-1 d-flex align-items-center">
 <div class="container" style="max-width:420px">
   <form id="login-form" class="card p-4 mt-5">
-    <h1 class="h4 mb-3">Calendar</h1>
+    <h1 class="h4 mb-3">CalStack</h1>
     <div class="mb-3"><label class="form-label" for="user">Username or email</label>
       <input class="form-control" id="user" name="user" autocomplete="username" required></div>
     <div class="mb-3"><label class="form-label" for="pass">Password</label>
@@ -353,7 +353,7 @@ const APP_PAGE_HEAD: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar</title>
+<title>CalStack</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/summernote-bs5.min.css">
@@ -372,7 +372,7 @@ const APP_PAGE_HEAD: &str = concat!(
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
-    <a class="navbar-brand" href="/"><img src="/assets/img/logo.png" alt="Calendar" height="32"></a>
+    <a class="navbar-brand" href="/"><img src="/assets/img/logo.png" alt="CalStack" height="32"></a>
     <div class="navbar-nav flex-row order-md-last">
       <div class="nav-item me-2 d-none d-md-flex">
         <button id="search-btn" class="nav-link px-2" type="button" aria-label="Search"><i class="bi bi-search"></i></button>
@@ -594,7 +594,7 @@ const RULES_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar — Rules</title>
+<title>CalStack — Rules</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -663,7 +663,7 @@ const CATEGORIES_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar — Categories</title>
+<title>CalStack — Categories</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -717,7 +717,7 @@ const CONTACTS_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar — Contacts</title>
+<title>CalStack — Contacts</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -782,7 +782,7 @@ const ADMIN_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar — Admin</title>
+<title>CalStack — Admin</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -833,7 +833,7 @@ const PROVIDERS_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar — Providers</title>
+<title>CalStack — Providers</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -934,7 +934,7 @@ const CREDENTIALS_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar — Credentials</title>
+<title>CalStack — Credentials</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -1005,7 +1005,7 @@ const SWAGGER_PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Calendar — API docs</title>
+<title>CalStack — API docs</title>
 <link rel="stylesheet" href="/assets/css/swagger-ui.css">
 <style>body{margin:0}.topbar{display:none}</style>
 </head>

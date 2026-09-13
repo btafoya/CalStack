@@ -1,113 +1,222 @@
-/* Tabler color scheme (github.com/tabler/tabler, @tabler/core 1.4.0 dist CSS)
-   mapped onto Bootstrap 5.3. No build step, so the compiled Bootstrap rules
-   that bake the default blue in are overridden here. Light + dark. */
+/* CalStack brand theme on Bootstrap 5.3. No build step, so the compiled
+   Bootstrap rules that bake the default blue in are overridden here.
+   Surface model: --bs-body-bg = card/panel surface, --bs-tertiary-bg = page
+   background (body elements carry bg-body-tertiary), --bs-secondary-bg =
+   navbar/footer/selected surface. Light + dark. */
+
+:root {
+  --calstack-navy: #0B2670;
+  --calstack-blue: #1554C0;
+  --calstack-electric: #0D7FF2;
+  --calstack-cyan: #12AEE8;
+  --calstack-green: #12C957;
+  --calstack-gradient: linear-gradient(135deg, #0B2670 0%, #1554C0 50%, #12AEE8 100%);
+}
 
 [data-bs-theme="light"] {
-  --bs-body-color: #1f2937; /* tabler gray-800 */
+  --bs-body-color: #172554;
   --bs-body-bg: #ffffff; /* card/table surface */
-  --bs-tertiary-bg: #f9fafb; /* gray-50: page background */
-  --bs-border-color: #e5e7eb; /* gray-200 */
-  --bs-secondary-color: #6b7280; /* gray-500: tabler muted */
-  --bs-primary-rgb: 6, 111, 209; /* tabler primary #066fd1 */
-  --bs-link-color-rgb: 6, 111, 209;
-  --bs-link-hover-color-rgb: 5, 96, 182;
+  --bs-secondary-bg: #EDF2F8; /* navbar + footer band */
+  --bs-tertiary-bg: #F5F8FC; /* page background */
+  --bs-border-color: #D9E2EF;
+  --bs-secondary-color: #64748B; /* muted */
+  --bs-tertiary-color: #94A3B8;
+  --bs-primary-rgb: 21, 84, 192;
+  --bs-link-color-rgb: 21, 84, 192;
+  --bs-link-hover-color-rgb: 13, 127, 242;
+  --bs-focus-ring-color: rgba(21, 84, 192, 0.25);
+  --calstack-selected-bg: #EDF2F8;
 }
 
 [data-bs-theme="dark"] {
-  --bs-body-color: #e5e7eb; /* gray-200 */
-  --bs-body-bg: #1f2937; /* gray-800: card/table surface */
-  --bs-tertiary-bg: #111827; /* gray-900: page background */
-  --bs-border-color: #2d3d51; /* tabler dark border */
-  --bs-secondary-color: #9ca3af; /* gray-400 */
-  --bs-primary-rgb: 6, 111, 209;
-  --bs-link-color-rgb: 66, 153, 225; /* tabler info blue, lighter on dark */
-  --bs-link-hover-color-rgb: 107, 178, 235;
+  --bs-body-color: #E8F1FF;
+  --bs-body-bg: #0C1F42; /* card/table surface */
+  --bs-secondary-bg: #122B55;
+  --bs-tertiary-bg: #07152F; /* page background */
+  --bs-border-color: #23416B;
+  --bs-secondary-color: #94A9C7;
+  --bs-tertiary-color: #6F87AA;
+  --bs-primary-rgb: 37, 133, 245;
+  --bs-link-color-rgb: 74, 155, 255;
+  --bs-link-hover-color-rgb: 114, 178, 255;
+  --bs-focus-ring-color: rgba(37, 133, 245, 0.35);
+  --calstack-selected-bg: #122B55;
+  --calstack-blue: #2585F5;
+  --calstack-electric: #4A9BFF;
+  --calstack-cyan: #16B9E8;
+  --calstack-green: #20D866;
 }
 
 /* Primary accents (Bootstrap 5.3.3 bakes #0d6efd into these) */
 .btn-primary {
-  --bs-btn-bg: #066fd1;
-  --bs-btn-border-color: #066fd1;
-  --bs-btn-hover-bg: #0560b6;
-  --bs-btn-hover-border-color: #055aab;
-  --bs-btn-active-bg: #055aab;
-  --bs-btn-active-border-color: #0555a1;
-  --bs-btn-disabled-bg: #066fd1;
-  --bs-btn-disabled-border-color: #066fd1;
-  --bs-btn-focus-shadow-rgb: 6, 111, 209;
+  --bs-btn-bg: #1554C0;
+  --bs-btn-border-color: #1554C0;
+  --bs-btn-hover-bg: #1248a4;
+  --bs-btn-hover-border-color: #11439b;
+  --bs-btn-active-bg: #113e93;
+  --bs-btn-active-border-color: #103a8b;
+  --bs-btn-disabled-bg: #1554C0;
+  --bs-btn-disabled-border-color: #1554C0;
+  --bs-btn-focus-shadow-rgb: 21, 84, 192;
+}
+
+[data-bs-theme="dark"] .btn-primary {
+  --bs-btn-bg: #2585F5;
+  --bs-btn-border-color: #2585F5;
+  --bs-btn-hover-bg: #1d75dd;
+  --bs-btn-hover-border-color: #1c6fd2;
+  --bs-btn-active-bg: #1a68c5;
+  --bs-btn-active-border-color: #1962ba;
+  --bs-btn-disabled-bg: #2585F5;
+  --bs-btn-disabled-border-color: #2585F5;
+  --bs-btn-focus-shadow-rgb: 37, 133, 245;
 }
 
 .btn-outline-primary {
-  --bs-btn-color: #066fd1;
-  --bs-btn-border-color: #066fd1;
+  --bs-btn-color: #1554C0;
+  --bs-btn-border-color: #1554C0;
   --bs-btn-hover-color: #fff;
-  --bs-btn-hover-bg: #066fd1;
-  --bs-btn-hover-border-color: #066fd1;
+  --bs-btn-hover-bg: #1554C0;
+  --bs-btn-hover-border-color: #1554C0;
   --bs-btn-active-color: #fff;
-  --bs-btn-active-bg: #066fd1;
-  --bs-btn-active-border-color: #066fd1;
-  --bs-btn-disabled-color: #066fd1;
-  --bs-btn-disabled-border-color: #066fd1;
-  --bs-btn-focus-shadow-rgb: 6, 111, 209;
+  --bs-btn-active-bg: #1554C0;
+  --bs-btn-active-border-color: #1554C0;
+  --bs-btn-disabled-color: #1554C0;
+  --bs-btn-disabled-border-color: #1554C0;
+  --bs-btn-focus-shadow-rgb: 21, 84, 192;
 }
 
 [data-bs-theme="dark"] .btn-outline-primary {
-  --bs-btn-color: #6ea8dc;
-  --bs-btn-border-color: #3a6ea5;
+  --bs-btn-color: #4A9BFF;
+  --bs-btn-border-color: #2f6db3;
   --bs-btn-hover-color: #fff;
-  --bs-btn-hover-bg: #066fd1;
-  --bs-btn-hover-border-color: #066fd1;
+  --bs-btn-hover-bg: #2585F5;
+  --bs-btn-hover-border-color: #2585F5;
   --bs-btn-active-color: #fff;
-  --bs-btn-active-bg: #066fd1;
-  --bs-btn-active-border-color: #066fd1;
-  --bs-btn-disabled-color: #3a6ea5;
-  --bs-btn-disabled-border-color: #3a6ea5;
+  --bs-btn-active-bg: #2585F5;
+  --bs-btn-active-border-color: #2585F5;
+  --bs-btn-disabled-color: #2f6db3;
+  --bs-btn-disabled-border-color: #2f6db3;
 }
 
 .btn-outline-secondary {
-  --bs-btn-color: #6b7280;
-  --bs-btn-border-color: #6b7280;
+  --bs-btn-color: #64748B;
+  --bs-btn-border-color: #64748B;
   --bs-btn-hover-color: #fff;
-  --bs-btn-hover-bg: #6b7280;
-  --bs-btn-hover-border-color: #6b7280;
+  --bs-btn-hover-bg: #64748B;
+  --bs-btn-hover-border-color: #64748B;
   --bs-btn-active-color: #fff;
-  --bs-btn-active-bg: #6b7280;
-  --bs-btn-active-border-color: #6b7280;
-  --bs-btn-disabled-color: #6b7280;
-  --bs-btn-disabled-border-color: #6b7280;
-  --bs-btn-focus-shadow-rgb: 107, 114, 128;
+  --bs-btn-active-bg: #64748B;
+  --bs-btn-active-border-color: #64748B;
+  --bs-btn-disabled-color: #64748B;
+  --bs-btn-disabled-border-color: #64748B;
+  --bs-btn-focus-shadow-rgb: 100, 116, 139;
 }
 
 [data-bs-theme="dark"] .btn-outline-secondary {
-  --bs-btn-color: #9ca3af;
-  --bs-btn-border-color: #4b5563;
-  --bs-btn-hover-color: #e5e7eb;
-  --bs-btn-hover-bg: #374151;
-  --bs-btn-hover-border-color: #4b5563;
-  --bs-btn-active-color: #e5e7eb;
-  --bs-btn-active-bg: #374151;
-  --bs-btn-active-border-color: #4b5563;
-  --bs-btn-disabled-color: #4b5563;
-  --bs-btn-disabled-border-color: #4b5563;
+  --bs-btn-color: #94A9C7;
+  --bs-btn-border-color: #23416B;
+  --bs-btn-hover-color: #E8F1FF;
+  --bs-btn-hover-bg: #1a3a6b;
+  --bs-btn-hover-border-color: #2a4d7d;
+  --bs-btn-active-color: #E8F1FF;
+  --bs-btn-active-bg: #1a3a6b;
+  --bs-btn-active-border-color: #2a4d7d;
+  --bs-btn-disabled-color: #23416B;
+  --bs-btn-disabled-border-color: #23416B;
 }
 
 .form-control:focus,
 .form-select:focus {
-  border-color: rgba(6, 111, 209, 0.4);
-  box-shadow: 0 0 0 0.25rem rgba(6, 111, 209, 0.25);
+  border-color: rgba(21, 84, 192, 0.4);
+  box-shadow: 0 0 0 0.25rem rgba(21, 84, 192, 0.15);
+}
+
+[data-bs-theme="dark"] .form-control:focus,
+[data-bs-theme="dark"] .form-select:focus {
+  border-color: rgba(37, 133, 245, 0.5);
+  box-shadow: 0 0 0 0.25rem rgba(37, 133, 245, 0.2);
 }
 
 .form-check-input:checked {
-  background-color: #066fd1;
-  border-color: #066fd1;
+  background-color: var(--calstack-blue);
+  border-color: var(--calstack-blue);
 }
 
 .form-check-input:focus {
-  border-color: rgba(6, 111, 209, 0.4);
-  box-shadow: 0 0 0 0.25rem rgba(6, 111, 209, 0.25);
+  border-color: rgba(21, 84, 192, 0.4);
+  box-shadow: 0 0 0 0.25rem rgba(21, 84, 192, 0.15);
 }
 
-/* Event pill state markers (classes applied by app.js decorateEventPills). */
+/* ============ brand regions ============ */
+
+/* Subtle 2px brand accent along the bottom of the header. */
+header.navbar {
+  position: relative;
+}
+
+header.navbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #0B2670 0%, #1554C0 50%, #12AEE8 100%);
+}
+
+/* The nav band below the header sits on the secondary surface, distinct from
+   both header and page. */
+.navbar-collapse .navbar.bg-body {
+  background-color: var(--bs-secondary-bg) !important;
+}
+
+.navbar-collapse .nav-link {
+  border-bottom: 2px solid transparent;
+}
+
+.navbar-collapse .nav-link.active {
+  color: var(--calstack-blue);
+  font-weight: 600;
+  border-bottom-color: var(--calstack-blue);
+}
+
+/* Quiet footer. */
+footer.footer {
+  background-color: var(--bs-secondary-bg) !important; /* overrides footer-transparent */
+  border-top: 1px solid var(--bs-border-color);
+  color: var(--bs-secondary-color);
+}
+
+footer.footer .link-secondary {
+  color: var(--calstack-blue) !important;
+}
+
+/* Calendar sidebar = workspace panel, on the surface color. */
+aside.border-end {
+  background-color: var(--bs-body-bg);
+}
+
+/* Selected calendar in the sidebar lists. */
+#cal-list .list-group-item.active,
+#sub-list .list-group-item.active {
+  background-color: var(--calstack-selected-bg);
+  border-color: var(--bs-border-color);
+  color: var(--calstack-blue);
+}
+
+/* Per-calendar color swatch (inline background-color from app.js). */
+.cal-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  margin-right: 0.25rem;
+}
+
+/* Event pill state markers (classes applied by app.js decorateEventPills) —
+   state is never color-alone: strikethrough/outline carry the meaning. */
 [data-appointment].ev-cancelled {
   opacity: 0.55;
 }

@@ -55,10 +55,17 @@
   // Grid hex values for the Tabler palette keys (calendar grid needs real
   // colors, not the bg-*-lt CSS tokens the badges use).
   var CATEGORY_HEX = {
-    blue: '#206bc4', azure: '#4299e1', indigo: '#4263eb', purple: '#ae3ec9',
+    blue: '#1554C0', azure: '#12AEE8', indigo: '#4263eb', purple: '#ae3ec9',
     pink: '#d6336c', red: '#d63939', orange: '#f76707', yellow: '#f7b731',
-    lime: '#74b816', green: '#2fb344', teal: '#0ca678', cyan: '#17a2b8',
+    lime: '#74b816', green: '#12C957', teal: '#0ca678', cyan: '#12AEE8',
   };
+
+  // Calendar/subscription colors are user data: a hex string or one of the
+  // category color names above.
+  function calColorHex(color) {
+    if (!color) { return null; }
+    return color.charAt(0) === '#' ? color : (CATEGORY_HEX[color] || null);
+  }
 
   function categoryColorHex(ev) {
     var details = ev.category_details || [];
@@ -236,6 +243,8 @@
     list.forEach(function (cal) {
       var item = $('<li class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">')
         .attr('data-id', cal.id);
+      var dot = calColorHex(cal.color);
+      if (dot) { item.append($('<span class="cal-dot" aria-hidden="true">').css('background-color', dot)); }
       item.append($('<span>').text(cal.name + ' (' + cal.my_capability + ')'));
       item.on('click', function () { selectCalendar(cal); });
       if (cal.my_capability === 'owner' || cal.my_capability === 'read_write') {
@@ -348,7 +357,7 @@
       allDay: !!ev.start_date,
       // First registered category wins the event color; untagged events keep
       // the calendar color.
-      color: categoryColorHex(ev) || (state.currentCalendar && state.currentCalendar.color) || '#066fd1',
+      color: categoryColorHex(ev) || (state.currentCalendar && state.currentCalendar.color) || '#1554C0',
     };
   }
 
@@ -889,6 +898,8 @@
     rows.forEach(function (s) {
       var item = $('<li class="list-group-item d-flex justify-content-between align-items-center">')
         .attr('data-id', 'sub:' + s.id);
+      var dot = calColorHex(s.color);
+      if (dot) { item.append($('<span class="cal-dot" aria-hidden="true">').css('background-color', dot)); }
       var label = $('<span>').text(s.calendar_name);
       if (!s.live) {
         item.addClass('text-muted');
@@ -1030,6 +1041,11 @@
   $(function () {
     if (!window.jQuery) { return; }
     $('#ev-desc').summernote({ height: 150 });
+
+    // Mark the current page in the top nav.
+    $('.navbar-nav .nav-link').filter(function () {
+      return this.getAttribute('href') === location.pathname;
+    }).addClass('active');
 
     api('GET', '/api/auth/me').done(function (user) {
       // Rules/Providers/Credentials/Admin are admin-only (pages redirect, APIs 403).
