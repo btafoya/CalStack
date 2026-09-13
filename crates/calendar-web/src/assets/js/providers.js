@@ -69,5 +69,10 @@
         loadProviders();
       });
     });
+
+    $('#account-btn').on('click', function () { window.location.href = '/'; });
+    $('#logout-btn').on('click', function () {
+      api('POST', '/api/auth/logout').done(function () { window.location.href = '/login'; });
+    });
   });
 })();

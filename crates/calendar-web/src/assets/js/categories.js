@@ -91,5 +91,13 @@
         loadCategories();
       });
     });
+
+    api('GET', '/api/auth/me').done(function (user) {
+      if (user.is_admin) { $('#admin-nav-link, #rules-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
+    });
+    $('#account-btn').on('click', function () { window.location.href = '/'; });
+    $('#logout-btn').on('click', function () {
+      api('POST', '/api/auth/logout').done(function () { window.location.href = '/login'; });
+    });
   });
 })();
