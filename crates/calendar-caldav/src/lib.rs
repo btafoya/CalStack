@@ -862,6 +862,7 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
             id: uuid::Uuid::new_v4(),
             event_id: uuid::Uuid::new_v4(),
             user_id: None,
+            contact_id: None,
             email: "al@example.com".into(),
             display_name: Some("Al".into()),
             telephone: None,

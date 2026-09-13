@@ -444,13 +444,53 @@
     });
   }
 
-  $('#ev-attendee-add').on('click', function () {
-    var email = $('#ev-attendee-email').val().trim();
-    if (!email) { return; }
-    state.editingAttendees.push({ email: email, display_name: $('#ev-attendee-name').val() || null });
-    $('#ev-attendee-email').val('');
-    $('#ev-attendee-name').val('');
-    renderAttendees();
+  // Attendees come only from contacts/the tenant directory (no freeform
+  // email entry) — search /api/contacts/autocomplete, click a result to add
+  // it immediately.
+  function hideAttendeeResults() {
+    $('#ev-attendee-results').empty().prop('hidden', true);
+  }
+
+  function renderAttendeeResults(list) {
+    var $results = $('#ev-attendee-results').empty();
+    (list || []).forEach(function (c) {
+      var email = c.emails && c.emails[0] && c.emails[0].email;
+      if (!email) { return; }
+      var already = state.editingAttendees.some(function (a) {
+        return a.email.toLowerCase() === email.toLowerCase();
+      });
+      $('<button type="button" class="list-group-item list-group-item-action py-1"></button>')
+        .toggleClass('disabled', already)
+        .append($('<div>').text(c.full_name || email))
+        .append($('<small class="text-body-secondary d-block">').text(email + (c.directory ? ' · directory' : '')))
+        .on('click', function () {
+          if (already) { return; }
+          state.editingAttendees.push({
+            email: email,
+            display_name: c.full_name || null,
+            contact_id: c.directory ? null : c.id,
+            user_id: c.directory ? c.id : null,
+          });
+          $('#ev-attendee-search').val('');
+          hideAttendeeResults();
+          renderAttendees();
+        })
+        .appendTo($results);
+    });
+    $results.prop('hidden', $results.children().length === 0);
+  }
+
+  var attendeeSearchTimer = null;
+  $('#ev-attendee-search').on('input', function () {
+    var q = $(this).val().trim();
+    window.clearTimeout(attendeeSearchTimer);
+    if (q.length < 2) { hideAttendeeResults(); return; }
+    attendeeSearchTimer = window.setTimeout(function () {
+      api('GET', '/api/contacts/autocomplete?q=' + encodeURIComponent(q)).done(renderAttendeeResults);
+    }, 200);
+  });
+  $(document).on('click', function (e) {
+    if (!$(e.target).closest('#ev-attendee-search, #ev-attendee-results').length) { hideAttendeeResults(); }
   });
 
   $('#ev-repeat').on('change', function () {
@@ -528,7 +568,10 @@
         pickedText = locationDisplayText(loc);
       }
       state.editingAttendees = (payload.attendees || []).map(function (a) {
-        return { email: a.email, display_name: a.display_name || null };
+        return {
+          email: a.email, display_name: a.display_name || null,
+          contact_id: a.contact_id || null, user_id: a.user_id || null,
+        };
       });
       $('#ev-desc').summernote('code', payload.description_html || '');
       loadAttachments();

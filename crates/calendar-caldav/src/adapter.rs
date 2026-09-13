@@ -107,6 +107,9 @@ impl DavMetaData for Meta {
     fn is_calendar(&self, _path: &DavPath) -> bool {
         self.calendar
     }
+    fn is_addressbook(&self, _path: &DavPath) -> bool {
+        false // this mount only ever serves calendar collections
+    }
     fn etag(&self) -> Option<String> {
         (!self.etag.is_empty()).then(|| self.etag.clone())
     }

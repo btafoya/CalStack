@@ -5,6 +5,7 @@ pub mod attachments;
 pub mod auth_ext;
 pub mod backup;
 pub mod categories;
+pub mod contacts;
 pub mod ics_upsert;
 pub mod jobs;
 pub mod scheduling;
@@ -871,13 +872,14 @@ pub async fn create_event(
     for a in attendees {
         sqlx::query(
             "INSERT INTO event_attendees
-                (id, event_id, user_id, email, display_name, telephone, role, partstat, rsvp)
-             VALUES ($1, $2, $3, $4, $5, $6,
-                COALESCE($7, 'REQ-PARTICIPANT'), COALESCE($8, 'NEEDS-ACTION'), $9)",
+                (id, event_id, user_id, contact_id, email, display_name, telephone, role, partstat, rsvp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7,
+                COALESCE($8, 'REQ-PARTICIPANT'), COALESCE($9, 'NEEDS-ACTION'), $10)",
         )
         .bind(Uuid::new_v4())
         .bind(event.id)
         .bind(a.user_id)
+        .bind(a.contact_id)
         .bind(&a.email)
         .bind(&a.display_name)
         .bind(&a.telephone)
@@ -901,6 +903,10 @@ pub async fn create_event(
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 pub struct NewAttendee {
     pub user_id: Option<Uuid>,
+    /// Loose ref to a contacts row (PRD: attendees stay independent of
+    /// contacts/ACL); snapshotted email/display_name stay the source of
+    /// truth for this event even if the contact later changes or is deleted.
+    pub contact_id: Option<Uuid>,
     pub email: String,
     pub display_name: Option<String>,
     pub telephone: Option<String>,
@@ -1021,13 +1027,14 @@ pub async fn update_event(
         for a in attendees {
             sqlx::query(
                 "INSERT INTO event_attendees
-                    (id, event_id, user_id, email, display_name, telephone, role, partstat, rsvp)
-                 VALUES ($1, $2, $3, $4, $5, $6,
-                    COALESCE($7, 'REQ-PARTICIPANT'), COALESCE($8, 'NEEDS-ACTION'), $9)",
+                    (id, event_id, user_id, contact_id, email, display_name, telephone, role, partstat, rsvp)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7,
+                    COALESCE($8, 'REQ-PARTICIPANT'), COALESCE($9, 'NEEDS-ACTION'), $10)",
             )
             .bind(Uuid::new_v4())
             .bind(event.id)
             .bind(a.user_id)
+            .bind(a.contact_id)
             .bind(&a.email)
             .bind(&a.display_name)
             .bind(&a.telephone)
@@ -1140,6 +1147,7 @@ pub struct AttendeeRow {
     pub id: Uuid,
     pub event_id: Uuid,
     pub user_id: Option<Uuid>,
+    pub contact_id: Option<Uuid>,
     pub email: String,
     pub display_name: Option<String>,
     pub telephone: Option<String>,

@@ -1,0 +1,17 @@
+[package]
+name = "calendar-carddav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sqlx.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+http.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+dav-server.workspace = true
+calendar-db = { path = "../calendar-db" }
