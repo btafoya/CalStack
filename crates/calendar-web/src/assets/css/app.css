@@ -106,3 +106,30 @@
   border-color: rgba(6, 111, 209, 0.4);
   box-shadow: 0 0 0 0.25rem rgba(6, 111, 209, 0.25);
 }
+
+/* Event pill state markers (classes applied by app.js decorateEventPills). */
+[data-appointment].ev-cancelled {
+  opacity: 0.55;
+}
+
+[data-appointment].ev-cancelled,
+[data-appointment].ev-cancelled * {
+  text-decoration: line-through;
+}
+
+[data-appointment].ev-tentative {
+  outline: 2px dashed currentcolor;
+  outline-offset: -2px;
+}
+
+/* "Free" pills go hollow; the colored inset ring is set inline by app.js
+   from the pill's own background before this class clears it. */
+[data-appointment].ev-free {
+  background-color: transparent !important;
+  background-image: none !important;
+  color: var(--bs-body-color) !important;
+}
+
+.ev-lock {
+  margin-right: 0.25rem;
+}
