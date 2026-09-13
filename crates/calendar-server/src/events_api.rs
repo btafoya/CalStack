@@ -458,13 +458,46 @@ async fn list_occurrences(
     let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let rows = db::list_events_in_range(&pool, calendar_id, from, to).await?;
-    let registry = db::categories::registry_for_calendar(&pool, calendar_id).await?;
+    let out = expand_occurrences_json(&pool, calendar_id, rows, from, to).await?;
+    Ok(Json(serde_json::json!(out)))
+}
+
+/// GET /api/subscriptions/{id}/occurrences — same expansion as
+/// `list_occurrences`, but for a calendar the caller doesn't own: access is
+/// gated on holding a live subscription to it, not on calendar ACL, and only
+/// PUBLIC-class events come back (matches the public feed's privacy rule).
+async fn list_subscription_occurrences(
+    State(AppState { pool, .. }): State<AppState>,
+    headers: HeaderMap,
+    Path(subscription_id): Path<Uuid>,
+    axum::extract::Query(query): axum::extract::Query<RangeQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    let calendar_id =
+        db::sharing::subscribed_calendar_id(&pool, auth.user.id, subscription_id).await?;
+    let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
+    let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
+    let rows = db::list_public_events_in_range(&pool, calendar_id, from, to).await?;
+    let out = expand_occurrences_json(&pool, calendar_id, rows, from, to).await?;
+    Ok(Json(serde_json::json!(out)))
+}
+
+/// Expanded occurrences with exceptions overlaid: each master occurrence
+/// matching an exception's RECURRENCE-ID is replaced by that exception row.
+async fn expand_occurrences_json(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    rows: Vec<db::EventRow>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    let registry = db::categories::registry_for_calendar(pool, calendar_id).await?;
     let master_ids: Vec<Uuid> = rows
         .iter()
         .filter(|r| r.master_event_id.is_none())
         .map(|r| r.id)
         .collect();
-    let exceptions = db::list_exceptions(&pool, &master_ids).await?;
+    let exceptions = db::list_exceptions(pool, &master_ids).await?;
 
     let mut out: Vec<serde_json::Value> = Vec::new();
     for event in &rows {
@@ -473,7 +506,7 @@ async fn list_occurrences(
             continue;
         }
         if event.rrule.is_none() {
-            let location = db::location_for_event(&pool, event).await;
+            let location = db::location_for_event(pool, event).await;
             let mut view = serde_json::json!({
                 "event": event_view(event, &db::event_etag(event), &[], location.as_ref(), &registry)
             });
@@ -516,7 +549,7 @@ async fn list_occurrences(
                 .iter()
                 .find(|ex| ex.master_event_id == Some(event.id) && ex.recurrence_id == Some(wall));
             let (source, is_exception) = matched.map_or((event, false), |ex| (ex, true));
-            let location = db::location_for_event(&pool, source).await;
+            let location = db::location_for_event(pool, source).await;
             let mut view = event_view(
                 source,
                 &db::event_etag(source),
@@ -536,7 +569,7 @@ async fn list_occurrences(
             out.push(view);
         }
     }
-    Ok(Json(serde_json::json!(out)))
+    Ok(out)
 }
 
 fn json_to_points(value: &serde_json::Value) -> Vec<calendar_core::DateOrDateTime> {
@@ -569,6 +602,10 @@ pub fn router() -> axum::Router<crate::AppState> {
             post(create_event).get(list_events),
         )
         .route("/api/calendars/{id}/occurrences", get(list_occurrences))
+        .route(
+            "/api/subscriptions/{id}/occurrences",
+            get(list_subscription_occurrences),
+        )
         .route(
             "/api/events/{id}",
             get(get_event).patch(patch_event).delete(delete_event),

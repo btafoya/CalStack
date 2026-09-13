@@ -128,6 +128,7 @@ async fn list_subscriptions(
                 "calendar_slug": v.calendar_slug,
                 "color": v.color,
                 "allows_caldav": v.allows_caldav,
+                "live": v.live,
             }))
             .collect::<Vec<_>>()
     )))

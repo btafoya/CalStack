@@ -109,7 +109,10 @@
   // ============ calendars ============
   function updateRulesLink() {
     var cal = state.currentCalendar;
-    $('#rules-link').attr('href', cal ? '/rules?calendar_id=' + cal.id : '/rules');
+    // Rules are calendar-owner config; a subscription has no calendar_id of
+    // its own to point the link at, so hide it rather than link to a 403.
+    $('#rules-link').toggle(!!cal && !cal.readOnly);
+    if (cal && !cal.readOnly) { $('#rules-link').attr('href', '/rules?calendar_id=' + cal.id); }
   }
 
   // Only render the calendar widget once a calendar is actually selected;
@@ -122,11 +125,16 @@
 
   function selectCalendar(cal) {
     state.currentCalendar = cal;
-    $('#cal-list li').removeClass('active');
-    $('#cal-list li[data-id="' + cal.id + '"]').addClass('active');
+    $('#cal-list li, #sub-list li').removeClass('active');
+    $('#cal-list li[data-id="' + cal.id + '"], #sub-list li[data-id="' + cal.id + '"]').addClass('active');
     updateRulesLink();
     updateCalendarVisibility();
-    loadCategoryRegistry(cal.id);
+    // Category colors on a subscription's events come pre-attached per-event
+    // by the server (its owner's registry) — the client-side registry is
+    // only for the create/edit modal's checkboxes, which a read-only
+    // calendar never opens.
+    state.categoryRegistry = cal.readOnly ? [] : state.categoryRegistry;
+    if (!cal.readOnly) { loadCategoryRegistry(cal.id); }
     if (!state.calendarActivated) {
       // Constructing bs-calendar while #calendar is still hidden (no
       // calendar selected yet) bakes in a wrong internal event-fetch date
@@ -154,6 +162,7 @@
         decorateEventPills();
       },
       onAdd: function (data) {
+        if (state.currentCalendar && state.currentCalendar.readOnly) { return; }
         openEventModal('create', {
           start: partToLocalInput(data && data.start, '09:00'),
           end: partToLocalInput(data && data.end, '10:00'),
@@ -163,10 +172,12 @@
       // series (the shared master event) — per-occurrence exceptions need
       // their own RECURRENCE-ID UI, add when single-instance edits matter.
       onEdit: function (appointment) {
+        if (state.currentCalendar && state.currentCalendar.readOnly) { return; }
         var ev = state.eventCache[appointment.id];
         if (ev) { openEventModal('edit', ev); }
       },
       onDelete: function (appointment) {
+        if (state.currentCalendar && state.currentCalendar.readOnly) { return; }
         var ev = state.eventCache[appointment.id];
         if (ev && window.confirm('Delete "' + (ev.summary || 'this event') + '"?')) {
           deleteEvent(ev.id, ev.etag);
@@ -372,7 +383,10 @@
       from: toIso(range.from),
       to: toIsoExclusiveEnd(range.to),
     });
-    return fetch('/api/calendars/' + cal.id + '/occurrences?' + params)
+    var url = cal.subscriptionId
+      ? '/api/subscriptions/' + cal.subscriptionId + '/occurrences?' + params
+      : '/api/calendars/' + cal.id + '/occurrences?' + params;
+    return fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (rows) {
         return rows.map(function (row) {
@@ -829,14 +843,43 @@
   });
 
   // ============ subscriptions (read-only calendars shared by others) ============
+  // A subscription behaves like a calendar in the main view (click to see its
+  // events) but is never in state.calendars and carries no ACL — selectCalendar
+  // takes a synthetic cal-shaped object for it, tagged readOnly so add/edit/
+  // delete and the rules link know to refuse it.
+  function subToCal(s) {
+    return {
+      id: 'sub:' + s.id, subscriptionId: s.id, name: s.calendar_name,
+      color: s.color, readOnly: true,
+    };
+  }
+
   function renderSubscriptions(rows) {
     var list = $('#sub-list').empty();
     rows.forEach(function (s) {
-      var item = $('<li class="list-group-item d-flex justify-content-between align-items-center">');
-      item.append($('<span>').text(s.calendar_name));
-      var btn = $('<button class="btn btn-sm btn-outline-danger" type="button">&times;</button>');
-      btn.on('click', function () {
-        api('DELETE', '/api/subscriptions/' + s.id).done(loadSubscriptions);
+      var item = $('<li class="list-group-item d-flex justify-content-between align-items-center">')
+        .attr('data-id', 'sub:' + s.id);
+      var label = $('<span>').text(s.calendar_name);
+      if (!s.live) {
+        item.addClass('text-muted');
+        label.append($('<span class="badge bg-warning text-dark ms-2">').text('removed by owner'));
+      } else {
+        item.addClass('list-group-item-action').css('cursor', 'pointer');
+        item.on('click', function () { selectCalendar(subToCal(s)); });
+      }
+      item.append(label);
+      var btn = $('<button class="btn btn-sm btn-outline-danger" type="button">&times;</button>')
+        .attr('title', s.live ? 'Unsubscribe' : 'Remove');
+      btn.on('click', function (e) {
+        e.stopPropagation();
+        api('DELETE', '/api/subscriptions/' + s.id).done(function () {
+          if (state.currentCalendar && state.currentCalendar.subscriptionId === s.id) {
+            state.currentCalendar = null;
+            updateRulesLink();
+            updateCalendarVisibility();
+          }
+          loadSubscriptions();
+        });
       });
       item.append(btn);
       list.append(item);
