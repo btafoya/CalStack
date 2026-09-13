@@ -1144,6 +1144,35 @@ pub async fn list_events_in_range(
     .map_err(Into::into)
 }
 
+/// Same window as `list_events_in_range`, but for a public share/subscription
+/// feed: PRIVATE/CONFIDENTIAL events are withheld (docs/PRD.md section 5).
+pub async fn list_public_events_in_range(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<EventRow>, DbError> {
+    sqlx::query_as::<_, EventRow>(
+        "SELECT * FROM events
+         WHERE calendar_id = $1 AND deleted_at IS NULL
+           AND (class IS NULL OR class = 'PUBLIC')
+           AND (
+             (rrule IS NULL AND (
+                (starts_at IS NOT NULL AND starts_at < $3 AND COALESCE(ends_at, starts_at) > $2)
+                OR (start_date IS NOT NULL AND start_date::timestamp < ($3::timestamp AT TIME ZONE 'UTC')::date
+                    AND COALESCE(end_date, start_date)::timestamp > ($2::timestamp AT TIME ZONE 'UTC')::date)
+             ))
+             OR rrule IS NOT NULL
+           )",
+    )
+    .bind(calendar_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
 /// All exception rows for the given masters (live calendars only).
 pub async fn list_exceptions(pool: &PgPool, master_ids: &[Uuid]) -> Result<Vec<EventRow>, DbError> {
     if master_ids.is_empty() {

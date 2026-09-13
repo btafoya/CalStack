@@ -116,6 +116,9 @@ pub struct SubscriptionView {
     pub allows_caldav: bool,
     pub calendar_name: String,
     pub calendar_slug: String,
+    /// False once the owner revokes/expires the share or deletes the
+    /// calendar; row is kept (not auto-deleted) so the UI can notice it.
+    pub live: bool,
 }
 
 pub async fn create_subscription(
@@ -155,7 +158,33 @@ pub async fn delete_subscription(
     Ok(())
 }
 
-/// All subscriptions for a user whose share is still live.
+/// The calendar behind a live subscription, checked against subscription id
+/// and user id together. NotFound covers "doesn't exist", "not yours", and
+/// "dead share" alike — the caller doesn't get to distinguish those cases.
+pub async fn subscribed_calendar_id(
+    pool: &PgPool,
+    user_id: Uuid,
+    subscription_id: Uuid,
+) -> Result<Uuid, DbError> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT sh.calendar_id
+         FROM subscriptions s
+         JOIN public_shares sh ON sh.id = s.share_id AND sh.revoked_at IS NULL
+             AND (sh.expires_at IS NULL OR sh.expires_at > now())
+         JOIN calendars c ON c.id = sh.calendar_id AND c.deleted_at IS NULL
+         WHERE s.id = $1 AND s.user_id = $2",
+    )
+    .bind(subscription_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(DbError::NotFound)
+}
+
+/// All subscriptions for a user, including ones whose share was since
+/// revoked/expired or whose calendar was deleted — `live` tells the caller
+/// which; the row stays until the user dismisses it (`delete_subscription`)
+/// so the UI can show a removal notice instead of the row just vanishing.
 ///
 /// Columns are selected explicitly (not `s.*, sh.*, c.*`): subscriptions,
 /// public_shares, and calendars each have an `id` and `created_at` column,
@@ -167,11 +196,16 @@ pub async fn list_subscriptions(
     user_id: Uuid,
 ) -> Result<Vec<SubscriptionView>, DbError> {
     sqlx::query_as::<_, SubscriptionView>(
-        "SELECT s.id, s.color, sh.allows_caldav, c.name AS calendar_name, c.slug AS calendar_slug
+        "SELECT s.id, s.color,
+                COALESCE(sh.allows_caldav, false) AS allows_caldav,
+                COALESCE(c.name, 'Removed calendar') AS calendar_name,
+                COALESCE(c.slug, '') AS calendar_slug,
+                (sh.id IS NOT NULL AND sh.revoked_at IS NULL
+                     AND (sh.expires_at IS NULL OR sh.expires_at > now())
+                     AND c.id IS NOT NULL AND c.deleted_at IS NULL) AS live
          FROM subscriptions s
-         JOIN public_shares sh ON sh.id = s.share_id AND sh.revoked_at IS NULL
-             AND (sh.expires_at IS NULL OR sh.expires_at > now())
-         JOIN calendars c ON c.id = sh.calendar_id AND c.deleted_at IS NULL
+         LEFT JOIN public_shares sh ON sh.id = s.share_id
+         LEFT JOIN calendars c ON c.id = sh.calendar_id
          WHERE s.user_id = $1
          ORDER BY s.order_index, s.created_at",
     )
