@@ -1,6 +1,6 @@
 # CardDAV Requirements
 
-Requirements discovery for full CardDAV support. Status: requirements settled via brainstorm 2026-09-12; not yet designed or implemented.
+Requirements discovery for full CardDAV support. Status: settled via brainstorm 2026-09-12, designed in `docs/CARDDAV_DESIGN.md`, and implemented.
 
 ## Goal
 
