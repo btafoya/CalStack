@@ -787,6 +787,32 @@
     modal('share-modal').show();
   });
 
+  // ============ account (password change) ============
+  $('#account-btn').on('click', function () {
+    $('#account-current-password, #account-new-password, #account-new-password-confirm').val('');
+    $('#account-password-msg').text('');
+    modal('account-modal').show();
+  });
+
+  $('#account-password-save').on('click', function () {
+    var current = $('#account-current-password').val();
+    var next = $('#account-new-password').val();
+    var confirm = $('#account-new-password-confirm').val();
+    if (next.length < 8) {
+      $('#account-password-msg').text('New password must be at least 8 characters.');
+      return;
+    }
+    if (next !== confirm) {
+      $('#account-password-msg').text('New password and confirmation do not match.');
+      return;
+    }
+    api('POST', '/api/auth/password', { current_password: current, new_password: next })
+      .done(function () {
+        modal('account-modal').hide();
+        window.alert('Password changed. Your other sessions have been signed out.');
+      });
+  });
+
   // ============ subscriptions (read-only calendars shared by others) ============
   function renderSubscriptions(rows) {
     var list = $('#sub-list').empty();

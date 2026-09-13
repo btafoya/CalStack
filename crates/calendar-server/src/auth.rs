@@ -386,6 +386,41 @@ async fn login(
     Ok(response)
 }
 
+#[derive(serde::Deserialize)]
+struct ChangePasswordBody {
+    current_password: String,
+    new_password: String,
+}
+
+async fn change_password(
+    State(AppState { pool, .. }): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChangePasswordBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    require_csrf(&auth, &headers)?;
+    // Wrong current password is a validation failure, not a lost session — a
+    // 401 here would bounce the (still logged-in) caller to /login.
+    let current_hash = auth
+        .user
+        .password_hash
+        .as_deref()
+        .ok_or_else(|| AppError::bad_request("incorrect current password"))?;
+    if calendar_auth::verify_password(&body.current_password, current_hash).is_err() {
+        return Err(AppError::bad_request("incorrect current password"));
+    }
+    if body.new_password.len() < 8 {
+        return Err(AppError::bad_request(
+            "password must be at least 8 characters",
+        ));
+    }
+    let hash = calendar_auth::hash_password(&body.new_password)
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    db::set_password(&pool, auth.user.id, &hash).await?;
+    db::revoke_other_sessions(&pool, auth.user.id, auth.session.map(|s| s.id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 async fn logout(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -536,6 +571,7 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
+        .route("/api/auth/password", post(change_password))
         .route("/api/auth/tokens", post(create_token).get(list_tokens))
         .route("/api/auth/tokens/{id}", delete(revoke_token))
         .route(

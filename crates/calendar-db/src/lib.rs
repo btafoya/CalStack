@@ -445,6 +445,24 @@ pub async fn revoke_session(pool: &PgPool, session_id: Uuid) -> Result<(), DbErr
     Ok(())
 }
 
+/// Revokes every live session for a user except `keep`, e.g. after a password
+/// change so a stolen cookie doesn't survive it.
+pub async fn revoke_other_sessions(
+    pool: &PgPool,
+    user_id: Uuid,
+    keep: Option<Uuid>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE sessions SET revoked_at = now()
+         WHERE user_id = $1 AND revoked_at IS NULL AND id IS DISTINCT FROM $2",
+    )
+    .bind(user_id)
+    .bind(keep)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // ponytail: expired-session cleanup piggybacks on login; a sweeper job if volume ever demands it.
 pub async fn delete_expired_sessions(pool: &PgPool) -> Result<(), DbError> {
     sqlx::query(
