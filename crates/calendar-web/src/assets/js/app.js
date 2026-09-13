@@ -149,7 +149,10 @@
       startView: 'month',
       locale: 'en-US',
       showTasks: false,
-      onAfterLoad: convertCalendarTimesToAmPm,
+      onAfterLoad: function () {
+        convertCalendarTimesToAmPm();
+        decorateEventPills();
+      },
       onAdd: function (data) {
         openEventModal('create', {
           start: partToLocalInput(data && data.start, '09:00'),
@@ -816,6 +819,33 @@
     });
   }
 
+  // ============ event pill status markers ============
+  // STATUS/CLASS/TRANSP at a glance: cancelled = faded + strikethrough,
+  // tentative = dashed outline, transparent ("free") = hollow pill with a
+  // ring in the pill's own color, private/confidential = lock icon.
+  function decorateEventPills() {
+    $('#calendar [data-appointment]').each(function () {
+      var pill = $(this);
+      var appt = pill.data('appointment');
+      var ev = appt && state.eventCache[appt.id];
+      if (!ev) { return; }
+      var wasFree = pill.hasClass('ev-free');
+      // Capture the pill's own color BEFORE the ev-free class clears it.
+      var bg = wasFree ? null : pill.css('background-color');
+      var status = (ev.status || '').toLowerCase();
+      pill.toggleClass('ev-cancelled', status === 'cancelled')
+        .toggleClass('ev-tentative', status === 'tentative')
+        .toggleClass('ev-free', (ev.transp || '').toLowerCase() === 'transparent')
+        .toggleClass('ev-private', ['private', 'confidential'].indexOf((ev.class || '').toLowerCase()) !== -1);
+      if (bg && bg !== 'rgba(0, 0, 0, 0)') {
+        pill.css('box-shadow', pill.hasClass('ev-free') ? 'inset 0 0 0 2px ' + bg : '');
+      }
+      if (pill.hasClass('ev-private') && !pill.children('.ev-lock').length) {
+        pill.prepend('<i class="bi bi-lock ev-lock" aria-hidden="true"></i>');
+      }
+    });
+  }
+
   // The "current time" indicator re-renders on its own timer, independent
   // of onAfterLoad, so a one-shot hook misses it. A MutationObserver catches
   // every render path uniformly; the regex above only matches bare 24h
@@ -834,6 +864,7 @@
       requestAnimationFrame(function () {
         scheduled = false;
         convertCalendarTimesToAmPm();
+        decorateEventPills();
       });
     }).observe(el, { childList: true, subtree: true, characterData: true });
   }
