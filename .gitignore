@@ -7,8 +7,3 @@ target/
 CLAUDE.md
 docs/.playwright-mcp/
 .playwright-mcp/
-*.png
-!assets/logo-horizontal.png
-!assets/logo.png
-!crates/calendar-web/src/assets/img/logo.png
-!assets/logo-horizontal-small.png
