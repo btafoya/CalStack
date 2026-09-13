@@ -131,6 +131,28 @@ async fn get_attachment(
     Ok((headers, data))
 }
 
+/// Attachment metadata only (no bytes), same ACL as the download.
+async fn get_attachment_meta(
+    State(AppState { pool, .. }): State<AppState>,
+    headers: HeaderMap,
+    Path(attachment_id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    let event = db::attachments::event_of_attachment(&pool, attachment_id).await?;
+    require_capability(
+        &pool,
+        event.calendar_id,
+        auth.user.id,
+        CalendarCapability::ReadOnly,
+    )
+    .await?;
+    let meta = db::attachments::get_attachment_meta(&pool, attachment_id).await?;
+    Ok(Json(json!({
+        "id": meta.id, "filename": meta.filename, "content_type": meta.content_type,
+        "byte_size": meta.byte_size, "sha256": hex(&meta.sha256), "created_at": meta.created_at,
+    })))
+}
+
 async fn delete_attachment(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -323,6 +345,7 @@ pub fn router() -> axum::Router<crate::AppState> {
             "/api/attachments/{id}",
             get(get_attachment).delete(delete_attachment),
         )
+        .route("/api/attachments/{id}/meta", get(get_attachment_meta))
         .route("/api/search", get(search))
         .route("/api/changes", get(list_changes))
         .route("/api/notifications", get(list_notifications))

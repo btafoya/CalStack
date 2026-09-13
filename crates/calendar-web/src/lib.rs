@@ -263,6 +263,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
     <a id="credentials-nav-link" class="btn btn-outline-secondary btn-sm" href="/credentials" hidden><i class="bi bi-key"></i> Credentials</a>
     <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
     <button id="share-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-share"></i> Share</button>
+    <button id="account-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-person-circle"></i> Account</button>
     <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
     <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
   </div>
@@ -423,12 +424,30 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
     </div>
   </div></div>
 </div>
+<div class="modal fade" id="account-modal" aria-hidden="true">
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5">Change password</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+      <div class="mb-2"><label class="form-label" for="account-current-password">Current password</label>
+        <input class="form-control" type="password" id="account-current-password" autocomplete="current-password"></div>
+      <div class="mb-2"><label class="form-label" for="account-new-password">New password</label>
+        <input class="form-control" type="password" id="account-new-password" autocomplete="new-password" minlength="8"></div>
+      <div class="mb-2"><label class="form-label" for="account-new-password-confirm">Confirm new password</label>
+        <input class="form-control" type="password" id="account-new-password-confirm" autocomplete="new-password" minlength="8"></div>
+      <div id="account-password-msg" class="small text-body-secondary"></div>
+    </div>
+    <div class="modal-footer">
+      <button id="account-password-save" class="btn btn-primary" type="button">Change password</button>
+    </div>
+  </div></div>
+</div>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/bs-calendar.min.js"></script>
 <script src="/assets/js/summernote-bs5.min.js"></script>
-<script src="/assets/js/app.js?v=6"></script>
+<script src="/assets/js/app.js?v=8"></script>
 </body></html>"#;
 
 const RULES_PAGE: &str = r#"<!doctype html>

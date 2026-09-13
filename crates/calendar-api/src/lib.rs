@@ -77,6 +77,18 @@ pub fn openapi_document() -> serde_json::Value {
             "summary": "Current user", "responses": json_response("current user", user())
         }}),
     );
+    put(
+        "/api/auth/password",
+        json!({"post": {
+            "summary": "Change the current user's password; revokes every other session",
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                "type": "object", "required": ["current_password", "new_password"],
+                "properties": {"current_password": {"type": "string"},
+                    "new_password": {"type": "string", "minLength": 8}}}}}},
+            "responses": {"200": {"description": "changed"}, "400": {"description": "validation error"},
+                "401": {"description": "unauthorized"}},
+        }}),
+    );
 
     for (route, summary, secret) in [
         ("/api/auth/tokens", "Scoped API bearer tokens", "secret"),
@@ -270,6 +282,13 @@ pub fn openapi_document() -> serde_json::Value {
             "get": {"summary": "Download an attachment", "responses": {"200": {"description": "bytes"}}},
             "delete": {"summary": "Delete an attachment", "responses": {"200": {"description": "deleted"}}},
         }),
+    );
+    put(
+        "/api/attachments/{id}/meta",
+        json!({"get": {
+            "summary": "Attachment metadata only (no bytes)",
+            "responses": {"200": {"description": "metadata"}, "404": {"description": "absent"}},
+        }}),
     );
     put(
         "/api/places/autocomplete",
