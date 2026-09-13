@@ -20,8 +20,9 @@
           var $del = $('<i class="bi bi-trash text-danger ms-2" title="Delete"></i>');
           $del.on('click', function (ev) {
             ev.stopPropagation();
-            if (!window.confirm('Delete address book "' + b.name + '"? Its contacts go with it.')) { return; }
-            api('DELETE', '/api/addressbooks/' + b.id).done(loadBooks);
+            confirmDialog('Delete address book "' + b.name + '"? Its contacts go with it.').done(function () {
+              api('DELETE', '/api/addressbooks/' + b.id).done(loadBooks);
+            });
           });
           $item.append($del);
         }
@@ -59,8 +60,9 @@
       if (!c.directory) {
         var $del = $('<button class="btn btn-outline-danger btn-sm" type="button">Delete</button>');
         $del.on('click', function () {
-          if (!window.confirm('Delete contact "' + c.full_name + '"?')) { return; }
-          api('DELETE', '/api/contacts/' + c.id).done(loadContacts);
+          confirmDialog('Delete contact "' + c.full_name + '"?').done(function () {
+            api('DELETE', '/api/contacts/' + c.id).done(loadContacts);
+          });
         });
         $tr.append($('<td class="text-end">').append($del));
       } else {
@@ -94,10 +96,11 @@
     $('#ct-search').on('input', applySearch);
 
     $('#ab-new').on('click', function () {
-      var name = window.prompt('Address book name:');
-      if (!name) { return; }
-      var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'book';
-      api('POST', '/api/addressbooks', { slug: slug, name: name }).done(loadBooks);
+      promptDialog('Address book name:').done(function (name) {
+        if (!name) { return; }
+        var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'book';
+        api('POST', '/api/addressbooks', { slug: slug, name: name }).done(loadBooks);
+      });
     });
 
     $('#ct-form').on('submit', function (ev) {

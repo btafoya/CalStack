@@ -77,6 +77,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "js/dialogs.js",
+        asset!("js/dialogs.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "js/rules.js",
         asset!("js/rules.js"),
         "text/javascript; charset=utf-8",
@@ -273,7 +278,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
     <aside class="col-md-3 col-lg-2 p-3 border-end h-100 overflow-auto">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <span class="fw-semibold">Calendars</span>
-        <button id="add-cal-btn" class="btn btn-sm btn-outline-primary" type="button" aria-label="Add calendar">+</button>
+        <button id="add-cal-btn" class="btn btn-outline-primary" style="width:2.75rem;height:2.75rem" type="button" aria-label="Add calendar">+</button>
       </div>
       <ul id="cal-list" class="list-group list-group-flush"></ul>
       <div class="d-flex justify-content-between align-items-center mb-2 mt-4">
@@ -292,7 +297,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
   </div>
 </div>
 <!-- event editor -->
-<div class="modal fade" id="event-modal" tabindex="-1" aria-hidden="true">
+<div class="modal fade" id="event-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
   <div class="modal-dialog"><form id="event-form" class="modal-content">
     <div class="modal-header"><h2 class="modal-title h5">Event</h2>
       <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
@@ -324,50 +329,58 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
           <input class="form-control" id="ev-location" placeholder="Type a place or address" autocomplete="off">
           <div id="ev-places-menu" class="list-group position-absolute shadow" style="top:100%;left:0;right:0;z-index:1060" hidden></div></div>
       </div>
-      <div class="mb-3"><label class="form-label" for="ev-url">URL</label>
-        <input class="form-control" id="ev-url" type="url"></div>
-      <div class="row mb-3">
-        <div class="col"><label class="form-label" for="ev-status">Status</label>
-          <select class="form-select" id="ev-status">
-            <option value="">(none)</option>
-            <option value="CONFIRMED">Confirmed</option>
-            <option value="TENTATIVE">Tentative</option>
-            <option value="CANCELLED">Cancelled</option>
-          </select></div>
-        <div class="col"><label class="form-label" for="ev-class">Visibility</label>
-          <select class="form-select" id="ev-class">
-            <option value="">(none)</option>
-            <option value="PUBLIC">Public</option>
-            <option value="PRIVATE">Private</option>
-            <option value="CONFIDENTIAL">Confidential</option>
-          </select></div>
-        <div class="col"><label class="form-label" for="ev-transp">Show as</label>
-          <select class="form-select" id="ev-transp">
-            <option value="">(none)</option>
-            <option value="OPAQUE">Busy</option>
-            <option value="TRANSPARENT">Free</option>
-          </select></div>
-      </div>
       <div class="mb-3"><label class="form-label">Categories</label>
         <div id="ev-categories-box"></div></div>
-      <div class="row mb-3">
-        <div class="col"><label class="form-label" for="ev-repeat">Repeat</label>
-          <select class="form-select" id="ev-repeat">
-            <option value="">Does not repeat</option>
-            <option value="DAILY">Daily</option>
-            <option value="WEEKLY">Weekly</option>
-            <option value="MONTHLY">Monthly</option>
-            <option value="YEARLY">Yearly</option>
-          </select></div>
-        <div class="col" id="ev-repeat-interval-row" hidden>
-          <label class="form-label" for="ev-repeat-interval">Every</label>
-          <input class="form-control" id="ev-repeat-interval" type="number" min="1" value="1"></div>
-        <div class="col" id="ev-repeat-until-row" hidden>
-          <label class="form-label" for="ev-repeat-until">Until</label>
-          <input class="form-control" id="ev-repeat-until" type="date"></div>
-      </div>
       <div class="mb-3"><label class="form-label" for="ev-desc">Description</label>
         <div id="ev-desc"></div></div>
+      <!-- ponytail: native <details> over a JS-toggled div — free collapse
+           state, no open/close JS needed. Doesn't auto-open when editing an
+           event that already has e.g. a status set; add that if it bites. -->
+      <details class="mb-3" id="ev-more-options">
+        <summary class="form-label" style="cursor:pointer">More options</summary>
+        <div class="mt-2">
+          <div class="mb-3"><label class="form-label" for="ev-url">URL</label>
+            <input class="form-control" id="ev-url" type="url"></div>
+          <div class="row mb-3">
+            <div class="col"><label class="form-label" for="ev-status">Status</label>
+              <select class="form-select" id="ev-status">
+                <option value="">(none)</option>
+                <option value="CONFIRMED">Confirmed</option>
+                <option value="TENTATIVE">Tentative</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select></div>
+            <div class="col"><label class="form-label" for="ev-class">Visibility</label>
+              <select class="form-select" id="ev-class">
+                <option value="">(none)</option>
+                <option value="PUBLIC">Public</option>
+                <option value="PRIVATE">Private</option>
+                <option value="CONFIDENTIAL">Confidential</option>
+              </select></div>
+            <div class="col"><label class="form-label" for="ev-transp">Show as</label>
+              <select class="form-select" id="ev-transp">
+                <option value="">(none)</option>
+                <option value="OPAQUE">Busy</option>
+                <option value="TRANSPARENT">Free</option>
+              </select></div>
+          </div>
+          <div class="row mb-3">
+            <div class="col"><label class="form-label" for="ev-repeat">Repeat</label>
+              <select class="form-select" id="ev-repeat">
+                <option value="">Does not repeat</option>
+                <option value="DAILY">Daily</option>
+                <option value="WEEKLY">Weekly</option>
+                <option value="MONTHLY">Monthly</option>
+                <option value="YEARLY">Yearly</option>
+              </select></div>
+            <div class="col" id="ev-repeat-interval-row" hidden>
+              <label class="form-label" for="ev-repeat-interval">Every</label>
+              <input class="form-control" id="ev-repeat-interval" type="number" min="1" value="1"></div>
+            <div class="col" id="ev-repeat-until-row" hidden>
+              <label class="form-label" for="ev-repeat-until">Until</label>
+              <input class="form-control" id="ev-repeat-until" type="date"></div>
+          </div>
+        </div>
+      </details>
       <div class="mb-3">
         <label class="form-label">Attendees</label>
         <ul id="ev-attendees" class="list-group list-group-flush mb-2"></ul>
@@ -447,7 +460,8 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/bs-calendar.min.js"></script>
 <script src="/assets/js/summernote-bs5.min.js"></script>
-<script src="/assets/js/app.js?v=9"></script>
+<script src="/assets/js/dialogs.js"></script>
+<script src="/assets/js/app.js?v=12"></script>
 </body></html>"#;
 
 const RULES_PAGE: &str = r#"<!doctype html>
@@ -563,6 +577,8 @@ const CATEGORIES_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/categories.js"></script>
 </body></html>"#;
 
@@ -624,6 +640,8 @@ const CONTACTS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/contacts.js"></script>
 </body></html>"#;
 
@@ -838,6 +856,8 @@ const CREDENTIALS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/credentials.js"></script>
 </body></html>"#;
 

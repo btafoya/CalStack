@@ -27,15 +27,24 @@
     eventCategories: [],
   };
 
+  // ponytail: disables whatever button/submit triggered a mutating call, to
+  // stop double-submits — keyed off document.activeElement rather than
+  // threading a button reference through every one of api()'s ~15 callers.
+  // Misses calls fired without a focused button (rare here); add an explicit
+  // $btn param if that starts mattering.
   function api(method, url, data, extraHeaders) {
     var headers = method !== 'GET' ? { 'X-CSRF-Token': state.csrf } : {};
     if (extraHeaders) { $.extend(headers, extraHeaders); }
+    var $btn = method !== 'GET' ? $(document.activeElement).filter('button, input[type="submit"]') : $();
+    $btn.prop('disabled', true);
     return $.ajax({
       method: method,
       url: url,
       data: data !== undefined && data !== null ? JSON.stringify(data) : null,
       contentType: 'application/json',
       headers: headers,
+    }).always(function () {
+      $btn.prop('disabled', false);
     }).fail(function (xhr) {
       if (xhr.status === 401) { window.location.href = '/login'; return; }
       window.alert((xhr.responseJSON && xhr.responseJSON.error) || 'Request failed');
@@ -179,20 +188,22 @@
       onDelete: function (appointment) {
         if (state.currentCalendar && state.currentCalendar.readOnly) { return; }
         var ev = state.eventCache[appointment.id];
-        if (ev && window.confirm('Delete "' + (ev.summary || 'this event') + '"?')) {
+        if (!ev) { return; }
+        confirmDialog('Delete "' + (ev.summary || 'this event') + '"?').done(function () {
           deleteEvent(ev.id, ev.etag);
-        }
+        });
       },
     });
     startAmPmObserver();
   }
 
   $('#add-cal-btn').on('click', function () {
-    var name = window.prompt('New calendar name:');
-    if (!name) { return; }
-    var slug = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-    if (!slug) { window.alert('Enter a valid calendar name.'); return; }
-    api('POST', '/api/calendars', { slug: slug, name: name }).done(loadCalendars);
+    promptDialog('New calendar name:').done(function (name) {
+      if (!name) { return; }
+      var slug = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      if (!slug) { window.alert('Enter a valid calendar name.'); return; }
+      api('POST', '/api/calendars', { slug: slug, name: name }).done(loadCalendars);
+    });
   });
 
   function loadCalendars() {
@@ -205,16 +216,18 @@
   }
 
   function renameCalendar(cal) {
-    var name = window.prompt('Calendar name:', cal.name);
-    if (!name || name === cal.name) { return; }
-    api('PATCH', '/api/calendars/' + cal.id, { name: name }).done(loadCalendars);
+    promptDialog('Calendar name:', cal.name).done(function (name) {
+      if (!name || name === cal.name) { return; }
+      api('PATCH', '/api/calendars/' + cal.id, { name: name }).done(loadCalendars);
+    });
   }
 
   function deleteCalendar(cal) {
-    if (!window.confirm('Delete calendar "' + cal.name + '"? This cannot be undone.')) { return; }
-    api('DELETE', '/api/calendars/' + cal.id).done(function () {
-      if (state.currentCalendar && state.currentCalendar.id === cal.id) { state.currentCalendar = null; }
-      loadCalendars();
+    confirmDialog('Delete calendar "' + cal.name + '"? This cannot be undone.').done(function () {
+      api('DELETE', '/api/calendars/' + cal.id).done(function () {
+        if (state.currentCalendar && state.currentCalendar.id === cal.id) { state.currentCalendar = null; }
+        loadCalendars();
+      });
     });
   }
 
@@ -569,6 +582,7 @@
 
   function openEventModal(mode, payload) {
     $('#event-form')[0].reset();
+    state.eventDirty = false;
     $('#ev-delete').prop('hidden', mode !== 'edit');
     $('#ev-attachments-section').prop('hidden', mode !== 'edit');
     state.editingAttendees = [];
@@ -604,7 +618,11 @@
       });
       $('#ev-desc').summernote('code', payload.description_html || '');
       loadAttachments();
+      // Open "More options" if editing an event that already uses one of the
+      // fields collapsed in there, so its config isn't hidden by surprise.
+      $('#ev-more-options').prop('open', !!(payload.status || payload.class || payload.transp || payload.rrule));
     } else {
+      $('#ev-more-options').prop('open', false);
       state.editingEventId = null;
       state.editingEtag = null;
       state.editingRruleUnknown = false;
@@ -717,6 +735,7 @@
           state.editingEtag ? { 'If-Match': state.editingEtag } : {})
       : api('POST', '/api/calendars/' + state.currentCalendar.id + '/events', body);
     req.done(function () {
+      state.eventDirty = false;
       modal('event-modal').hide();
       $('#calendar').bsCalendar('refresh');
     });
@@ -724,16 +743,27 @@
 
   function deleteEvent(id, etag) {
     api('DELETE', '/api/events/' + id, null, etag ? { 'If-Match': etag } : {}).done(function () {
+      state.eventDirty = false;
       modal('event-modal').hide();
       $('#calendar').bsCalendar('refresh');
     });
   }
 
+  // ponytail: no per-field diffing (form fields have no name attrs for
+  // serialize()) — any input/change inside the form is close enough to
+  // "dirty" to guard against losing a half-filled event.
+  $('#event-form').on('input change', 'input, select, textarea', function () {
+    state.eventDirty = true;
+  });
+  $('#event-modal').on('hide.bs.modal', function (e) {
+    if (state.eventDirty && !window.confirm('Discard unsaved changes?')) { e.preventDefault(); }
+  });
   $('#event-form').on('submit', saveEvent);
   $('#ev-delete').on('click', function () {
     if (!state.editingEventId) { return; }
-    if (!window.confirm('Delete this event?')) { return; }
-    deleteEvent(state.editingEventId, state.editingEtag);
+    confirmDialog('Delete this event?').done(function () {
+      deleteEvent(state.editingEventId, state.editingEtag);
+    });
   });
 
   // ============ sharing / ACL ============

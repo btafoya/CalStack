@@ -40,14 +40,16 @@
       });
       var $rename = $('<button class="btn btn-outline-secondary btn-sm" type="button">Rename</button>');
       $rename.on('click', function () {
-        var slug = window.prompt('New slug (existing events in scope are re-tagged):', row.slug);
-        if (!slug || slug === row.slug) { return; }
-        api('PATCH', '/api/categories/' + row.id, { slug: slug }).done(loadCategories);
+        promptDialog('New slug (existing events in scope are re-tagged):', row.slug).done(function (slug) {
+          if (!slug || slug === row.slug) { return; }
+          api('PATCH', '/api/categories/' + row.id, { slug: slug }).done(loadCategories);
+        });
       });
       var $del = $('<button class="btn btn-outline-danger btn-sm" type="button">Delete</button>');
       $del.on('click', function () {
-        if (!window.confirm('Delete category "' + row.name + '"? Events keep the tag as free text.')) { return; }
-        api('DELETE', '/api/categories/' + row.id).done(loadCategories);
+        confirmDialog('Delete category "' + row.name + '"? Events keep the tag as free text.').done(function () {
+          api('DELETE', '/api/categories/' + row.id).done(loadCategories);
+        });
       });
       $('<tr>')
         .append($('<td>').append($('<span class="badge">').addClass('bg-' + row.color + '-lt').text(row.name)))
