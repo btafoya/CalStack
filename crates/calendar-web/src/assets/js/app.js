@@ -396,11 +396,26 @@
       var item = $('<li class="list-group-item d-flex justify-content-between align-items-center">');
       item.append($('<a target="_blank" rel="noopener">').attr('href', '/api/attachments/' + a.id)
         .text(a.filename + ' (' + formatBytes(a.byte_size) + ')'));
+      var btnGroup = $('<span>');
+      var infoBtn = $('<button class="btn btn-sm btn-outline-secondary me-1" type="button" title="Details">' +
+        '<i class="bi bi-info-circle"></i></button>');
+      infoBtn.on('click', function () {
+        api('GET', '/api/attachments/' + a.id + '/meta').done(function (meta) {
+          window.alert(
+            meta.filename + '\n' +
+            'Type: ' + meta.content_type + '\n' +
+            'Size: ' + formatBytes(meta.byte_size) + '\n' +
+            'SHA-256: ' + meta.sha256 + '\n' +
+            'Uploaded: ' + meta.created_at
+          );
+        });
+      });
       var btn = $('<button class="btn btn-sm btn-outline-danger" type="button">Delete</button>');
       btn.on('click', function () {
         api('DELETE', '/api/attachments/' + a.id).done(function () { loadAttachments(); });
       });
-      item.append(btn);
+      btnGroup.append(infoBtn).append(btn);
+      item.append(btnGroup);
       list.append(item);
     });
   }
