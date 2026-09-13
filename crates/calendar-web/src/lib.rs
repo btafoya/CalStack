@@ -447,7 +447,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/bs-calendar.min.js"></script>
 <script src="/assets/js/summernote-bs5.min.js"></script>
-<script src="/assets/js/app.js?v=8"></script>
+<script src="/assets/js/app.js?v=9"></script>
 </body></html>"#;
 
 const RULES_PAGE: &str = r#"<!doctype html>
