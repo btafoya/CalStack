@@ -48,6 +48,21 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "image/png",
     ),
     (
+        "img/favicon-16x16.png",
+        asset!("img/favicon-16x16.png"),
+        "image/png",
+    ),
+    (
+        "img/favicon-32x32.png",
+        asset!("img/favicon-32x32.png"),
+        "image/png",
+    ),
+    (
+        "img/apple-touch-icon.png",
+        asset!("img/apple-touch-icon.png"),
+        "image/png",
+    ),
+    (
         "js/theme.js",
         asset!("js/theme.js"),
         "text/javascript; charset=utf-8",
@@ -298,6 +313,9 @@ const LOGIN_PAGE: &str = concat!(
 <title>CalStack — Sign in</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="d-flex flex-column bg-body-tertiary" style="min-height:100vh">
@@ -363,6 +381,9 @@ const APP_PAGE_HEAD: &str = concat!(
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/summernote-bs5.min.css">
 <link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 <script src="/assets/js/theme.js"></script>
 <style>
   /* ponytail: bs-calendar's own left-hand nav drawer (button[data-bs-toggle="sidebar"])
@@ -603,6 +624,9 @@ const RULES_PAGE: &str = concat!(
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
@@ -672,6 +696,9 @@ const CATEGORIES_PAGE: &str = concat!(
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
@@ -726,6 +753,9 @@ const CONTACTS_PAGE: &str = concat!(
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
@@ -791,6 +821,9 @@ const ADMIN_PAGE: &str = concat!(
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
@@ -842,6 +875,9 @@ const PROVIDERS_PAGE: &str = concat!(
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
@@ -943,6 +979,9 @@ const CREDENTIALS_PAGE: &str = concat!(
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
@@ -1012,6 +1051,7 @@ const SWAGGER_PAGE: &str = r#"<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CalStack — API docs</title>
 <link rel="stylesheet" href="/assets/css/swagger-ui.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
 <style>body{margin:0}.topbar{display:none}</style>
 </head>
 <body>
