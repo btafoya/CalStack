@@ -21,6 +21,7 @@ fn contact_json(
     c: &db::contacts::ContactRow,
     emails: &[db::contacts::ContactEmailRow],
     tels: &[db::contacts::ContactTelRow],
+    members: &[db::contacts::ResolvedMember],
 ) -> serde_json::Value {
     json!({
         "id": c.id, "address_book_id": c.address_book_id, "uid": c.uid, "kind": c.kind,
@@ -35,6 +36,9 @@ fn contact_json(
         "tels": tels.iter().map(|t| json!({
             "number": t.number, "kind": t.kind, "is_mobile": t.is_mobile, "is_primary": t.is_primary,
         })).collect::<Vec<_>>(),
+        "members": members.iter().map(|m| json!({
+            "contact_id": m.contact_id, "user_id": m.user_id, "full_name": m.full_name,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -43,8 +47,29 @@ fn directory_entry_json(e: &db::contacts::DirectoryEntry) -> serde_json::Value {
         "id": e.user_id, "user_id": e.user_id, "kind": "individual", "directory": true,
         "full_name": e.display_name.clone().unwrap_or_else(|| e.username.clone()),
         "emails": [{"email": e.email, "kind": "work", "is_primary": true}],
-        "tels": [], "updated_at": e.updated_at,
+        "tels": [], "members": [], "updated_at": e.updated_at,
     })
+}
+
+/// Group members addressed by contact id or tenant user id, turned into the
+/// `urn:uuid:{uid}` MEMBER values the vCard writer/CardDAV resolution expect
+/// (calendar_db::contacts::upsert_contact resolves the same scheme back).
+async fn group_member_uris(
+    pool: &sqlx::PgPool,
+    contact_ids: &[Uuid],
+    user_ids: &[Uuid],
+) -> Result<Vec<String>, AppError> {
+    let mut uris = Vec::with_capacity(contact_ids.len() + user_ids.len());
+    for id in contact_ids {
+        let member = db::contacts::get_contact(pool, *id)
+            .await
+            .map_err(|_| AppError::bad_request(format!("member contact {id} not found")))?;
+        uris.push(format!("urn:uuid:{}", member.uid));
+    }
+    for id in user_ids {
+        uris.push(format!("urn:uuid:{id}"));
+    }
+    Ok(uris)
 }
 
 // ============ address books ============
@@ -161,13 +186,21 @@ async fn list_contacts(
     for c in contacts {
         let emails = db::contacts::list_emails(&pool, c.id).await?;
         let tels = db::contacts::list_tels(&pool, c.id).await?;
-        out.push(contact_json(&c, &emails, &tels));
+        let members = if c.kind == "group" {
+            db::contacts::resolved_group_members(&pool, c.id).await?
+        } else {
+            vec![]
+        };
+        out.push(contact_json(&c, &emails, &tels, &members));
     }
     Ok(Json(json!(out)))
 }
 
 #[derive(serde::Deserialize, Default)]
 struct ContactBody {
+    /// "individual" (default) or "group". Ignored on PATCH — a contact's
+    /// kind doesn't change after creation.
+    kind: Option<String>,
     full_name: String,
     given_name: Option<String>,
     family_name: Option<String>,
@@ -177,6 +210,12 @@ struct ContactBody {
     emails: Vec<EmailBody>,
     #[serde(default)]
     tels: Vec<TelBody>,
+    /// Group membership (kind="group" only): other contacts in the same
+    /// book, plus/or tenant directory users. Replaces the whole set.
+    #[serde(default)]
+    member_contact_ids: Vec<Uuid>,
+    #[serde(default)]
+    member_user_ids: Vec<Uuid>,
 }
 
 #[derive(serde::Deserialize)]
@@ -214,6 +253,11 @@ async fn create_contact(
     if body.full_name.trim().is_empty() {
         return Err(AppError::bad_request("full_name is required"));
     }
+    let kind = match body.kind.as_deref() {
+        None | Some("individual") => "individual",
+        Some("group") => "group",
+        Some(_) => return Err(AppError::bad_request("kind must be individual or group")),
+    };
     let uid = Uuid::new_v4().to_string();
     let emails: Vec<db::contacts::NewEmail> = body
         .emails
@@ -234,9 +278,11 @@ async fn create_contact(
             is_primary: t.is_primary,
         })
         .collect();
+    let group_members =
+        group_member_uris(&pool, &body.member_contact_ids, &body.member_user_ids).await?;
     let raw_vcard = calendar_carddav::vcard::write_vcard_3_0(
         &uid,
-        "individual",
+        kind,
         &body.full_name,
         body.given_name.as_deref(),
         body.family_name.as_deref(),
@@ -244,13 +290,14 @@ async fn create_contact(
         body.title.as_deref(),
         &emails,
         &tels,
+        &group_members,
     );
     let contact = db::contacts::upsert_contact(
         &pool,
         address_book_id,
         &db::contacts::NewContact {
             uid,
-            kind: "individual".into(),
+            kind: kind.into(),
             full_name: body.full_name,
             given_name: body.given_name,
             family_name: body.family_name,
@@ -264,15 +311,16 @@ async fn create_contact(
             raw_vcard,
             emails,
             tels,
-            group_members: vec![],
+            group_members,
         },
     )
     .await?;
     let emails = db::contacts::list_emails(&pool, contact.id).await?;
     let tels = db::contacts::list_tels(&pool, contact.id).await?;
+    let members = db::contacts::resolved_group_members(&pool, contact.id).await?;
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(contact_json(&contact, &emails, &tels)),
+        Json(contact_json(&contact, &emails, &tels, &members)),
     ))
 }
 
@@ -293,7 +341,8 @@ async fn get_contact(
     }
     let emails = db::contacts::list_emails(&pool, contact.id).await?;
     let tels = db::contacts::list_tels(&pool, contact.id).await?;
-    Ok(Json(contact_json(&contact, &emails, &tels)))
+    let members = db::contacts::resolved_group_members(&pool, contact.id).await?;
+    Ok(Json(contact_json(&contact, &emails, &tels, &members)))
 }
 
 async fn patch_contact(
@@ -332,6 +381,11 @@ async fn patch_contact(
             is_primary: t.is_primary,
         })
         .collect();
+    let group_members = if current.kind == "group" {
+        group_member_uris(&pool, &body.member_contact_ids, &body.member_user_ids).await?
+    } else {
+        vec![]
+    };
     let raw_vcard = calendar_carddav::vcard::write_vcard_3_0(
         &current.uid,
         &current.kind,
@@ -342,6 +396,7 @@ async fn patch_contact(
         body.title.as_deref(),
         &emails,
         &tels,
+        &group_members,
     );
     let contact = db::contacts::upsert_contact(
         &pool,
@@ -362,13 +417,14 @@ async fn patch_contact(
             raw_vcard,
             emails,
             tels,
-            group_members: vec![],
+            group_members,
         },
     )
     .await?;
     let emails = db::contacts::list_emails(&pool, contact.id).await?;
     let tels = db::contacts::list_tels(&pool, contact.id).await?;
-    Ok(Json(contact_json(&contact, &emails, &tels)))
+    let members = db::contacts::resolved_group_members(&pool, contact.id).await?;
+    Ok(Json(contact_json(&contact, &emails, &tels, &members)))
 }
 
 async fn delete_contact(
@@ -473,7 +529,7 @@ async fn autocomplete(
     let mut out = Vec::new();
     for c in contacts {
         let emails = db::contacts::list_emails(&pool, c.id).await?;
-        out.push(contact_json(&c, &emails, &[]));
+        out.push(contact_json(&c, &emails, &[], &[]));
     }
     let needle = query.q.to_lowercase();
     let directory = db::contacts::directory_entries(&pool, tenant_id).await?;

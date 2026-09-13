@@ -422,7 +422,7 @@ pub fn openapi_document() -> serde_json::Value {
                 "parameters": [param("id", true)],
                 "responses": {"200": {"description": "list", "content": {"application/json": {"schema": {
                     "type": "array", "items": {"$ref": "#/components/schemas/Contact"}}}}}}},
-            "post": {"summary": "Create a contact (personal books only)",
+            "post": {"summary": "Create a contact or group (personal books only)",
                 "parameters": [param("id", true)],
                 "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContactWrite"}}}},
                 "responses": {"201": {"description": "created", "content": {"application/json": {"schema": contact()}}}}},
@@ -611,8 +611,17 @@ pub fn openapi_document() -> serde_json::Value {
                         "is_mobile": {"type": "boolean",
                             "description": "eligible for the planned Twilio SMS channel"},
                         "is_primary": {"type": "boolean"}}}},
+                    "members": {"type": "array",
+                        "description": "resolved group membership (kind=group only); empty for individuals",
+                        "items": {"type": "object", "properties": {
+                            "contact_id": {"type": ["string", "null"], "format": "uuid"},
+                            "user_id": {"type": ["string", "null"], "format": "uuid",
+                                "description": "set when the member is a tenant directory user rather than a contact"},
+                            "full_name": {"type": "string"}}}},
                 }},
                 "ContactWrite": {"type": "object", "required": ["full_name"], "properties": {
+                    "kind": {"type": "string", "enum": ["individual", "group"], "default": "individual",
+                        "description": "ignored on PATCH — a contact's kind doesn't change after creation"},
                     "full_name": {"type": "string"},
                     "given_name": {"type": ["string", "null"]}, "family_name": {"type": ["string", "null"]},
                     "org": {"type": ["string", "null"]}, "title": {"type": ["string", "null"]},
@@ -621,6 +630,10 @@ pub fn openapi_document() -> serde_json::Value {
                     "tels": {"type": "array", "items": {"type": "object", "required": ["number"], "properties": {
                         "number": {"type": "string"}, "kind": {"type": ["string", "null"]},
                         "is_mobile": {"type": "boolean"}, "is_primary": {"type": "boolean"}}}},
+                    "member_contact_ids": {"type": "array", "items": {"type": "string", "format": "uuid"},
+                        "description": "kind=group only: other contacts in the same book; replaces the whole set"},
+                    "member_user_ids": {"type": "array", "items": {"type": "string", "format": "uuid"},
+                        "description": "kind=group only: tenant directory users; replaces the whole set"},
                 }},
                 "Calendar": {"type": "object", "properties": {
                     "id": {"type": "string", "format": "uuid"}, "slug": {"type": "string"},
@@ -651,5 +664,10 @@ mod tests {
         assert!(doc["paths"]["/api/addressbooks"]["post"].is_object());
         assert!(doc["paths"]["/api/contacts/autocomplete"]["get"].is_object());
         assert!(doc["components"]["schemas"]["Contact"].is_object());
+        assert!(doc["components"]["schemas"]["Contact"]["properties"]["members"].is_object());
+        assert!(
+            doc["components"]["schemas"]["ContactWrite"]["properties"]["member_contact_ids"]
+                .is_object()
+        );
     }
 }

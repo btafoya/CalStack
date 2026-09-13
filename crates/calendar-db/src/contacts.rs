@@ -205,6 +205,16 @@ pub struct GroupMemberRow {
     pub group_contact_id: Uuid,
     pub raw_member: String,
     pub member_contact_id: Option<Uuid>,
+    pub member_user_id: Option<Uuid>,
+}
+
+/// A resolved group member, for API display: whichever of contact/user it
+/// pointed at, plus that member's display name.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedMember {
+    pub contact_id: Option<Uuid>,
+    pub user_id: Option<Uuid>,
+    pub full_name: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -337,32 +347,54 @@ pub async fn upsert_contact(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    for raw_member in &data.group_members {
-        // A member URI referencing another card's UID in this book resolves
-        // to that contact; anything else round-trips as raw_member only.
-        // Real clients send either an href-style path ("…/{uid}.vcf",
-        // Thunderbird) or a bare "urn:uuid:{uid}" (Apple Contacts/DAVx5).
-        let member_uid = raw_member
-            .rsplit_once('/')
-            .map(|(_, tail)| tail.trim_end_matches(".vcf"))
-            .unwrap_or(raw_member.as_str())
-            .trim_start_matches("urn:uuid:");
-        let member_contact_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM contacts WHERE address_book_id = $1 AND uid = $2 AND deleted_at IS NULL",
-        )
-        .bind(address_book_id)
-        .bind(member_uid)
-        .fetch_optional(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO contact_group_members (group_contact_id, raw_member, member_contact_id)
-             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-        )
-        .bind(id)
-        .bind(raw_member)
-        .bind(member_contact_id)
-        .execute(&mut *tx)
-        .await?;
+    if !data.group_members.is_empty() {
+        let tenant_id: Uuid =
+            sqlx::query_scalar("SELECT tenant_id FROM address_books WHERE id = $1")
+                .bind(address_book_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        for raw_member in &data.group_members {
+            // A member URI referencing another card's UID in this book, or a
+            // tenant user's id, resolves to that contact/user; anything else
+            // round-trips as raw_member only. Real clients send either an
+            // href-style path ("…/{uid}.vcf", Thunderbird) or a bare
+            // "urn:uuid:{uid}" (Apple Contacts/DAVx5) — this server emits the
+            // latter for both contact- and directory-sourced members.
+            let member_uid = raw_member
+                .rsplit_once('/')
+                .map(|(_, tail)| tail.trim_end_matches(".vcf"))
+                .unwrap_or(raw_member.as_str())
+                .trim_start_matches("urn:uuid:");
+            let member_contact_id: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM contacts WHERE address_book_id = $1 AND uid = $2 AND deleted_at IS NULL",
+            )
+            .bind(address_book_id)
+            .bind(member_uid)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let member_user_id: Option<Uuid> = if member_contact_id.is_some() {
+                None
+            } else {
+                sqlx::query_scalar(
+                    "SELECT u.id FROM tenant_members tm JOIN users u ON u.id = tm.user_id
+                     WHERE tm.tenant_id = $1 AND u.id::text = $2",
+                )
+                .bind(tenant_id)
+                .bind(member_uid)
+                .fetch_optional(&mut *tx)
+                .await?
+            };
+            sqlx::query(
+                "INSERT INTO contact_group_members (group_contact_id, raw_member, member_contact_id, member_user_id)
+                 VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+            )
+            .bind(id)
+            .bind(raw_member)
+            .bind(member_contact_id)
+            .bind(member_user_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     bump_ctag(&mut tx, address_book_id).await?;
     tx.commit().await?;
@@ -467,13 +499,49 @@ pub async fn list_group_members(
     group_contact_id: Uuid,
 ) -> Result<Vec<GroupMemberRow>, DbError> {
     sqlx::query_as::<_, GroupMemberRow>(
-        "SELECT group_contact_id, raw_member, member_contact_id FROM contact_group_members
-         WHERE group_contact_id = $1",
+        "SELECT group_contact_id, raw_member, member_contact_id, member_user_id
+         FROM contact_group_members WHERE group_contact_id = $1",
     )
     .bind(group_contact_id)
     .fetch_all(pool)
     .await
     .map_err(Into::into)
+}
+
+/// Group members with display names resolved, for the API response. Members
+/// whose target has since been deleted are silently dropped (their
+/// raw_member row still exists for CardDAV round-trip, but there's nothing
+/// to display).
+pub async fn resolved_group_members(
+    pool: &PgPool,
+    group_contact_id: Uuid,
+) -> Result<Vec<ResolvedMember>, DbError> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        contact_id: Option<Uuid>,
+        user_id: Option<Uuid>,
+        full_name: String,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT c.id AS contact_id, NULL::uuid AS user_id, c.full_name
+         FROM contact_group_members g JOIN contacts c ON c.id = g.member_contact_id
+         WHERE g.group_contact_id = $1 AND c.deleted_at IS NULL
+         UNION ALL
+         SELECT NULL::uuid AS contact_id, u.id AS user_id, COALESCE(u.display_name, u.username)
+         FROM contact_group_members g JOIN users u ON u.id = g.member_user_id
+         WHERE g.group_contact_id = $1",
+    )
+    .bind(group_contact_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ResolvedMember {
+            contact_id: r.contact_id,
+            user_id: r.user_id,
+            full_name: r.full_name,
+        })
+        .collect())
 }
 
 pub async fn get_photo(pool: &PgPool, contact_id: Uuid) -> Result<(Vec<u8>, String), DbError> {

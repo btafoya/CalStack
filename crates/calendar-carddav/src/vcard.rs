@@ -299,6 +299,7 @@ pub fn write_vcard_3_0(
     title: Option<&str>,
     emails: &[NewEmail],
     tels: &[NewTel],
+    members: &[String],
 ) -> String {
     let mut out = String::from("BEGIN:VCARD\r\nVERSION:3.0\r\n");
     out.push_str(&format!("UID:{}\r\n", escape_text(uid)));
@@ -343,6 +344,9 @@ pub fn write_vcard_3_0(
             format!(";TYPE={}", types.join(","))
         };
         out.push_str(&format!("TEL{type_param}:{}\r\n", escape_text(&t.number)));
+    }
+    for member in members {
+        out.push_str(&format!("MEMBER:{}\r\n", escape_text(member)));
     }
     out.push_str("END:VCARD\r\n");
     out
@@ -406,12 +410,32 @@ TEL;TYPE=CELL:+15551234567\r\nEND:VCARD\r\n";
                 is_mobile: true,
                 is_primary: true,
             }],
+            &[],
         );
         let cards = parse_vcard(&text).unwrap();
         assert_eq!(cards[0].uid, "u1");
         assert_eq!(cards[0].full_name, "Jane Doe");
         assert_eq!(cards[0].emails[0].email, "jane@example.com");
         assert!(cards[0].tels[0].is_mobile);
+    }
+
+    #[test]
+    fn write_group_members_round_trip() {
+        let text = write_vcard_3_0(
+            "g1",
+            "group",
+            "Team",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            &["urn:uuid:member-1".to_string()],
+        );
+        let cards = parse_vcard(&text).unwrap();
+        assert_eq!(cards[0].kind, "group");
+        assert_eq!(cards[0].members, vec!["urn:uuid:member-1"]);
     }
 
     #[test]
