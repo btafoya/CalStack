@@ -136,6 +136,7 @@ docker compose run --rm app create-admin admin admin@example.com correcthorsebat
 
 Open `http://<BIND_ADDR>/` (redirects to `/login` if unauthenticated). Register an account, create a calendar, and use the built-in week-view calendar to add events.
 
+- **Account** (nav bar, every signed-in user) — change your password; revokes every other live session.
 - **Rules** (nav bar, scoped to whichever calendar is selected) — create/enable/disable/delete trigger → action automation, per calendar or tenant-wide.
 - **Providers** (nav bar) — configure Postmark, SMTP, or Twilio credentials used for outbound iTIP mail and (once wired up) SMS.
 - **Admin** (nav bar, visible only to `is_admin` users) — list accounts, create users, promote/demote admin status, enable/disable accounts.
