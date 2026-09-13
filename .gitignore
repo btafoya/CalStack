@@ -7,3 +7,4 @@ target/
 CLAUDE.md
 docs/.playwright-mcp/
 .playwright-mcp/
+*.png
