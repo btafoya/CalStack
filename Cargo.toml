@@ -6,6 +6,7 @@ members = [
   "crates/calendar-db",
   "crates/calendar-api",
   "crates/calendar-caldav",
+  "crates/calendar-carddav",
   "crates/calendar-auth",
   "crates/calendar-rules",
   "crates/calendar-notify",
@@ -43,7 +44,7 @@ tower-http = { version = "0.6", features = ["trace", "compression-gzip", "set-he
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
-dav-server = { version = "0.11", features = ["caldav"] }
+dav-server = { version = "0.11", features = ["caldav", "carddav"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 webauthn-rs = "0.5"
 totp-rs = { version = "5", default-features = false, features = ["otpauth", "gen_secret"] }

@@ -1,7 +1,9 @@
 //! Single production executable: HTTP server, CLI commands.
+#![recursion_limit = "256"] // the event JSON literal in `event_json` is large
 
 mod admin_api;
 mod categories_api;
+mod contacts_api;
 mod dav;
 mod extras;
 mod jobs;
@@ -1161,6 +1163,7 @@ fn event_view(
         "attendees": attendees.iter().map(|a| serde_json::json!({
             "email": a.email, "display_name": a.display_name, "telephone": a.telephone,
             "role": a.role, "partstat": a.partstat, "rsvp": a.rsvp,
+            "contact_id": a.contact_id, "user_id": a.user_id,
         })).collect::<Vec<_>>(),
     })
 }
@@ -1579,6 +1582,7 @@ pub struct AppState {
     pub crypto: Option<std::sync::Arc<calendar_auth::Crypto>>,
     pub passkeys: Option<std::sync::Arc<mfa::PasskeyStore>>,
     pub dav: Option<std::sync::Arc<dav_server::DavHandler<calendar_caldav::DavAuth>>>,
+    pub dav_carddav: Option<std::sync::Arc<dav_server::DavHandler<calendar_carddav::DavAuth>>>,
     pub config: Config,
 }
 
@@ -1658,6 +1662,7 @@ fn build_router(state: AppState) -> Router {
         .merge(sharing_api::router())
         .merge(rules_api::router())
         .merge(categories_api::router())
+        .merge(contacts_api::router())
         .merge(scheduling::router())
         .merge(admin_api::router())
         .route(
@@ -1705,6 +1710,13 @@ fn build_router(state: AppState) -> Router {
             "/.well-known/caldav",
             get(|| async { axum::response::Redirect::permanent("/calendars/") }),
         )
+        .route("/contacts", axum::routing::any(dav::entry_carddav))
+        .route("/contacts/", axum::routing::any(dav::entry_carddav))
+        .route("/contacts/{*rest}", axum::routing::any(dav::entry_carddav))
+        .route(
+            "/.well-known/carddav",
+            get(|| async { axum::response::Redirect::permanent("/contacts/") }),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_page_guard,
@@ -1744,6 +1756,14 @@ async fn serve(cfg: &Config) -> Result<()> {
             .principal("/calendars/")
             .build_handler(),
     ));
+    let dav_carddav = Some(std::sync::Arc::new(
+        dav_server::DavHandler::builder()
+            .filesystem(Box::new(calendar_carddav::PgAddressBookFs {
+                pool: pool.clone(),
+            }))
+            .principal("/contacts/")
+            .build_handler(),
+    ));
     // Background job worker: reminders and scheduled scans.
     tokio::spawn(jobs::run_worker(
         pool.clone(),
@@ -1756,6 +1776,7 @@ async fn serve(cfg: &Config) -> Result<()> {
         crypto,
         passkeys,
         dav,
+        dav_carddav,
         config: cfg.clone(),
     });
 

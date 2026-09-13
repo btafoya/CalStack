@@ -26,6 +26,7 @@ pub fn openapi_document() -> serde_json::Value {
     let user = || serde_json::json!({"$ref": "#/components/schemas/User"});
     let calendar = || serde_json::json!({"$ref": "#/components/schemas/Calendar"});
     let category = || serde_json::json!({"$ref": "#/components/schemas/Category"});
+    let contact = || serde_json::json!({"$ref": "#/components/schemas/Contact"});
     let event = || serde_json::json!({"$ref": "#/components/schemas/Event"});
 
     let mut paths = serde_json::Map::new();
@@ -390,6 +391,78 @@ pub fn openapi_document() -> serde_json::Value {
         }),
     );
     put(
+        "/api/addressbooks",
+        json!({
+            "get": {"summary": "List the caller's personal address books plus the read-only tenant directory book",
+                "responses": {"200": {"description": "list", "content": {"application/json": {"schema": {
+                    "type": "array", "items": {"$ref": "#/components/schemas/AddressBook"}}}}}}},
+            "post": {"summary": "Create a personal address book",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "required": ["slug", "name"],
+                    "properties": {"slug": {"type": "string"}, "name": {"type": "string"}}}}}},
+                "responses": {"201": {"description": "created"}, "400": {"description": "validation error"}}},
+        }),
+    );
+    put(
+        "/api/addressbooks/{id}",
+        json!({
+            "patch": {"summary": "Rename a personal address book",
+                "parameters": [param("id", true)],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}}}},
+                "responses": {"200": {"description": "updated"}, "403": {"description": "not the owner"}}},
+            "delete": {"summary": "Delete a personal address book", "parameters": [param("id", true)],
+                "responses": {"200": {"description": "removed"}}},
+        }),
+    );
+    put(
+        "/api/addressbooks/{id}/contacts",
+        json!({
+            "get": {"summary": "List contacts in a book (the directory book id returns projected tenant users)",
+                "parameters": [param("id", true)],
+                "responses": {"200": {"description": "list", "content": {"application/json": {"schema": {
+                    "type": "array", "items": {"$ref": "#/components/schemas/Contact"}}}}}}},
+            "post": {"summary": "Create a contact (personal books only)",
+                "parameters": [param("id", true)],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContactWrite"}}}},
+                "responses": {"201": {"description": "created", "content": {"application/json": {"schema": contact()}}}}},
+        }),
+    );
+    put(
+        "/api/contacts/autocomplete",
+        json!({"get": {
+            "summary": "Attendee typeahead: caller's personal books plus the tenant directory, ranked by name/email/phone match",
+            "parameters": [{"name": "q", "in": "query", "required": true, "schema": {"type": "string"}}],
+            "responses": {"200": {"description": "list", "content": {"application/json": {"schema": {
+                "type": "array", "items": {"$ref": "#/components/schemas/Contact"}}}}}},
+        }}),
+    );
+    put(
+        "/api/contacts/{id}",
+        json!({
+            "get": {"summary": "Get a contact", "parameters": [param("id", true)],
+                "responses": {"200": {"description": "found", "content": {"application/json": {"schema": contact()}}}, "404": {"description": "absent"}}},
+            "patch": {"summary": "Update a contact's normalized fields", "parameters": [param("id", true)],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContactWrite"}}}},
+                "responses": {"200": {"description": "updated"}}},
+            "delete": {"summary": "Soft-delete a contact", "parameters": [param("id", true)],
+                "responses": {"200": {"description": "removed"}}},
+        }),
+    );
+    put(
+        "/api/contacts/{id}/photo",
+        json!({
+            "get": {"summary": "Fetch a contact's photo bytes", "parameters": [param("id", true)],
+                "responses": {"200": {"description": "image bytes"}, "404": {"description": "no photo"}}},
+            "put": {"summary": "Set a contact's photo (base64, capped like event attachments)",
+                "parameters": [param("id", true)],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "required": ["content_type", "data"],
+                    "properties": {"content_type": {"type": "string"}, "data": {"type": "string", "format": "byte"}}}}}},
+                "responses": {"200": {"description": "stored"}, "400": {"description": "exceeds the size cap"}}},
+        }),
+    );
+    put(
         "/api/notification-providers",
         json!({
             "post": {"summary": "Configure a notification provider (credentials stored encrypted)",
@@ -481,6 +554,10 @@ pub fn openapi_document() -> serde_json::Value {
                         "email": {"type": "string"}, "display_name": {"type": ["string", "null"]},
                         "role": {"type": "string"}, "partstat": {"type": "string"},
                         "rsvp": {"type": ["boolean", "null"]},
+                        "contact_id": {"type": ["string", "null"], "format": "uuid",
+                            "description": "loose ref; the contact may since have changed or been deleted"},
+                        "user_id": {"type": ["string", "null"], "format": "uuid",
+                            "description": "set when the attendee was picked from the tenant directory"},
                     }}},
                 }},
                 "Category": {"type": "object", "properties": {
@@ -509,6 +586,42 @@ pub fn openapi_document() -> serde_json::Value {
                     "latitude": {"type": ["number", "null"]}, "longitude": {"type": ["number", "null"]},
                     "website": {"type": ["string", "null"]}, "phone": {"type": ["string", "null"]},
                 }},
+                "AddressBook": {"type": "object", "properties": {
+                    "id": {"type": "string", "format": "uuid"}, "slug": {"type": "string"},
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["personal", "directory"],
+                        "description": "directory is the read-only, auto-provisioned tenant book"},
+                    "ctag": {"type": "integer"},
+                }},
+                "Contact": {"type": "object", "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "address_book_id": {"type": ["string", "null"], "format": "uuid"},
+                    "uid": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["individual", "group"]},
+                    "full_name": {"type": "string"},
+                    "given_name": {"type": ["string", "null"]}, "family_name": {"type": ["string", "null"]},
+                    "org": {"type": ["string", "null"]}, "title": {"type": ["string", "null"]},
+                    "has_photo": {"type": "boolean"},
+                    "directory": {"type": "boolean",
+                        "description": "true for a projected tenant-directory entry (read-only)"},
+                    "emails": {"type": "array", "items": {"type": "object", "properties": {
+                        "email": {"type": "string"}, "kind": {"type": ["string", "null"]}, "is_primary": {"type": "boolean"}}}},
+                    "tels": {"type": "array", "items": {"type": "object", "properties": {
+                        "number": {"type": "string"}, "kind": {"type": ["string", "null"]},
+                        "is_mobile": {"type": "boolean",
+                            "description": "eligible for the planned Twilio SMS channel"},
+                        "is_primary": {"type": "boolean"}}}},
+                }},
+                "ContactWrite": {"type": "object", "required": ["full_name"], "properties": {
+                    "full_name": {"type": "string"},
+                    "given_name": {"type": ["string", "null"]}, "family_name": {"type": ["string", "null"]},
+                    "org": {"type": ["string", "null"]}, "title": {"type": ["string", "null"]},
+                    "emails": {"type": "array", "items": {"type": "object", "required": ["email"], "properties": {
+                        "email": {"type": "string"}, "kind": {"type": ["string", "null"]}, "is_primary": {"type": "boolean"}}}},
+                    "tels": {"type": "array", "items": {"type": "object", "required": ["number"], "properties": {
+                        "number": {"type": "string"}, "kind": {"type": ["string", "null"]},
+                        "is_mobile": {"type": "boolean"}, "is_primary": {"type": "boolean"}}}},
+                }},
                 "Calendar": {"type": "object", "properties": {
                     "id": {"type": "string", "format": "uuid"}, "slug": {"type": "string"},
                     "name": {"type": "string"}, "my_capability": {"type": "string",
@@ -535,5 +648,8 @@ mod tests {
         assert!(doc["paths"].is_object());
         assert!(doc["components"]["schemas"].is_object());
         assert!(doc["paths"]["/api/calendars/{id}/events"]["post"].is_object());
+        assert!(doc["paths"]["/api/addressbooks"]["post"].is_object());
+        assert!(doc["paths"]["/api/contacts/autocomplete"]["get"].is_object());
+        assert!(doc["components"]["schemas"]["Contact"].is_object());
     }
 }

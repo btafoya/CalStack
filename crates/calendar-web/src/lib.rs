@@ -87,6 +87,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "js/contacts.js",
+        asset!("js/contacts.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "js/admin.js",
         asset!("js/admin.js"),
         "text/javascript; charset=utf-8",
@@ -252,6 +257,7 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
   <div class="ms-auto d-flex gap-2">
     <button id="search-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-search"></i> Search</button>
     <a class="btn btn-outline-secondary btn-sm" href="/categories"><i class="bi bi-tags"></i> Categories</a>
+    <a class="btn btn-outline-secondary btn-sm" href="/contacts-ui"><i class="bi bi-person-lines-fill"></i> Contacts</a>
     <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules" hidden><i class="bi bi-sliders"></i> Rules</a>
     <a id="providers-nav-link" class="btn btn-outline-secondary btn-sm" href="/providers" hidden><i class="bi bi-bell"></i> Providers</a>
     <a id="credentials-nav-link" class="btn btn-outline-secondary btn-sm" href="/credentials" hidden><i class="bi bi-key"></i> Credentials</a>
@@ -364,10 +370,9 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
       <div class="mb-3">
         <label class="form-label">Attendees</label>
         <ul id="ev-attendees" class="list-group list-group-flush mb-2"></ul>
-        <div class="input-group input-group-sm">
-          <input id="ev-attendee-email" class="form-control" type="email" placeholder="Email">
-          <input id="ev-attendee-name" class="form-control" placeholder="Name (optional)">
-          <button id="ev-attendee-add" class="btn btn-outline-primary" type="button">Add</button>
+        <div class="position-relative">
+          <input id="ev-attendee-search" class="form-control form-control-sm" type="text" placeholder="Search contacts…" autocomplete="off">
+          <div id="ev-attendee-results" class="list-group position-absolute w-100 shadow-sm" style="z-index: 1060;" hidden></div>
         </div>
       </div>
       <div class="mb-3" id="ev-attachments-section" hidden>
@@ -542,6 +547,67 @@ const CATEGORIES_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/categories.js"></script>
 </body></html>"#;
 
+const CONTACTS_PAGE: &str = r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar — Contacts</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<script src="/assets/js/theme.js"></script>
+</head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom px-3">
+  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
+  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
+    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
+</nav>
+<div class="container-fluid p-3">
+  <div class="row">
+    <div class="col-md-3 mb-3">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <h1 class="h5 mb-0">Address books</h1>
+        <button id="ab-new" class="btn btn-sm btn-outline-primary" type="button" title="New address book"><i class="bi bi-plus-lg"></i></button>
+      </div>
+      <div class="list-group" id="ab-list"></div>
+      <p class="text-body-secondary small mt-2">Personal books sync via CardDAV at <code>/contacts/</code>. The directory book lists every user in your tenant and is read-only.</p>
+    </div>
+    <div class="col-md-9">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <h1 class="h5 mb-0" id="ab-current-name">Contacts</h1>
+        <input class="form-control form-control-sm w-auto ms-auto" id="ct-search" placeholder="Search">
+      </div>
+      <form id="ct-form" class="card p-3 mb-3">
+        <div class="row g-2 align-items-end">
+          <div class="col"><label class="form-label" for="ct-name">Name</label>
+            <input class="form-control" id="ct-name" required></div>
+          <div class="col"><label class="form-label" for="ct-org">Organization</label>
+            <input class="form-control" id="ct-org"></div>
+          <div class="col"><label class="form-label" for="ct-email">Email</label>
+            <input class="form-control" id="ct-email" type="email"></div>
+          <div class="col"><label class="form-label" for="ct-tel">Phone</label>
+            <input class="form-control" id="ct-tel" type="tel"></div>
+          <div class="col-auto form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="ct-mobile" checked>
+            <label class="form-check-label" for="ct-mobile">Mobile</label></div>
+          <div class="col-auto d-flex align-items-end">
+            <button class="btn btn-primary" type="submit">Add contact</button></div>
+        </div>
+      </form>
+      <table class="table table-sm bg-body">
+        <thead><tr><th>Name</th><th>Org</th><th>Email</th><th>Phone</th><th></th></tr></thead>
+        <tbody id="ct-rows"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/contacts.js"></script>
+</body></html>"#;
+
 const ADMIN_PAGE: &str = r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
@@ -663,6 +729,17 @@ async fn categories_page() -> impl IntoResponse {
             HeaderValue::from_static("text/html; charset=utf-8"),
         )],
         CATEGORIES_PAGE,
+    )
+}
+
+async fn contacts_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        CONTACTS_PAGE,
     )
 }
 
@@ -816,6 +893,7 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
         .route("/login", axum::routing::get(login_page))
         .route("/rules", axum::routing::get(rules_page))
         .route("/categories", axum::routing::get(categories_page))
+        .route("/contacts-ui", axum::routing::get(contacts_page))
         .route("/admin", axum::routing::get(admin_page))
         .route("/providers", axum::routing::get(providers_page))
         .route("/credentials", axum::routing::get(credentials_page))

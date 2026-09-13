@@ -107,6 +107,152 @@ pub(crate) async fn entry(
     convert(response)
 }
 
+pub(crate) async fn entry_carddav(
+    State(AppState {
+        pool, dav_carddav, ..
+    }): State<AppState>,
+    request: Request,
+) -> axum::response::Response {
+    let Some(dav) = dav_carddav else {
+        return internal("CardDAV is not configured");
+    };
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+
+    if method == axum::http::Method::OPTIONS {
+        let mut response = (StatusCode::OK, "").into_response();
+        response
+            .headers_mut()
+            .insert("DAV", "1, 2, 3, addressbook".parse().unwrap());
+        response.headers_mut().insert(
+            "Allow",
+            "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, MKCOL"
+                .parse()
+                .unwrap(),
+        );
+        return response;
+    }
+
+    let auth = match resolve_auth(&pool, request.headers()).await {
+        Ok(auth) => auth,
+        Err(_) => return unauthorized_basic(),
+    };
+
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, 32 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => return (StatusCode::BAD_REQUEST, "bad request").into_response(),
+    };
+
+    if method == axum::http::Method::from_bytes(b"REPORT").unwrap() {
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        if body.contains("sync-collection") {
+            return sync_collection_addressbook(
+                &pool,
+                &calendar_carddav::DavAuth {
+                    user: auth.user.clone(),
+                },
+                &path,
+                &body,
+            )
+            .await;
+        }
+    }
+
+    let request = axum::http::Request::from_parts(parts, Body::from(bytes));
+    let response = dav
+        .handle_guarded(
+            request,
+            "/contacts/".to_string(),
+            calendar_carddav::DavAuth { user: auth.user },
+        )
+        .await;
+    convert(response)
+}
+
+/// sync-collection REPORT for an address book: dav-server-rs implements it
+/// for neither CalDAV nor CardDAV. Unlike the calendar path (which reads an
+/// incremental change_log), this returns a full snapshot each time — no
+/// per-address-book change journal exists yet. ponytail: fine while books
+/// stay small; add change_log rows for contacts if a large book makes full
+/// resync too slow.
+async fn sync_collection_addressbook(
+    pool: &sqlx::PgPool,
+    creds: &calendar_carddav::DavAuth,
+    path: &str,
+    _body: &str,
+) -> axum::response::Response {
+    let segments: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let slug = match segments.as_slice() {
+        ["contacts", _user, slug] => *slug,
+        _ => return not_found(),
+    };
+    let tenant_id = match db::find_personal_tenant(pool, creds.user.id).await {
+        Ok(id) => id,
+        Err(_) => return not_found(),
+    };
+    let (changes, sync_token): (Vec<calendar_caldav::store::SyncChange>, i64) =
+        if slug == db::contacts::DIRECTORY_SLUG {
+            let people = db::contacts::directory_entries(pool, tenant_id)
+                .await
+                .unwrap_or_default();
+            let token = db::contacts::directory_ctag(pool, tenant_id)
+                .await
+                .ok()
+                .and_then(|c| c.split('-').next_back().and_then(|n| n.parse().ok()))
+                .unwrap_or(0);
+            let changes = people
+                .into_iter()
+                .map(|p| calendar_caldav::store::SyncChange {
+                    href_suffix: format!("{}.vcf", p.user_id),
+                    etag: Some(format!("\"dir-{}\"", p.updated_at.timestamp())),
+                    deleted: false,
+                })
+                .collect();
+            (changes, token)
+        } else {
+            let Ok(book) = db::contacts::get_address_book_by_slug(pool, creds.user.id, slug).await
+            else {
+                return not_found();
+            };
+            let mut changes: Vec<calendar_caldav::store::SyncChange> =
+                db::contacts::list_contacts(pool, book.id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| calendar_caldav::store::SyncChange {
+                        href_suffix: format!("{}.vcf", c.uid),
+                        etag: Some(c.etag),
+                        deleted: false,
+                    })
+                    .collect();
+            for id in db::contacts::list_deleted_contacts(pool, book.id)
+                .await
+                .unwrap_or_default()
+            {
+                changes.push(calendar_caldav::store::SyncChange {
+                    href_suffix: format!("{id}.vcf"),
+                    etag: None,
+                    deleted: true,
+                });
+            }
+            (changes, book.ctag)
+        };
+    let base = path.trim_end_matches('/');
+    let xml = calendar_caldav::store::sync_collection_xml(base, &changes, sync_token);
+    (
+        StatusCode::MULTI_STATUS,
+        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+        xml,
+    )
+        .into_response()
+}
+
 fn convert(response: axum::http::Response<dav_server::body::Body>) -> axum::response::Response {
     let (parts, body) = response.into_parts();
     axum::response::Response::from_parts(parts, Body::from_stream(dav_body_stream(body)))

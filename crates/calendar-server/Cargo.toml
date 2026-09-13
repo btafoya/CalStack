@@ -20,6 +20,7 @@ calendar-core = { path = "../calendar-core" }
 calendar-db = { path = "../calendar-db" }
 calendar-api = { path = "../calendar-api" }
 calendar-caldav = { path = "../calendar-caldav" }
+calendar-carddav = { path = "../calendar-carddav" }
 calendar-auth = { path = "../calendar-auth" }
 calendar-rules = { path = "../calendar-rules" }
 calendar-notify = { path = "../calendar-notify" }
