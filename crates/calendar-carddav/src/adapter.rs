@@ -228,6 +228,7 @@ impl PgAddressBookFs {
                         is_primary: true,
                     }],
                     &[],
+                    &[],
                 );
                 let etag = format!("dir-{}", entry.updated_at.timestamp());
                 Ok((vcard, etag, entry.updated_at))
