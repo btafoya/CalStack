@@ -41,6 +41,7 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         asset!("fonts/bootstrap-icons.woff"),
         "font/woff",
     ),
+    ("img/logo.png", asset!("img/logo.png"), "image/png"),
     (
         "js/theme.js",
         asset!("js/theme.js"),
@@ -182,7 +183,110 @@ async fn assets(axum::extract::Path(path): axum::extract::Path<String>) -> impl 
 
 // ============ pages ============
 
-const LOGIN_PAGE: &str = r#"<!doctype html>
+macro_rules! footer_html {
+    () => {
+        concat!(
+            r#"<footer class="footer footer-transparent d-print-none">
+  <div class="container-xl">
+    <div class="row text-center align-items-center flex-row-reverse">
+      <div class="col-lg-auto ms-lg-auto">
+        <nav aria-label="Footer">
+          <ul class="list-inline list-inline-dots mb-0">
+            <li class="list-inline-item"><a href="https://github.com/btafoya/CalStack/blob/main/LICENSE" target="_blank" class="link-secondary" rel="noopener">License</a></li>
+            <li class="list-inline-item"><a href="https://github.com/btafoya/CalStack" target="_blank" class="link-secondary" rel="noopener">Source code</a></li>
+          </ul>
+        </nav>
+      </div>
+      <div class="col-12 col-lg-auto mt-3 mt-lg-0">
+        <ul class="list-inline list-inline-dots mb-0">
+          <li class="list-inline-item">Copyright © 2026 CalStack. All rights reserved.</li>
+          <li class="list-inline-item">v"#,
+            env!("CARGO_PKG_VERSION"),
+            r#"</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</footer>
+"#
+        )
+    };
+}
+
+macro_rules! subpage_header {
+    () => {
+        r##"<header class="navbar navbar-expand-md d-print-none bg-body border-bottom">
+  <div class="container-fluid">
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <a class="navbar-brand" href="/"><img src="/assets/img/logo.png" alt="Calendar" height="32"></a>
+    <div class="navbar-nav flex-row order-md-last">
+      <div class="nav-item me-2">
+        <button type="button" id="theme-toggle" class="nav-link px-0" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
+      </div>
+      <div class="nav-item dropdown">
+        <a href="#" class="nav-link d-flex lh-1 p-0 px-2" data-bs-toggle="dropdown" aria-label="Open user menu" aria-expanded="false"><i class="bi bi-person-circle fs-3"></i></a>
+        <div class="dropdown-menu dropdown-menu-end dropdown-menu-arrow">
+          <button type="button" class="dropdown-item" id="account-btn">Account</button>
+          <button type="button" class="dropdown-item" id="logout-btn">Sign out</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+"##
+    };
+}
+
+macro_rules! nav_menu_gated {
+    () => {
+        r#"<div class="navbar-expand-md flex-shrink-0">
+  <div class="collapse navbar-collapse" id="navbar-menu">
+    <div class="navbar w-100 bg-body border-bottom">
+      <div class="container-fluid">
+        <ul class="navbar-nav">
+          <li class="nav-item"><a class="nav-link" href="/"><span class="nav-link-icon me-1"><i class="bi bi-calendar3"></i></span><span class="nav-link-title">Calendar</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="/categories"><span class="nav-link-icon me-1"><i class="bi bi-tags"></i></span><span class="nav-link-title">Categories</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
+          <li class="nav-item"><a class="nav-link" id="rules-link" href="/rules" hidden><span class="nav-link-icon me-1"><i class="bi bi-sliders"></i></span><span class="nav-link-title">Rules</span></a></li>
+          <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers" hidden><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
+          <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials" hidden><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
+          <li class="nav-item"><a class="nav-link" id="admin-nav-link" href="/admin" hidden><span class="nav-link-icon me-1"><i class="bi bi-shield-lock"></i></span><span class="nav-link-title">Admin</span></a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+"#
+    };
+}
+
+macro_rules! nav_menu_open {
+    () => {
+        r#"<div class="navbar-expand-md flex-shrink-0">
+  <div class="collapse navbar-collapse" id="navbar-menu">
+    <div class="navbar w-100 bg-body border-bottom">
+      <div class="container-fluid">
+        <ul class="navbar-nav">
+          <li class="nav-item"><a class="nav-link" href="/"><span class="nav-link-icon me-1"><i class="bi bi-calendar3"></i></span><span class="nav-link-title">Calendar</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="/categories"><span class="nav-link-icon me-1"><i class="bi bi-tags"></i></span><span class="nav-link-title">Categories</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
+          <li class="nav-item"><a class="nav-link" id="rules-link" href="/rules"><span class="nav-link-icon me-1"><i class="bi bi-sliders"></i></span><span class="nav-link-title">Rules</span></a></li>
+          <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers"><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
+          <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials"><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
+          <li class="nav-item"><a class="nav-link" id="admin-nav-link" href="/admin"><span class="nav-link-icon me-1"><i class="bi bi-shield-lock"></i></span><span class="nav-link-title">Admin</span></a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+"#
+    };
+}
+
+const LOGIN_PAGE: &str = concat!(
+    r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -191,7 +295,8 @@ const LOGIN_PAGE: &str = r#"<!doctype html>
 <link rel="stylesheet" href="/assets/css/app.css">
 <script src="/assets/js/theme.js"></script>
 </head>
-<body class="d-flex align-items-center bg-body-tertiary" style="min-height:100vh">
+<body class="d-flex flex-column bg-body-tertiary" style="min-height:100vh">
+<div class="flex-grow-1 d-flex align-items-center">
 <div class="container" style="max-width:420px">
   <form id="login-form" class="card p-4 mt-5">
     <h1 class="h4 mb-3">Calendar</h1>
@@ -204,6 +309,7 @@ const LOGIN_PAGE: &str = r#"<!doctype html>
     <button class="btn btn-primary" type="submit">Sign in</button>
     <div id="error" class="alert alert-danger mt-3 mb-0 d-none" role="alert"></div>
   </form>
+</div>
 </div>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
@@ -237,9 +343,13 @@ $(function () {
   });
 });
 </script>
-</body></html>"#;
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
 
-const APP_PAGE_HEAD: &str = r#"<!doctype html>
+const APP_PAGE_HEAD: &str = concat!(
+    r##"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -256,26 +366,38 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
   #calendar [data-bs-toggle="sidebar"] { display: none !important; }
 </style>
 </head>
-<body class="bg-body-tertiary vh-100 overflow-hidden d-flex flex-column">
-<nav class="navbar bg-body border-bottom px-3 flex-shrink-0">
-  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto d-flex gap-2">
-    <button id="search-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-search"></i> Search</button>
-    <a class="btn btn-outline-secondary btn-sm" href="/categories"><i class="bi bi-tags"></i> Categories</a>
-    <a class="btn btn-outline-secondary btn-sm" href="/contacts-ui"><i class="bi bi-person-lines-fill"></i> Contacts</a>
-    <a id="rules-link" class="btn btn-outline-secondary btn-sm" href="/rules" hidden><i class="bi bi-sliders"></i> Rules</a>
-    <a id="providers-nav-link" class="btn btn-outline-secondary btn-sm" href="/providers" hidden><i class="bi bi-bell"></i> Providers</a>
-    <a id="credentials-nav-link" class="btn btn-outline-secondary btn-sm" href="/credentials" hidden><i class="bi bi-key"></i> Credentials</a>
-    <a id="admin-nav-link" class="btn btn-outline-secondary btn-sm" href="/admin" hidden><i class="bi bi-shield-lock"></i> Admin</a>
-    <button id="share-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-share"></i> Share</button>
-    <button id="account-btn" class="btn btn-outline-secondary btn-sm" type="button"><i class="bi bi-person-circle"></i> Account</button>
-    <button id="logout-btn" class="btn btn-outline-secondary btn-sm" type="button">Log out</button>
-    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
+<body class="bg-body-tertiary d-flex flex-column min-vh-100">
+<header class="navbar navbar-expand-md d-print-none bg-body border-bottom flex-shrink-0">
+  <div class="container-fluid">
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <a class="navbar-brand" href="/"><img src="/assets/img/logo.png" alt="Calendar" height="32"></a>
+    <div class="navbar-nav flex-row order-md-last">
+      <div class="nav-item me-2 d-none d-md-flex">
+        <button id="search-btn" class="nav-link px-2" type="button" aria-label="Search"><i class="bi bi-search"></i></button>
+      </div>
+      <div class="nav-item me-2 d-none d-md-flex">
+        <button id="share-btn" class="nav-link px-2" type="button" aria-label="Share"><i class="bi bi-share"></i></button>
+      </div>
+      <div class="nav-item me-2">
+        <button type="button" id="theme-toggle" class="nav-link px-0" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
+      </div>
+      <div class="nav-item dropdown">
+        <a href="#" class="nav-link d-flex lh-1 p-0 px-2" data-bs-toggle="dropdown" aria-label="Open user menu" aria-expanded="false"><i class="bi bi-person-circle fs-3"></i></a>
+        <div class="dropdown-menu dropdown-menu-end dropdown-menu-arrow">
+          <button type="button" class="dropdown-item" id="account-btn">Account</button>
+          <button type="button" class="dropdown-item" id="logout-btn">Sign out</button>
+        </div>
+      </div>
+    </div>
   </div>
-</nav>
-<div class="container-fluid flex-grow-1 overflow-hidden">
-  <div class="row h-100">
-    <aside class="col-md-3 col-lg-2 p-3 border-end h-100 overflow-auto">
+</header>
+"##,
+    nav_menu_gated!(),
+    r#"<div class="container-fluid">
+  <div class="row">
+    <aside class="col-md-3 col-lg-2 p-3 border-end">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <span class="fw-semibold">Calendars</span>
         <button id="add-cal-btn" class="btn btn-outline-primary" style="width:2.75rem;height:2.75rem" type="button" aria-label="Add calendar">+</button>
@@ -290,13 +412,15 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
       </div>
       <ul id="sub-list" class="list-group list-group-flush small"></ul>
     </aside>
-    <main class="col-md-9 col-lg-10 p-3 h-100 overflow-auto">
+    <main class="col-md-9 col-lg-10 p-3">
       <div id="calendar" hidden></div>
       <p id="calendar-empty" class="text-body-secondary text-center mt-5">Select a calendar to view its events.</p>
     </main>
   </div>
 </div>
-<!-- event editor -->
+"#,
+    footer_html!(),
+    r#"<!-- event editor -->
 <div class="modal fade" id="event-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
   <div class="modal-dialog"><form id="event-form" class="modal-content">
     <div class="modal-header"><h2 class="modal-title h5">Event</h2>
@@ -462,9 +586,11 @@ const APP_PAGE_HEAD: &str = r#"<!doctype html>
 <script src="/assets/js/summernote-bs5.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/app.js?v=12"></script>
-</body></html>"#;
+</body></html>"#
+);
 
-const RULES_PAGE: &str = r#"<!doctype html>
+const RULES_PAGE: &str = concat!(
+    r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -475,12 +601,10 @@ const RULES_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
-<nav class="navbar bg-body border-bottom px-3">
-  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
-    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
-</nav>
-<div class="container p-3">
+"#,
+    subpage_header!(),
+    nav_menu_open!(),
+    r#"<div class="container p-3">
   <div class="d-flex align-items-center gap-2 mb-1">
     <h1 class="h4 mb-0">Rules</h1>
     <select class="form-select form-select-sm w-auto" id="rule-calendar-select">
@@ -527,10 +651,15 @@ const RULES_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/rules.js"></script>
-</body></html>"#;
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
 
-const CATEGORIES_PAGE: &str = r#"<!doctype html>
+const CATEGORIES_PAGE: &str = concat!(
+    r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -541,12 +670,10 @@ const CATEGORIES_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
-<nav class="navbar bg-body border-bottom px-3">
-  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
-    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
-</nav>
-<div class="container p-3">
+"#,
+    subpage_header!(),
+    nav_menu_gated!(),
+    r#"<div class="container p-3">
   <div class="d-flex align-items-center gap-2 mb-1">
     <h1 class="h4 mb-0">Categories</h1>
     <select class="form-select form-select-sm w-auto" id="cat-calendar-select">
@@ -580,9 +707,13 @@ const CATEGORIES_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/categories.js"></script>
-</body></html>"#;
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
 
-const CONTACTS_PAGE: &str = r#"<!doctype html>
+const CONTACTS_PAGE: &str = concat!(
+    r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -593,12 +724,10 @@ const CONTACTS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
-<nav class="navbar bg-body border-bottom px-3">
-  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
-    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
-</nav>
-<div class="container-fluid p-3">
+"#,
+    subpage_header!(),
+    nav_menu_gated!(),
+    r#"<div class="container-fluid p-3">
   <div class="row">
     <div class="col-md-3 mb-3">
       <div class="d-flex align-items-center justify-content-between mb-2">
@@ -643,9 +772,13 @@ const CONTACTS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/contacts.js"></script>
-</body></html>"#;
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
 
-const ADMIN_PAGE: &str = r#"<!doctype html>
+const ADMIN_PAGE: &str = concat!(
+    r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -656,12 +789,10 @@ const ADMIN_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
-<nav class="navbar bg-body border-bottom px-3">
-  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
-    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
-</nav>
-<div class="container p-3">
+"#,
+    subpage_header!(),
+    nav_menu_open!(),
+    r#"<div class="container p-3">
   <h1 class="h4 mb-3">Users</h1>
   <form id="user-form" class="card p-3 mb-4">
     <div class="row g-2 align-items-end">
@@ -690,10 +821,15 @@ const ADMIN_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/admin.js"></script>
-</body></html>"#;
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
 
-const PROVIDERS_PAGE: &str = r#"<!doctype html>
+const PROVIDERS_PAGE: &str = concat!(
+    r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -704,12 +840,10 @@ const PROVIDERS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
-<nav class="navbar bg-body border-bottom px-3">
-  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
-    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
-</nav>
-<div class="container p-3">
+"#,
+    subpage_header!(),
+    nav_menu_open!(),
+    r#"<div class="container p-3">
   <h1 class="h4 mb-3">Notification providers</h1>
   <form id="provider-form" class="card p-3 mb-4">
     <div class="row g-2 align-items-end">
@@ -733,8 +867,12 @@ const PROVIDERS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/providers.js"></script>
-</body></html>"#;
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
 
 async fn providers_page() -> impl IntoResponse {
     (
@@ -791,7 +929,8 @@ async fn admin_page() -> impl IntoResponse {
     )
 }
 
-const CREDENTIALS_PAGE: &str = r#"<!doctype html>
+const CREDENTIALS_PAGE: &str = concat!(
+    r#"<!doctype html>
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -802,12 +941,10 @@ const CREDENTIALS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/theme.js"></script>
 </head>
 <body class="bg-body-tertiary">
-<nav class="navbar bg-body border-bottom px-3">
-  <a class="navbar-brand" href="/"><i class="bi bi-calendar3" aria-hidden="true"></i> Calendar</a>
-  <div class="ms-auto d-flex gap-2"><a class="btn btn-outline-secondary btn-sm" href="/">Back</a>
-    <button id="theme-toggle" class="btn btn-outline-secondary btn-sm" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button></div>
-</nav>
-<div class="container p-3">
+"#,
+    subpage_header!(),
+    nav_menu_open!(),
+    r#"<div class="container p-3">
   <div id="secret-banner" class="alert alert-warning d-none" role="alert">
     <div class="fw-bold mb-1">Copy it now — it will not be shown again.</div>
     <code id="secret-value"></code>
@@ -859,7 +996,10 @@ const CREDENTIALS_PAGE: &str = r#"<!doctype html>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/credentials.js"></script>
-</body></html>"#;
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
 
 const SWAGGER_PAGE: &str = r#"<!doctype html>
 <html lang="en">
