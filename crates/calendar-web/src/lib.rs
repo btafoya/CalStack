@@ -43,6 +43,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
     ),
     ("img/logo.png", asset!("img/logo.png"), "image/png"),
     (
+        "img/logo-horizontal-small.png",
+        asset!("img/logo-horizontal-small.png"),
+        "image/png",
+    ),
+    (
         "js/theme.js",
         asset!("js/theme.js"),
         "text/javascript; charset=utf-8",
@@ -220,7 +225,7 @@ macro_rules! subpage_header {
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
-    <a class="navbar-brand" href="/"><img src="/assets/img/logo.png" alt="CalStack" height="32"></a>
+    <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="CalStack"></a>
     <div class="navbar-nav flex-row order-md-last">
       <div class="nav-item me-2">
         <button type="button" id="theme-toggle" class="nav-link px-0" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
@@ -372,7 +377,7 @@ const APP_PAGE_HEAD: &str = concat!(
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
-    <a class="navbar-brand" href="/"><img src="/assets/img/logo.png" alt="CalStack" height="32"></a>
+    <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="CalStack"></a>
     <div class="navbar-nav flex-row order-md-last">
       <div class="nav-item me-2 d-none d-md-flex">
         <button id="search-btn" class="nav-link px-2" type="button" aria-label="Search"><i class="bi bi-search"></i></button>
