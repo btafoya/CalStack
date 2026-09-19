@@ -954,7 +954,8 @@ pub struct NewAttendee {
     /// contacts/ACL); snapshotted email/display_name stay the source of
     /// truth for this event even if the contact later changes or is deleted.
     pub contact_id: Option<Uuid>,
-    pub email: String,
+    /// SMS-only attendees have no email; callers require email or telephone.
+    pub email: Option<String>,
     pub display_name: Option<String>,
     pub telephone: Option<String>,
     pub role: Option<String>,
@@ -1254,7 +1255,8 @@ pub struct AttendeeRow {
     pub event_id: Uuid,
     pub user_id: Option<Uuid>,
     pub contact_id: Option<Uuid>,
-    pub email: String,
+    /// NULL for SMS-only attendees (identified by telephone).
+    pub email: Option<String>,
     pub display_name: Option<String>,
     pub telephone: Option<String>,
     pub role: String,

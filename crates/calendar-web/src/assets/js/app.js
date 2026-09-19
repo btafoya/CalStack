@@ -525,7 +525,8 @@
     var list = $('#ev-attendees').empty();
     state.editingAttendees.forEach(function (a, i) {
       var item = $('<li class="list-group-item d-flex justify-content-between align-items-center">');
-      item.append($('<span>').text(a.display_name ? a.display_name + ' <' + a.email + '>' : a.email));
+      var reach = a.email ? a.email : a.telephone;
+      item.append($('<span>').text(a.display_name ? a.display_name + ' <' + reach + '>' : reach));
       var btn = $('<button class="btn btn-sm btn-outline-danger" type="button">Remove</button>');
       btn.on('click', function () {
         state.editingAttendees.splice(i, 1);
@@ -537,8 +538,8 @@
   }
 
   // Attendees come only from contacts/the tenant directory (no freeform
-  // email entry) — search /api/contacts/autocomplete, click a result to add
-  // it immediately.
+  // entry) — search /api/contacts/autocomplete, click a result to add it
+  // immediately. Emailless contacts with a phone number are SMS attendees.
   function hideAttendeeResults() {
     $('#ev-attendee-results').empty().prop('hidden', true);
   }
@@ -547,18 +548,23 @@
     var $results = $('#ev-attendee-results').empty();
     (list || []).forEach(function (c) {
       var email = c.emails && c.emails[0] && c.emails[0].email;
-      if (!email) { return; }
+      var tel = c.tels && c.tels[0] && c.tels[0].number;
+      if (!email && !tel) { return; }
+      var reach = email || tel;
       var already = state.editingAttendees.some(function (a) {
-        return a.email.toLowerCase() === email.toLowerCase();
+        return (a.email && email && a.email.toLowerCase() === email.toLowerCase())
+          || (a.telephone && tel && a.telephone === tel);
       });
       $('<button type="button" class="list-group-item list-group-item-action py-1"></button>')
         .toggleClass('disabled', already)
-        .append($('<div>').text(c.full_name || email))
-        .append($('<small class="text-body-secondary d-block">').text(email + (c.directory ? ' · directory' : '')))
+        .append($('<div>').text(c.full_name || reach))
+        .append($('<small class="text-body-secondary d-block">').text(
+          reach + (c.directory ? ' · directory' : '') + (email ? '' : ' · sms')))
         .on('click', function () {
           if (already) { return; }
           state.editingAttendees.push({
-            email: email,
+            email: email || null,
+            telephone: email ? null : tel,
             display_name: c.full_name || null,
             contact_id: c.directory ? null : c.id,
             user_id: c.directory ? c.id : null,
@@ -662,7 +668,8 @@
       }
       state.editingAttendees = (payload.attendees || []).map(function (a) {
         return {
-          email: a.email, display_name: a.display_name || null,
+          email: a.email || null, telephone: a.telephone || null,
+          display_name: a.display_name || null,
           contact_id: a.contact_id || null, user_id: a.user_id || null,
         };
       });

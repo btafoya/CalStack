@@ -188,8 +188,15 @@ fn validate_event_body(body: &EventBody) -> Result<(), AppError> {
         return Err(AppError::bad_request("exception needs recurrence_id"));
     }
     for a in body.attendees.iter().flatten() {
-        calendar_core::validate_email(&a.email)
-            .map_err(|e| AppError::bad_request(e.to_string()))?;
+        if a.email.is_none() && a.telephone.is_none() {
+            return Err(AppError::bad_request(
+                "attendee needs an email or a telephone",
+            ));
+        }
+        if let Some(email) = &a.email {
+            calendar_core::validate_email(email)
+                .map_err(|e| AppError::bad_request(e.to_string()))?;
+        }
     }
     Ok(())
 }
