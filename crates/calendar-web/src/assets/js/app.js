@@ -276,16 +276,33 @@
   function showConnInfo(cal) {
     var $modal = $('#conn-modal');
     var base = window.location.origin;
+    var calUrl = function (c) { return base + '/calendars/' + state.username + '/' + c.slug + '/'; };
+    $modal.find('#conn-server').val(base);
+    $modal.find('#conn-username').val(state.username);
+    $modal.find('#conn-caldav-root').val(base + '/calendars/' + state.username + '/');
+    $modal.find('#conn-caldav-wk').val(base + '/.well-known/caldav');
+    $modal.find('#conn-carddav').val(base + '/contacts/');
+    $modal.find('#conn-carddav-wk').val(base + '/.well-known/carddav');
     var row = $modal.find('#conn-calendar-row');
+    var list = $modal.find('#conn-cal-list');
     if (cal) {
       row.removeClass('d-none');
-      row.find('.conn-copy').val(base + '/calendars/' + state.username + '/' + cal.slug + '/');
+      list.addClass('d-none');
+      $modal.find('#conn-calendar-url').val(calUrl(cal));
     } else {
       row.addClass('d-none');
+      list.removeClass('d-none');
+      var $rows = $('#conn-cal-rows').empty();
+      state.calendars.forEach(function (c) {
+        $rows.append(
+          $('<div class="input-group input-group-sm mb-1">')
+            .append($('<input class="form-control conn-copy" readonly>')
+              .val(calUrl(c))
+              .attr('title', c.name))
+            .append($('<button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button>'))
+        );
+      });
     }
-    var fields = $modal.find('.conn-copy');
-    fields.eq(cal ? 1 : 0).val(base + '/calendars/');
-    fields.eq(cal ? 2 : 1).val(state.username);
     $modal.modal('show');
   }
 

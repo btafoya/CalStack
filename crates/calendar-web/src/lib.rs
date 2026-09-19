@@ -611,14 +611,26 @@ const APP_PAGE_HEAD: &str = concat!(
     <div class="modal-header"><h2 class="modal-title h5">Connection info</h2>
       <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
     <div class="modal-body">
+      <div class="mb-3"><label class="form-label">Server URL</label>
+        <div class="input-group"><input id="conn-server" class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
+      <div class="mb-3"><label class="form-label">Username</label>
+        <div class="input-group"><input id="conn-username" class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
+      <div class="mb-3"><label class="form-label">CalDAV root (calendar home)</label>
+        <div class="input-group"><input id="conn-caldav-root" class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
+      <div class="mb-3"><label class="form-label">CalDAV discovery</label>
+        <div class="input-group"><input id="conn-caldav-wk" class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
+      <div class="mb-3"><label class="form-label">CardDAV contacts</label>
+        <div class="input-group"><input id="conn-carddav" class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
+      <div class="mb-3"><label class="form-label">CardDAV discovery</label>
+        <div class="input-group"><input id="conn-carddav-wk" class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
       <div id="conn-calendar-row" class="mb-3">
         <label class="form-label">Calendar CalDAV URL</label>
-        <div class="input-group"><input class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div>
+        <div class="input-group"><input id="conn-calendar-url" class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div>
       </div>
-      <div class="mb-3"><label class="form-label">Server URL</label>
-        <div class="input-group"><input class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
-      <div class="mb-3"><label class="form-label">Username</label>
-        <div class="input-group"><input class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
+      <div id="conn-cal-list" class="mb-3">
+        <label class="form-label">Calendars</label>
+        <div id="conn-cal-rows"></div>
+      </div>
       <div class="mb-3"><label class="form-label">Password</label>
         <p class="mb-1 text-body-secondary small">Use an <strong>app password</strong>, not your login password — DAV clients authenticate with Basic auth against app passwords only.</p>
         <a href="/credentials" class="btn btn-outline-primary btn-sm">Manage app passwords</a></div>
@@ -631,7 +643,7 @@ const APP_PAGE_HEAD: &str = concat!(
 <script src="/assets/js/bs-calendar.min.js"></script>
 <script src="/assets/js/summernote-bs5.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/app.js?v=13"></script>
+<script src="/assets/js/app.js?v=14"></script>
 </body></html>"#
 );
 
