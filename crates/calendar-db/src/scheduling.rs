@@ -112,10 +112,14 @@ pub async fn schedule_requests(pool: &PgPool, event_id: Uuid) {
     };
     let mut changed = false;
     for attendee in &attendees {
-        if attendee.email.eq_ignore_ascii_case(&event.organizer_email) {
+        // SMS-only attendees (no email) can't receive iMIP; skip.
+        let Some(email) = attendee.email.as_deref() else {
+            continue;
+        };
+        if email.eq_ignore_ascii_case(&event.organizer_email) {
             continue;
         }
-        if record_outbound(pool, event_id, &attendee.email, "REQUEST")
+        if record_outbound(pool, event_id, email, "REQUEST")
             .await
             .ok()
             .flatten()

@@ -235,8 +235,13 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
         organizer.add_parameter("CN", event.organizer_name.as_deref().unwrap_or(""));
         ev.append_property(organizer);
         for attendee in attendees {
-            let mut prop =
-                icalendar::Property::new("ATTENDEE", format!("mailto:{}", attendee.email));
+            // SMS-only attendees carry an sms: CAL-ADDRESS instead of mailto:.
+            let value = match (&attendee.email, &attendee.telephone) {
+                (Some(email), _) => format!("mailto:{}", email),
+                (None, Some(phone)) => format!("sms:{}", phone),
+                (None, None) => continue,
+            };
+            let mut prop = icalendar::Property::new("ATTENDEE", value);
             prop.add_parameter("CN", attendee.display_name.as_deref().unwrap_or(""));
             prop.add_parameter("PARTSTAT", &attendee.partstat);
             prop.add_parameter("ROLE", &attendee.role);
@@ -381,7 +386,9 @@ pub struct ParsedAlarm {
 
 #[derive(Debug, Default, Clone)]
 pub struct ParsedAttendee {
-    pub email: String,
+    /// None for SMS-only attendees (`sms:` CAL-ADDRESS).
+    pub email: Option<String>,
+    pub telephone: Option<String>,
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub partstat: Option<String>,
@@ -685,20 +692,37 @@ fn parse_ics_datetime(value: &str) -> Option<DateTime<Utc>> {
 }
 
 fn attendee_from_prop(prop: &icalendar::Property) -> ParsedAttendee {
-    let mailto = prop.value();
-    ParsedAttendee {
-        email: mailto
-            .split_once(':')
-            .map(|(_, rest)| rest)
-            .unwrap_or(mailto)
-            .to_string(),
-        display_name: prop.params().get("CN").map(|p| p.value().to_string()),
-        role: prop.params().get("ROLE").map(|p| p.value().to_string()),
-        partstat: prop.params().get("PARTSTAT").map(|p| p.value().to_string()),
-        rsvp: prop
-            .params()
-            .get("RSVP")
-            .map(|p| p.value().eq_ignore_ascii_case("true")),
+    // CAL-ADDRESS is a URI: mailto: for email attendees, sms: for SMS-only.
+    let value = prop.value();
+    let (scheme, rest) = match value.split_once(':') {
+        Some((scheme, rest)) if scheme == "mailto" || scheme == "sms" => (scheme, rest),
+        // Bare values and unknown schemes keep the legacy email interpretation.
+        _ => ("mailto", value),
+    };
+    if scheme == "sms" {
+        ParsedAttendee {
+            email: None,
+            telephone: Some(rest.to_string()),
+            display_name: prop.params().get("CN").map(|p| p.value().to_string()),
+            role: prop.params().get("ROLE").map(|p| p.value().to_string()),
+            partstat: prop.params().get("PARTSTAT").map(|p| p.value().to_string()),
+            rsvp: prop
+                .params()
+                .get("RSVP")
+                .map(|p| p.value().eq_ignore_ascii_case("true")),
+        }
+    } else {
+        ParsedAttendee {
+            email: Some(rest.to_string()),
+            telephone: None,
+            display_name: prop.params().get("CN").map(|p| p.value().to_string()),
+            role: prop.params().get("ROLE").map(|p| p.value().to_string()),
+            partstat: prop.params().get("PARTSTAT").map(|p| p.value().to_string()),
+            rsvp: prop
+                .params()
+                .get("RSVP")
+                .map(|p| p.value().eq_ignore_ascii_case("true")),
+        }
     }
 }
 
@@ -785,12 +809,39 @@ END:VCALENDAR\r\n";
         assert_eq!(ev.organizer_email.as_deref(), Some("brian@example.com"));
         assert_eq!(ev.organizer_name.as_deref(), Some("Brian"));
         assert_eq!(ev.attendees.len(), 1);
-        assert_eq!(ev.attendees[0].email, "al@example.com");
+        assert_eq!(ev.attendees[0].email.as_deref(), Some("al@example.com"));
         assert_eq!(ev.attendees[0].partstat.as_deref(), Some("ACCEPTED"));
         assert_eq!(ev.attendees[0].rsvp, Some(true));
         assert_eq!(ev.rrule.as_deref(), Some("FREQ=WEEKLY;BYDAY=MO"));
         assert_eq!(ev.exdate.len(), 1);
         assert_eq!(ev.sequence, Some(2));
+    }
+
+    #[test]
+    fn sms_attendee_round_trips() {
+        let mut attendee = sample_attendee();
+        attendee.email = None;
+        attendee.telephone = Some("+13216166280".into());
+        let ics = events_to_ics(&[ExportRow {
+            event: sample_event_row(),
+            attendees: vec![attendee],
+            alarms: vec![],
+            location: None,
+        }]);
+        // The sms: value may be RFC-folded across lines; match on the prefix.
+        assert!(
+            ics.contains(":sms:+"),
+            "expected sms CAL-ADDRESS in:\n{}",
+            ics
+        );
+        assert!(!ics.contains("mailto:al@example.com"));
+        let parsed = parse_ics(&ics).unwrap();
+        assert_eq!(parsed[0].attendees.len(), 1);
+        assert_eq!(parsed[0].attendees[0].email, None);
+        assert_eq!(
+            parsed[0].attendees[0].telephone.as_deref(),
+            Some("+13216166280")
+        );
     }
 
     fn sample_location() -> calendar_db::LocationRow {
@@ -930,7 +981,7 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
             event_id: uuid::Uuid::new_v4(),
             user_id: None,
             contact_id: None,
-            email: "al@example.com".into(),
+            email: Some("al@example.com".into()),
             display_name: Some("Al".into()),
             telephone: None,
             role: "REQ-PARTICIPANT".into(),
@@ -960,7 +1011,10 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
         assert_eq!(parsed[0].rrule.as_deref(), Some("FREQ=DAILY;COUNT=3"));
         assert_eq!(parsed[0].categories, vec!["a", "b"]);
         assert_eq!(parsed[0].attendees.len(), 1);
-        assert_eq!(parsed[0].attendees[0].email, "al@example.com");
+        assert_eq!(
+            parsed[0].attendees[0].email.as_deref(),
+            Some("al@example.com")
+        );
         assert_eq!(
             parsed[0].organizer_email.as_deref(),
             Some("brian@example.com")

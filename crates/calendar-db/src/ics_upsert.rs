@@ -49,7 +49,9 @@ pub struct IcsEventUpsert {
 
 #[derive(Debug, Default)]
 pub struct IcsAttendee {
-    pub email: String,
+    /// NULL for SMS-only attendees (`sms:` CAL-ADDRESS).
+    pub email: Option<String>,
+    pub telephone: Option<String>,
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub partstat: Option<String>,
@@ -360,12 +362,13 @@ async fn write_attendees(
 ) -> Result<(), DbError> {
     for a in attendees {
         sqlx::query(
-            "INSERT INTO event_attendees (id, event_id, email, display_name, role, partstat, rsvp)
-             VALUES ($1, $2, $3, $4, COALESCE($5, 'REQ-PARTICIPANT'), COALESCE($6, 'NEEDS-ACTION'), $7)",
+            "INSERT INTO event_attendees (id, event_id, email, telephone, display_name, role, partstat, rsvp)
+             VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'REQ-PARTICIPANT'), COALESCE($7, 'NEEDS-ACTION'), $8)",
         )
         .bind(Uuid::new_v4())
         .bind(event_id)
         .bind(&a.email)
+        .bind(&a.telephone)
         .bind(&a.display_name)
         .bind(a.role.as_deref())
         .bind(a.partstat.as_deref())

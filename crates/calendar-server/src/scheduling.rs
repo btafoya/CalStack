@@ -100,11 +100,11 @@ pub(crate) async fn postmark_inbound(
             if recorded.is_none() {
                 continue; // duplicate delivery
             }
-            if let Some(attendee) = &parsed
-                .attendees
-                .iter()
-                .find(|a| a.email.eq_ignore_ascii_case(&from))
-                && let Some(partstat) = &attendee.partstat
+            if let Some(attendee) = &parsed.attendees.iter().find(|a| {
+                a.email
+                    .as_deref()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(&from))
+            }) && let Some(partstat) = &attendee.partstat
             {
                 db::scheduling::update_partstat(&pool, event.id, &from, partstat).await?;
             }

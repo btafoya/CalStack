@@ -55,6 +55,7 @@ pub(crate) fn upsert_data(parsed: &crate::ParsedEvent) -> IcsEventUpsert {
             .iter()
             .map(|a| IcsAttendee {
                 email: a.email.clone(),
+                telephone: a.telephone.clone(),
                 display_name: a.display_name.clone(),
                 role: a.role.clone(),
                 partstat: a.partstat.clone(),
