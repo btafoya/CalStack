@@ -959,6 +959,28 @@ const PROVIDERS_PAGE: &str = concat!(
     </div>
   </form></div>
 </div>
+<div class="modal fade" id="provider-test-modal" aria-hidden="true">
+  <div class="modal-dialog"><form id="provider-test-form" class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5">Send test message</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+      <input type="hidden" id="pt-id">
+      <input type="hidden" id="pt-kind">
+      <p id="pt-provider-label" class="text-body-secondary small"></p>
+      <div class="mb-2"><label class="form-label" for="pt-to">To</label>
+        <input class="form-control" id="pt-to" required></div>
+      <div class="mb-2" id="pt-subject-row"><label class="form-label" for="pt-subject">Subject</label>
+        <input class="form-control" id="pt-subject"></div>
+      <div class="mb-2"><label class="form-label" for="pt-body">Message</label>
+        <textarea class="form-control" id="pt-body" rows="3"></textarea></div>
+      <div id="pt-result" class="small"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" type="submit">Send test</button>
+      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Close</button>
+    </div>
+  </form></div>
+</div>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
