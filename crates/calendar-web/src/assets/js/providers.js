@@ -68,18 +68,37 @@
     });
   }
 
+  // ============ test-send modal ============
+  var TEST_TO_PLACEHOLDER = { postmark: 'you@example.com', smtp: 'you@example.com', twilio: '+15551234567' };
+  var TEST_IS_SMS = { postmark: false, smtp: false, twilio: true };
+
+  function openTest(p) {
+    $('#pt-id').val(p.id);
+    $('#pt-kind').val(p.kind);
+    $('#pt-provider-label').text(p.kind + ' · ' + p.name);
+    $('#pt-to').val('').attr('placeholder', TEST_TO_PLACEHOLDER[p.kind] || '');
+    $('#pt-subject').val('');
+    $('#pt-body').val('');
+    $('#pt-result').text('').removeAttr('data-result');
+    // SMS has no subject line; hide the field for Twilio.
+    $('#pt-subject-row').prop('hidden', TEST_IS_SMS[p.kind]);
+    $('#provider-test-modal').modal('show');
+  }
+
   function renderProviders(providers) {
     var $rows = $('#provider-rows').empty();
     providers.forEach(function (p) {
       var $edit = $('<button class="btn btn-outline-secondary btn-sm" type="button" title="Edit"><i class="bi bi-pencil"></i></button>');
       $edit.on('click', function () { openEdit(p.id); });
+      var $test = $('<button class="btn btn-outline-secondary btn-sm" type="button" title="Send test message"><i class="bi bi-send"></i></button>');
+      $test.on('click', function () { openTest(p); });
       var $del = $('<button class="btn btn-outline-danger btn-sm" type="button">Delete</button>');
       $del.on('click', function () { api('DELETE', '/api/notification-providers/' + p.id).done(loadProviders); });
       $('<tr>')
         .append($('<td>').text(p.kind))
         .append($('<td>').text(p.name))
         .append($('<td>').text(p.enabled ? 'Yes' : 'No'))
-        .append($('<td class="text-end">').append($('<span class="btn-group btn-group-sm">').append($edit, $del)))
+        .append($('<td class="text-end">').append($('<span class="btn-group btn-group-sm">').append($test, $edit, $del)))
         .appendTo($rows);
     });
   }
@@ -120,6 +139,28 @@
         $('#provider-edit-modal').modal('hide');
         loadProviders();
       });
+    });
+
+    $('#provider-test-form').on('submit', function (ev) {
+      ev.preventDefault();
+      var payload = {
+        to: $('#pt-to').val(),
+        subject: $('#pt-subject').val() || null,
+        body: $('#pt-body').val() || null,
+      };
+      var $result = $('#pt-result').text('Sending…');
+      api('POST', '/api/notification-providers/' + $('#pt-id').val() + '/test', payload)
+        .done(function (resp) {
+          if (resp.ok) {
+            $result.removeClass('text-danger').addClass('text-success').text('Sent.');
+          } else {
+            $result.removeClass('text-success').addClass('text-danger')
+              .text('Send failed: ' + (resp.error || 'unknown error'));
+          }
+        })
+        .fail(function () {
+          $result.removeClass('text-success').addClass('text-danger').text('Send failed.');
+        });
     });
 
     $('#account-btn').on('click', function () { window.location.href = '/'; });

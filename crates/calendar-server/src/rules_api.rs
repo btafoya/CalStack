@@ -13,6 +13,7 @@ use axum::{
 use calendar_core::CalendarCapability;
 use calendar_db::{self as db};
 use calendar_notify::SmsProvider;
+use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -340,6 +341,85 @@ async fn patch_provider(
     Ok(Json(json!({"ok": true})))
 }
 
+/// Sends a test message through the provider's real channel. Always returns
+/// 200 with ok true/false so the UI can show the outcome inline in the test
+/// modal instead of the shared api() alert.
+#[derive(serde::Deserialize)]
+struct ProviderTestBody {
+    to: String,
+    subject: Option<String>,
+    body: Option<String>,
+}
+
+async fn test_provider(
+    State(AppState { pool, crypto, .. }): State<AppState>,
+    headers: HeaderMap,
+    Path(provider_id): Path<Uuid>,
+    Json(body): Json<ProviderTestBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
+    require_csrf(&auth, &headers)?;
+    if body.to.trim().is_empty() {
+        return Err(AppError::BadRequest("recipient required".into()));
+    }
+    let crypto = crypto
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("APP_ENCRYPTION_KEY is not set".into()))?;
+    let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        kind: String,
+        config_encrypted: Vec<u8>,
+    }
+    let row: Row = sqlx::query_as(
+        "SELECT kind, config_encrypted FROM notification_providers
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(provider_id)
+    .bind(tenant_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| AppError::from(db::DbError::Sql(e)))?
+    .ok_or(AppError::NotFound)?;
+    let config: Value = serde_json::from_slice(
+        &crypto
+            .decrypt(&row.config_encrypted)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+    let kind = calendar_notify::Provider::from_db_str(&row.kind)
+        .ok_or_else(|| AppError::BadRequest("unknown provider kind".into()))?;
+    let subject = body
+        .subject
+        .unwrap_or_else(|| "CalStack test message".into());
+    let text = body
+        .body
+        .clone()
+        .unwrap_or_else(|| format!("Test message sent from CalStack at {}.", Utc::now()));
+    let result: Result<(), calendar_notify::NotifyError> = async {
+        match kind {
+            calendar_notify::Provider::Postmark | calendar_notify::Provider::Smtp => {
+                let provider = calendar_notify::EmailProvider::from_config(kind, &config)?;
+                provider.send(&body.to, &subject, &text).await
+            }
+            calendar_notify::Provider::Twilio => {
+                let sms = calendar_notify::SmsProvider::from_config(&config)?;
+                // SMS has no subject; only the body goes on the wire.
+                sms.send(&body.to, &body.body.unwrap_or(text)).await
+            }
+            calendar_notify::Provider::WebPush => Err(calendar_notify::NotifyError::Config(
+                "webpush has no sender implemented".into(),
+            )),
+        }
+    }
+    .await;
+    Ok(Json(match result {
+        Ok(()) => json!({"ok": true}),
+        Err(e) => json!({"ok": false, "error": e.to_string()}),
+    }))
+}
+
 #[derive(sqlx::FromRow)]
 struct RuleListRow {
     id: Uuid,
@@ -471,6 +551,7 @@ pub fn router() -> axum::Router<crate::AppState> {
                 .patch(patch_provider)
                 .delete(delete_provider),
         )
+        .route("/api/notification-providers/{id}/test", post(test_provider))
         .route("/api/rules", post(create_rule).get(list_rules))
         .route("/api/rules/{id}", patch(update_rule).delete(delete_rule))
 }
