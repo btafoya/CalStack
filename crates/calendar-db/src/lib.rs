@@ -52,6 +52,10 @@ pub struct UserRow {
     pub password_hash: Option<String>,
     pub is_admin: bool,
     pub timezone: Option<String>,
+    /// Reminder-channel opt-outs (in-app is never optional).
+    pub notify_email: bool,
+    pub notify_sms: bool,
+    pub notify_push: bool,
     pub disabled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

@@ -185,6 +185,96 @@ impl SmsProvider {
     }
 }
 
+/// Generate a VAPID key pair (base64url raw private key + 65-byte
+/// uncompressed public key), used when a webpush provider is first saved.
+pub fn generate_vapid_keys() -> Result<(String, String), NotifyError> {
+    use base64::Engine;
+    use p256::ecdsa::SigningKey;
+    let signing = SigningKey::random(&mut rand_core_06::OsRng);
+    let private = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.to_bytes());
+    let public = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(signing.verifying_key().to_encoded_point(false).as_bytes());
+    Ok((private, public))
+}
+
+/// Web Push adapter: payload encryption + VAPID signing via the web-push
+/// crate, delivery through the workspace reqwest client (the crate's own
+/// http types are an older http version, so headers are copied by name).
+#[derive(Debug, Clone)]
+pub struct WebPushProvider {
+    /// base64url raw private key.
+    pub vapid_private: String,
+    pub subject: String,
+}
+
+impl WebPushProvider {
+    pub fn from_config(config: &Value) -> Result<Self, NotifyError> {
+        let get = |k: &str| config.get(k).and_then(Value::as_str).map(str::to_string);
+        Ok(Self {
+            vapid_private: get("vapid_private")
+                .ok_or_else(|| NotifyError::Config("vapid_private missing".into()))?,
+            subject: get("subject").ok_or_else(|| NotifyError::Config("subject missing".into()))?,
+        })
+    }
+
+    /// Sends one encrypted push. `payload` is JSON {title, body, url}.
+    /// Ok(true) reports an expired subscription (410/404) so callers can
+    /// drop the row.
+    pub async fn send(
+        &self,
+        endpoint: &str,
+        p256dh: &str,
+        auth: &str,
+        payload: &[u8],
+    ) -> Result<bool, NotifyError> {
+        use web_push::{SubscriptionInfo, VapidSignatureBuilder, WebPushMessageBuilder};
+        let subscription = SubscriptionInfo::new(endpoint, p256dh, auth);
+        let mut signature_builder = VapidSignatureBuilder::from_base64_no_sub(
+            &self.vapid_private,
+            web_push::URL_SAFE_NO_PAD,
+        )
+        .map_err(|e| NotifyError::Config(format!("vapid key: {e}")))?
+        .add_sub_info(&subscription);
+        signature_builder.add_claim("sub", self.subject.clone());
+        let signature = signature_builder
+            .build()
+            .map_err(|e| NotifyError::Config(format!("vapid signature: {e}")))?;
+        let mut builder = WebPushMessageBuilder::new(&subscription);
+        builder.set_payload(web_push::ContentEncoding::Aes128Gcm, payload);
+        builder.set_vapid_signature(signature);
+        let message = builder
+            .build()
+            .map_err(|e| NotifyError::Send(format!("push message: {e}")))?;
+        let mut request = reqwest::Client::new()
+            .post(message.endpoint.to_string())
+            .header("TTL", message.ttl.to_string());
+        if let Some(urgency) = &message.urgency {
+            request = request.header("Urgency", urgency.to_string());
+        }
+        if let Some(payload) = &message.payload {
+            request = request.header("Content-Encoding", payload.content_encoding.to_str());
+            for (name, value) in &payload.crypto_headers {
+                request = request.header(*name, value);
+            }
+            let response = request
+                .body(payload.content.clone())
+                .send()
+                .await
+                .map_err(|e| NotifyError::Send(e.to_string()))?;
+            let status = response.status();
+            if status.is_success() {
+                Ok(false)
+            } else if status.as_u16() == 410 || status.as_u16() == 404 {
+                Ok(true)
+            } else {
+                Err(NotifyError::Send(format!("push status {}", status)))
+            }
+        } else {
+            Err(NotifyError::Send("empty push payload".into()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

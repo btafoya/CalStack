@@ -31,7 +31,7 @@ struct RuleBody {
 }
 
 /// The tenant's enabled Twilio provider, config decrypted.
-async fn load_sms_provider(
+pub(crate) async fn load_sms_provider(
     pool: &sqlx::PgPool,
     tenant_id: Uuid,
     crypto: Option<&calendar_auth::Crypto>,
@@ -105,7 +105,7 @@ pub(crate) async fn run_rules(
                 let ok = match kind {
                     "create_notification" => db::alarms::create_notification_deduped(
                         pool,
-                        Uuid::nil(),
+                        Some(Uuid::nil()),
                         "in_app",
                         action.get("title").and_then(Value::as_str),
                         action.get("body").and_then(Value::as_str),
@@ -175,15 +175,23 @@ async fn create_provider(
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
-    if calendar_notify::Provider::from_db_str(&body.kind).is_none() {
-        return Err(AppError::bad_request("unknown provider kind"));
+    let kind = calendar_notify::Provider::from_db_str(&body.kind)
+        .ok_or_else(|| AppError::BadRequest("unknown provider kind".into()))?;
+    // Webpush providers get a server-generated VAPID key pair on first save;
+    // the public key is later served to subscribing browsers.
+    let mut config = body.config.clone();
+    if kind == calendar_notify::Provider::WebPush && config.get("vapid_private").is_none() {
+        let (private, public) = calendar_notify::generate_vapid_keys()
+            .map_err(|e| AppError::internal(e.to_string()))?;
+        config["vapid_private"] = json!(private);
+        config["vapid_public"] = json!(public);
     }
     let crypto = crypto
         .as_ref()
         .ok_or_else(|| AppError::internal("APP_ENCRYPTION_KEY is not set"))?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     let encrypted = crypto
-        .encrypt(body.config.to_string().as_bytes())
+        .encrypt(config.to_string().as_bytes())
         .map_err(|e| AppError::internal(e.to_string()))?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO notification_providers (id, tenant_id, kind, name, config_encrypted)

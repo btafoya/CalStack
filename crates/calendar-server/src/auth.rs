@@ -293,6 +293,9 @@ struct UserView {
     email: String,
     display_name: Option<String>,
     is_admin: bool,
+    notify_email: bool,
+    notify_sms: bool,
+    notify_push: bool,
 }
 
 fn user_view(user: &UserRow) -> UserView {
@@ -302,7 +305,39 @@ fn user_view(user: &UserRow) -> UserView {
         email: user.email.clone(),
         display_name: user.display_name.clone(),
         is_admin: user.is_admin,
+        notify_email: user.notify_email,
+        notify_sms: user.notify_sms,
+        notify_push: user.notify_push,
     }
+}
+
+/// Per-user reminder opt-outs (in-app is never optional).
+#[derive(serde::Deserialize)]
+struct NotifyPrefsBody {
+    notify_email: bool,
+    notify_sms: bool,
+    notify_push: bool,
+}
+
+async fn set_notify_prefs(
+    State(AppState { pool, .. }): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<NotifyPrefsBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    require_csrf(&auth, &headers)?;
+    sqlx::query(
+        "UPDATE users SET notify_email = $2, notify_sms = $3, notify_push = $4, updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(auth.user.id)
+    .bind(body.notify_email)
+    .bind(body.notify_sms)
+    .bind(body.notify_push)
+    .execute(&pool)
+    .await
+    .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 async fn register(
@@ -572,6 +607,7 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
         .route("/api/auth/password", post(change_password))
+        .route("/api/auth/notify-prefs", post(set_notify_prefs))
         .route("/api/auth/tokens", post(create_token).get(list_tokens))
         .route("/api/auth/tokens/{id}", delete(revoke_token))
         .route(

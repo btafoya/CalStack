@@ -19,6 +19,9 @@ pub struct AlarmRow {
     pub description: Option<String>,
     pub summary: Option<String>,
     pub recipient_emails: Vec<String>,
+    /// App-side channel selection; sms/push never reach the ICS wire.
+    /// DISPLAY/EMAIL wire alarms map to {in_app}/{in_app,email} on import.
+    pub notify_channels: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -47,8 +50,8 @@ pub async fn replace_alarms(
         sqlx::query(
             "INSERT INTO event_alarms
                 (id, event_id, action, related, offset_interval, trigger_at,
-                 description, summary, recipient_emails)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 description, summary, recipient_emails, notify_channels)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(Uuid::new_v4())
         .bind(event_id)
@@ -67,6 +70,7 @@ pub async fn replace_alarms(
         .bind(&alarm.description)
         .bind(&alarm.summary)
         .bind(&alarm.recipient_emails)
+        .bind(&alarm.notify_channels)
         .execute(&mut *tx)
         .await?;
     }
@@ -92,6 +96,8 @@ pub struct NewAlarm {
     pub description: Option<String>,
     pub summary: Option<String>,
     pub recipient_emails: Vec<String>,
+    /// App-side channel selection; see AlarmRow.notify_channels.
+    pub notify_channels: Vec<String>,
 }
 
 /// Live alarms joined with their event and calendar, for the scan worker.
@@ -130,9 +136,10 @@ pub async fn list_scannable_alarms(pool: &PgPool) -> Result<Vec<AlarmScanRow>, D
 }
 
 /// Idempotent notification insert; returns true when it was created.
+/// External recipients (channel rows without a user) pass None.
 pub async fn create_notification_deduped(
     pool: &PgPool,
-    user_id: Uuid,
+    user_id: Option<Uuid>,
     channel: &str,
     title: Option<&str>,
     body: Option<&str>,

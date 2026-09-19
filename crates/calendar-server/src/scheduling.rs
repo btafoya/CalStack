@@ -175,7 +175,7 @@ pub(crate) async fn send_pending(pool: &sqlx::PgPool, crypto: Option<&Crypto>) {
 }
 
 /// The tenant's first enabled Postmark/SMTP provider.
-async fn load_email_provider(
+pub(crate) async fn load_email_provider(
     pool: &sqlx::PgPool,
     tenant_id: Option<Uuid>,
     crypto: Option<&Crypto>,

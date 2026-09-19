@@ -26,6 +26,7 @@
     categoryRegistry: [],
     eventCategories: [],
     username: '',
+    userPrefs: { notify_email: true, notify_sms: true, notify_push: true },
   };
 
   // ponytail: disables whatever button/submit triggered a mutating call, to
@@ -907,7 +908,62 @@
   $('#account-btn').on('click', function () {
     $('#account-current-password, #account-new-password, #account-new-password-confirm').val('');
     $('#account-password-msg').text('');
+    $('#notify-msg').text('');
+    $('#notify-email').prop('checked', state.userPrefs.notify_email);
+    $('#notify-sms').prop('checked', state.userPrefs.notify_sms);
+    $('#notify-push').prop('checked', state.userPrefs.notify_push);
     modal('account-modal').show();
+  });
+
+  $('#notify-prefs-save').on('click', function () {
+    api('POST', '/api/auth/notify-prefs', {
+      notify_email: $('#notify-email').prop('checked'),
+      notify_sms: $('#notify-sms').prop('checked'),
+      notify_push: $('#notify-push').prop('checked'),
+    }).done(function () {
+      state.userPrefs = {
+        notify_email: $('#notify-email').prop('checked'),
+        notify_sms: $('#notify-sms').prop('checked'),
+        notify_push: $('#notify-push').prop('checked'),
+      };
+      $('#notify-msg').text('Saved.');
+    });
+  });
+
+  // Web Push: register the service worker and subscribe with the tenant's
+  // VAPID public key (dormant until a webpush provider exists).
+  function urlBase64ToUint8Array(b64) {
+    var padding = '='.repeat((4 - (b64.length % 4)) % 4);
+    var raw = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + padding);
+    return Uint8Array.from(raw.split('').map(function (c) { return c.charCodeAt(0); }));
+  }
+  $('#push-enable-btn').on('click', function () {
+    var $msg = $('#notify-msg').text('');
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      $msg.addClass('text-danger').text('This browser does not support push notifications.');
+      return;
+    }
+    navigator.serviceWorker.register('/sw.js').then(function (reg) {
+      return api('GET', '/api/push/public-key').then(function (key) {
+        if (!key) {
+          $msg.addClass('text-danger').text('No push provider configured yet (admins: add one on the Providers page).');
+          throw new Error('no key');
+        }
+        return reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(key),
+        });
+      });
+    }).then(function (sub) {
+      var json = sub.toJSON();
+      return api('POST', '/api/push/subscriptions', json).then(function () {
+        $msg.text('Push enabled on this device.');
+      });
+    }).catch(function (err) {
+      if (String(err.message) !== 'no key') {
+        $msg.addClass('text-danger').text('Could not enable push: ' + err.message);
+      }
+    });
   });
 
   // ============ DAV connection info ============
@@ -1112,6 +1168,11 @@
 
     api('GET', '/api/auth/me').done(function (user) {
       state.username = user.username || '';
+      state.userPrefs = {
+        notify_email: user.notify_email !== false,
+        notify_sms: user.notify_sms !== false,
+        notify_push: user.notify_push !== false,
+      };
       // Rules/Providers/Credentials/Admin are admin-only (pages redirect, APIs 403).
       if (user.is_admin) { $('#admin-nav-link, #rules-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
     });

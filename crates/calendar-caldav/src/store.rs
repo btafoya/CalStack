@@ -48,6 +48,12 @@ pub(crate) fn upsert_data(parsed: &crate::ParsedEvent) -> IcsEventUpsert {
                 description: a.description.clone(),
                 summary: a.summary.clone(),
                 recipient_emails: a.recipients.clone(),
+                // Wire alarms only carry DISPLAY/EMAIL; sms/push stay app-side.
+                notify_channels: if a.action.eq_ignore_ascii_case("EMAIL") {
+                    vec!["in_app".into(), "email".into()]
+                } else {
+                    vec!["in_app".into()]
+                },
             })
             .collect(),
         attendees: parsed
