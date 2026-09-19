@@ -25,6 +25,7 @@
     calendarActivated: false,
     categoryRegistry: [],
     eventCategories: [],
+    username: '',
   };
 
   // ponytail: disables whatever button/submit triggered a mutating call, to
@@ -247,8 +248,12 @@
       if (dot) { item.append($('<span class="cal-dot" aria-hidden="true">').css('background-color', dot)); }
       item.append($('<span>').text(cal.name + ' (' + cal.my_capability + ')'));
       item.on('click', function () { selectCalendar(cal); });
+      var btns = $('<span class="btn-group btn-group-sm">');
+      btns.append(
+        $('<button class="btn btn-outline-secondary" type="button" title="Connection info"><i class="bi bi-plug"></i></button>')
+          .on('click', function (e) { e.stopPropagation(); showConnInfo(cal); })
+      );
       if (cal.my_capability === 'owner' || cal.my_capability === 'read_write') {
-        var btns = $('<span class="btn-group btn-group-sm">');
         btns.append(
           $('<button class="btn btn-outline-secondary" type="button" title="Rename"><i class="bi bi-pencil"></i></button>')
             .on('click', function (e) { e.stopPropagation(); renameCalendar(cal); })
@@ -259,10 +264,29 @@
               .on('click', function (e) { e.stopPropagation(); deleteCalendar(cal); })
           );
         }
-        item.append(btns);
       }
+      item.append(btns);
       $('#cal-list').append(item);
     });
+  }
+
+  // CalDAV/CardDAV connection details. The {user} path segment is ignored by
+  // the DAV handler (calendars match on slug within the caller's access), so
+  // the logged-in username works for shared calendars too.
+  function showConnInfo(cal) {
+    var $modal = $('#conn-modal');
+    var base = window.location.origin;
+    var row = $modal.find('#conn-calendar-row');
+    if (cal) {
+      row.removeClass('d-none');
+      row.find('.conn-copy').val(base + '/calendars/' + state.username + '/' + cal.slug + '/');
+    } else {
+      row.addClass('d-none');
+    }
+    var fields = $modal.find('.conn-copy');
+    fields.eq(cal ? 1 : 0).val(base + '/calendars/');
+    fields.eq(cal ? 2 : 1).val(state.username);
+    $modal.modal('show');
   }
 
   // ============ date helpers (native Date, no library) ============
@@ -862,6 +886,21 @@
     modal('account-modal').show();
   });
 
+  // ============ DAV connection info ============
+  $('#conn-info-btn').on('click', function () { showConnInfo(null); });
+  $('#conn-modal').on('click', '.input-group button', function () {
+    var input = $(this).siblings('.conn-copy')[0];
+    var $icon = $(input).siblings('button').find('i');
+    var done = function () {
+      $icon.attr('class', 'bi bi-check2');
+      setTimeout(function () { $icon.attr('class', 'bi bi-clipboard'); }, 1200);
+    };
+    // Clipboard API needs a secure context; fall back to selecting for copy.
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(input.value).then(done);
+    } else { input.select(); document.execCommand('copy'); done(); }
+  });
+
   $('#account-password-save').on('click', function () {
     var current = $('#account-current-password').val();
     var next = $('#account-new-password').val();
@@ -1048,6 +1087,7 @@
     }).addClass('active');
 
     api('GET', '/api/auth/me').done(function (user) {
+      state.username = user.username || '';
       // Rules/Providers/Credentials/Admin are admin-only (pages redirect, APIs 403).
       if (user.is_admin) { $('#admin-nav-link, #rules-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
     });
