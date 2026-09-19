@@ -94,7 +94,7 @@ Configuration is environment-variable only — no config files, no CLI flags for
 | `WEBAUTHN_ORIGIN` | no* | — | Full origin browsers report, e.g. `https://calendar.example.com` |
 | `ATTACHMENT_MAX_BYTES` | no | `52428800` (50 MB) | Per-attachment size cap |
 | `RETENTION_DAYS` | no | `30` | Soft-deleted resources are purged after this many days |
-| `POSTMARK_INBOUND_SECRET` | no | — | Shared secret validating Postmark's inbound iMIP webhook |
+| `POSTMARK_INBOUND_SECRET` | required for inbound iMIP | — | Shared secret validating Postmark's inbound iMIP webhook; the webhook endpoint refuses all traffic (403) while this is unset |
 | `APP_PUBLIC_URL` | no | — | Public base URL (e.g. `https://calendar.example.com`) for the click-through link in reminder emails and Web Push payloads. No link is added when unset. |
 | `GOOGLE_MAPS_API_KEY` | no | — | Google Places API (New) key enabling place autocomplete in the web UI event form. Key stays server-side; browsers call the `/api/places/*` proxy. Without it, the location field is free text. |
 

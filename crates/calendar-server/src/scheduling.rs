@@ -31,6 +31,19 @@ pub(crate) fn request_body(
     .replacen("BEGIN:VCALENDAR", "BEGIN:VCALENDAR\nMETHOD:REQUEST", 1)
 }
 
+/// Shared-secret gate for the inbound webhook: fail-closed, so an unset
+/// POSTMARK_INBOUND_SECRET disables the endpoint instead of opening it.
+pub(crate) fn inbound_secret_ok(secret_env: &str, headers: &HeaderMap) -> bool {
+    if secret_env.is_empty() {
+        return false;
+    }
+    let supplied = headers
+        .get("x-postmark-inbound-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    crate::auth::constant_time_eq(supplied.as_bytes(), secret_env.as_bytes())
+}
+
 /// Inbound Postmark webhook (ADR-009): finds the text/calendar attachment,
 /// matches the reply to its attendee, and records RSVP changes.
 pub(crate) async fn postmark_inbound(
@@ -40,14 +53,11 @@ pub(crate) async fn postmark_inbound(
 ) -> Result<impl IntoResponse, AppError> {
     // Shared secret protects the webhook (env POSTMARK_INBOUND_SECRET).
     let secret = std::env::var("POSTMARK_INBOUND_SECRET").unwrap_or_default();
-    if !secret.is_empty() {
-        let supplied = headers
-            .get("x-postmark-inbound-secret")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        if supplied != secret {
-            return Err(AppError::unauthorized());
+    if !inbound_secret_ok(&secret, &headers) {
+        if secret.is_empty() {
+            tracing::warn!("postmark inbound rejected: POSTMARK_INBOUND_SECRET not configured");
         }
+        return Err(AppError::Forbidden);
     }
     let from = body
         .get("From")
@@ -203,4 +213,37 @@ pub(crate) async fn load_email_provider(
 
 pub fn router() -> axum::Router<crate::AppState> {
     axum::Router::new().route("/webhooks/postmark/inbound", post(postmark_inbound))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn headers_with(secret: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(secret) = secret {
+            headers.insert(
+                "x-postmark-inbound-secret",
+                HeaderValue::from_str(secret).unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn empty_secret_is_fail_closed_even_with_a_header() {
+        assert!(!inbound_secret_ok("", &headers_with(Some("anything"))));
+    }
+
+    #[test]
+    fn correct_secret_passes() {
+        assert!(inbound_secret_ok("s3cret", &headers_with(Some("s3cret"))));
+    }
+
+    #[test]
+    fn wrong_secret_and_missing_header_rejected() {
+        assert!(!inbound_secret_ok("s3cret", &headers_with(Some("nope"))));
+        assert!(!inbound_secret_ok("s3cret", &headers_with(None)));
+    }
 }
