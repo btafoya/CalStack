@@ -13,6 +13,7 @@ mod extras;
 mod jobs;
 mod mfa;
 mod places;
+mod push_api;
 mod rules_api;
 mod scheduling;
 mod sharing_api;
@@ -192,6 +193,7 @@ fn build_router(state: AppState) -> Router {
         .merge(calendar_web::router())
         .merge(mfa::router())
         .merge(extras::router())
+        .merge(push_api::router())
         .merge(sharing_api::router())
         .merge(rules_api::router())
         .merge(categories_api::router())

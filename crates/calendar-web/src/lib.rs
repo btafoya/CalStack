@@ -17,6 +17,11 @@ macro_rules! asset {
 
 static ASSETS: &[(&str, &[u8], &str)] = &[
     (
+        "sw.js",
+        asset!("js/sw.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "css/bootstrap.min.css",
         asset!("css/bootstrap.min.css"),
         "text/css; charset=utf-8",
@@ -600,6 +605,19 @@ const APP_PAGE_HEAD: &str = concat!(
       <div class="mb-2"><label class="form-label" for="account-new-password-confirm">Confirm new password</label>
         <input class="form-control" type="password" id="account-new-password-confirm" autocomplete="new-password" minlength="8"></div>
       <div id="account-password-msg" class="small text-body-secondary"></div>
+      <hr>
+      <h3 class="h6">Reminders</h3>
+      <div class="form-check"><input class="form-check-input" type="checkbox" id="notify-email">
+        <label class="form-check-label" for="notify-email">Email reminders</label></div>
+      <div class="form-check"><input class="form-check-input" type="checkbox" id="notify-sms">
+        <label class="form-check-label" for="notify-sms">SMS reminders</label></div>
+      <div class="form-check"><input class="form-check-input" type="checkbox" id="notify-push">
+        <label class="form-check-label" for="notify-push">Push notifications</label></div>
+      <div class="mt-2 d-flex gap-2">
+        <button id="notify-prefs-save" class="btn btn-outline-primary btn-sm" type="button">Save reminder settings</button>
+        <button id="push-enable-btn" class="btn btn-outline-secondary btn-sm" type="button">Enable push on this device</button>
+      </div>
+      <div id="notify-msg" class="small text-body-secondary mt-1"></div>
     </div>
     <div class="modal-footer">
       <button id="account-password-save" class="btn btn-primary" type="button">Change password</button>
@@ -643,7 +661,7 @@ const APP_PAGE_HEAD: &str = concat!(
 <script src="/assets/js/bs-calendar.min.js"></script>
 <script src="/assets/js/summernote-bs5.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/app.js?v=15"></script>
+<script src="/assets/js/app.js?v=16"></script>
 </body></html>"#
 );
 
@@ -925,6 +943,7 @@ const PROVIDERS_PAGE: &str = concat!(
           <option value="postmark">Postmark (email)</option>
           <option value="smtp">SMTP (email)</option>
           <option value="twilio">Twilio (SMS)</option>
+          <option value="webpush">Web Push</option>
         </select></div>
       <div class="col"><label class="form-label" for="provider-name">Name</label>
         <input class="form-control" id="provider-name" required></div>
@@ -1199,4 +1218,18 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
         .route("/credentials", axum::routing::get(credentials_page))
         .route("/docs", axum::routing::get(swagger_page))
         .route("/assets/{*path}", axum::routing::get(assets))
+        // Service workers must be served at their intended scope root.
+        .route(
+            "/sw.js",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::OK,
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/javascript; charset=utf-8",
+                    )],
+                    asset!("js/sw.js"),
+                )
+            }),
+        )
 }

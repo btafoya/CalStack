@@ -19,6 +19,11 @@
       { key: 'auth_token', label: 'Auth token', type: 'password' },
       { key: 'from', label: 'From phone number', type: 'text' },
     ],
+    // VAPID keys are generated server-side on save; only the contact
+    // address (JWT `sub`) is asked for.
+    webpush: [
+      { key: 'subject', label: 'Contact address (mailto:)', type: 'text', placeholder: 'mailto:admin@example.com' },
+    ],
   };
 
   // Fields are built into two containers (create form + edit modal); the

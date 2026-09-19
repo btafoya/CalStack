@@ -291,7 +291,9 @@ fn serialize_alarm(
         .clone()
         .unwrap_or_else(|| event.summary.clone());
     let mut valarm = icalendar::Alarm::display(&description, trigger);
-    if alarm.action == "EMAIL" {
+    // Wire keeps RFC 5545 semantics: email is the only non-DISPLAY action;
+    // sms/push selections never reach the ICS.
+    if alarm.notify_channels.iter().any(|c| c == "email") {
         valarm
             .remove_property("ACTION")
             .add_property("ACTION", "EMAIL");
@@ -842,6 +844,45 @@ END:VCALENDAR\r\n";
             parsed[0].attendees[0].telephone.as_deref(),
             Some("+13216166280")
         );
+    }
+
+    #[test]
+    fn alarm_channels_map_to_wire_action() {
+        let mut event = sample_event_row();
+        event.starts_at = Some(Utc::now());
+        let alarm = |channels: &[&str]| calendar_db::alarms::AlarmRow {
+            id: uuid::Uuid::new_v4(),
+            event_id: event.id,
+            action: "DISPLAY".into(),
+            related: Some("START".into()),
+            offset_interval: Some(sqlx::postgres::types::PgInterval {
+                months: 0,
+                days: 0,
+                microseconds: -900 * 1_000_000,
+            }),
+            trigger_at: None,
+            description: None,
+            summary: Some("R".into()),
+            recipient_emails: vec![],
+            notify_channels: channels.iter().map(|c| c.to_string()).collect(),
+            created_at: Utc::now(),
+        };
+        let ics = events_to_ics(&[ExportRow {
+            event: event.clone(),
+            attendees: vec![],
+            alarms: vec![
+                alarm(&["in_app", "email", "sms"]),
+                alarm(&["in_app", "sms"]),
+            ],
+            location: None,
+        }]);
+        assert_eq!(ics.matches("ACTION:EMAIL").count(), 1);
+        assert_eq!(ics.matches("ACTION:DISPLAY").count(), 1);
+        assert!(!ics.contains("ACTION:SMS") && !ics.contains("ACTION:PUSH"));
+        // Import maps wire ACTION back to app channels.
+        let parsed = parse_ics(&ics).unwrap();
+        assert_eq!(parsed[0].alarms.len(), 2);
+        assert!(parsed[0].alarms[0].action.eq_ignore_ascii_case("EMAIL"));
     }
 
     fn sample_location() -> calendar_db::LocationRow {
