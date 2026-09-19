@@ -145,6 +145,15 @@ pub(crate) fn require_session(auth: &Auth) -> Result<(), AppError> {
     }
 }
 
+/// Credential/MFA endpoints: a browser session with CSRF is the only
+/// acceptable caller — a bearer token (of any scope) must not be able to
+/// mint credentials, change passwords, or alter MFA state.
+pub(crate) fn require_session_mutation(auth: &Auth, headers: &HeaderMap) -> Result<(), AppError> {
+    require_session(auth)?;
+    require_csrf(auth, headers)?;
+    Ok(())
+}
+
 /// Token scope model: empty (legacy) or "full" = everything; "write" implies
 /// "read"; "read" grants GET/HEAD only. Enforced for Bearer tokens by
 /// [`token_scope_guard`]; session-cookie requests are not scoped.
@@ -443,7 +452,7 @@ async fn change_password(
     Json(body): Json<ChangePasswordBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
-    require_csrf(&auth, &headers)?;
+    require_session_mutation(&auth, &headers)?;
     // Wrong current password is a validation failure, not a lost session — a
     // 401 here would bounce the (still logged-in) caller to /login.
     let current_hash = auth
@@ -499,7 +508,7 @@ async fn create_token(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
-    require_csrf(&auth, &headers)?;
+    require_session_mutation(&auth, &headers)?;
     let scopes = body.scopes.unwrap_or_default();
     if scopes
         .iter()
@@ -549,7 +558,7 @@ async fn revoke_token(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
-    require_csrf(&auth, &headers)?;
+    require_session_mutation(&auth, &headers)?;
     db::revoke_api_token(&pool, auth.user.id, token_id).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -566,7 +575,7 @@ async fn create_app_password(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
-    require_csrf(&auth, &headers)?;
+    require_session_mutation(&auth, &headers)?;
     let password = calendar_auth::generate_secret();
     let hash =
         calendar_auth::hash_password(&password).map_err(|e| AppError::internal(e.to_string()))?;
@@ -605,7 +614,7 @@ async fn revoke_app_password(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
-    require_csrf(&auth, &headers)?;
+    require_session_mutation(&auth, &headers)?;
     db::revoke_app_password(&pool, auth.user.id, password_id).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }

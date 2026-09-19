@@ -338,6 +338,30 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json
   -X POST "$BASE/webhooks/postmark/inbound" -d '{"From":"x@example.com"}')
 [ "$CODE" = 403 ] || fail "unconfigured secret must fail closed, got $CODE"
 
+step "Bearer tokens cannot mint credentials or touch MFA (session+CSRF only)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $RTOK" \
+  -H 'content-type: application/json' -X POST "$BASE/api/auth/tokens" -d '{"name":"esc"}')
+[ "$CODE" = 403 ] || fail "bearer token must not create API tokens, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $RTOK" \
+  -H 'content-type: application/json' -X POST "$BASE/api/auth/app-passwords" -d '{"name":"esc"}')
+[ "$CODE" = 403 ] || fail "bearer token must not create app passwords, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $RTOK" \
+  -H 'content-type: application/json' -X POST "$BASE/api/auth/password" \
+  -d '{"current_password":"x","new_password":"password123"}')
+[ "$CODE" = 403 ] || fail "bearer token must not reset the account password, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $RTOK" \
+  -H 'content-type: application/json' -X POST "$BASE/api/auth/totp/setup")
+[ "$CODE" = 403 ] || fail "bearer token must not touch TOTP state, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $RTOK" \
+  -H 'content-type: application/json' -X POST "$BASE/api/auth/webauthn/register/start")
+[ "$CODE" = 403 ] || fail "bearer token must not start a passkey enrollment, got $CODE"
+
+step "Passkey enrollment finish endpoint is served at its documented /api path"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" \
+  -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/auth/webauthn/register/finish" -d '{"challenge_id":"00000000-0000-0000-0000-000000000000"}')
+[ "$CODE" = 400 ] || fail "register/finish should 400 on an unknown challenge, got $CODE"
+
 step "Web UI: /rules, /admin and /providers pages exist (admin-gated since 00a9e13/3275b18)"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/rules")
 [ "$CODE" = 303 ] || fail "anonymous /rules should redirect, got $CODE"

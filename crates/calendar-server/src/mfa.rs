@@ -1,6 +1,6 @@
 //! TOTP 2FA and WebAuthn passkey endpoints (docs/PRD.md section 14).
 
-use crate::{AppError, AppState, require_csrf, resolve_auth, set_session_cookie};
+use crate::{AppError, AppState, require_session_mutation, resolve_auth, set_session_cookie};
 use axum::{
     Json,
     extract::{Path, State},
@@ -26,6 +26,7 @@ async fn totp_setup(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_session_mutation(&auth, &headers)?;
     let crypto = crypto.ok_or_else(|| AppError::internal("APP_ENCRYPTION_KEY is not set"))?;
     let totp = calendar_auth::totp::generate("calendar-server", &auth.user.username);
     let encrypted = crypto
@@ -44,6 +45,7 @@ async fn totp_verify(
     Json(body): Json<TotpCodeBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_session_mutation(&auth, &headers)?;
     let crypto = crypto.ok_or_else(|| AppError::internal("APP_ENCRYPTION_KEY is not set"))?;
     let row = db::auth_ext::get_totp_secret(&pool, auth.user.id)
         .await?
@@ -82,7 +84,7 @@ async fn totp_disable(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
-    require_csrf(&auth, &headers)?;
+    require_session_mutation(&auth, &headers)?;
     db::auth_ext::delete_totp_secret(&pool, auth.user.id).await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -160,6 +162,7 @@ async fn passkey_register_start(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
+    require_session_mutation(&auth, &headers)?;
     let store = passkeys.as_ref().ok_or_else(|| {
         AppError::internal("WebAuthn is not configured (set WEBAUTHN_RP_ID/WEBAUTHN_ORIGIN)")
     })?;
@@ -189,7 +192,7 @@ async fn passkey_register_finish(
     Json(body): Json<RegisterFinishBody>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
-    require_csrf(&auth, &headers)?;
+    require_session_mutation(&auth, &headers)?;
     let store = passkeys
         .as_ref()
         .ok_or_else(|| AppError::internal("WebAuthn is not configured"))?;
@@ -326,7 +329,7 @@ async fn delete_passkey(
     Path(credential_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
-    require_csrf(&auth, &headers)?;
+    require_session_mutation(&auth, &headers)?;
     db::auth_ext::delete_webauthn_credential(&pool, auth.user.id, credential_id).await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -351,7 +354,7 @@ pub fn router() -> axum::Router<crate::AppState> {
             post(passkey_register_start),
         )
         .route(
-            "/auth/webauthn/register/finish",
+            "/api/auth/webauthn/register/finish",
             post(passkey_register_finish),
         )
         .route("/api/auth/webauthn/login/start", post(passkey_login_start))
