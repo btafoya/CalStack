@@ -24,12 +24,13 @@ CalStack speaks CalDAV to real clients (Apple Calendar, Thunderbird, DAVx5, Outl
 - **ACLs** — multiple owners per calendar, owner/read-write/read-only/free-busy capabilities.
 - **Public sharing** — revocable, optionally-expiring share tokens; anonymous read-only `.ics` feeds that withhold private/confidential events and attendee contact data.
 - **Auth** — local accounts (Argon2id), WebAuthn/passkeys, TOTP 2FA with recovery codes, scoped API bearer tokens, CalDAV app passwords.
-- **VALARM reminders** — server-side, fired by a PostgreSQL-backed durable job queue (no external scheduler).
+- **Reminders** — VALARMs fired by a PostgreSQL-backed durable job queue (no external scheduler) and delivered on multiple channels: in-app always, plus email, SMS, and Web Push. Per-alarm channel selection, per-user opt-outs, exponential-backoff retries with in-app failure notices.
 - **Attachments** — capped, stored as `bytea` in PostgreSQL.
 - **Search** — PostgreSQL full-text, no external search service.
 - **Scheduling** — outbound iTIP invitations, inbound iMIP replies via a Postmark webhook.
 - **Rules** — trigger → condition → action automation (event created, RSVP changed, alarm due, …), scoped to one calendar or tenant-wide; managed from the web UI.
-- **Notifications** — Postmark, generic SMTP, Twilio SMS provider credentials, configured from the web UI.
+- **Notifications** — Postmark, generic SMTP, Twilio SMS, and Web Push (VAPID) provider credentials, configured from the web UI with an edit modal and a "send test message" button per provider.
+- **Attendees** — invite by email or by SMS-only phone number (no email required); `sms:` attendee URIs round-trip through iCalendar.
 - **Embedded web UI** — Bootstrap 5.3 + jQuery 4 + [bs-calendar](https://github.com/ThomasDev-de/bs-calendar), vendored, no CDN, no build step. Calendar view, per-calendar rules, notification providers, and admin user management.
 - **Backup/restore** — portable JSON export/import, attachments included.
 
@@ -94,6 +95,7 @@ Configuration is environment-variable only — no config files, no CLI flags for
 | `ATTACHMENT_MAX_BYTES` | no | `52428800` (50 MB) | Per-attachment size cap |
 | `RETENTION_DAYS` | no | `30` | Soft-deleted resources are purged after this many days |
 | `POSTMARK_INBOUND_SECRET` | no | — | Shared secret validating Postmark's inbound iMIP webhook |
+| `APP_PUBLIC_URL` | no | — | Public base URL (e.g. `https://calendar.example.com`) used as the click-through link in reminder emails and Web Push payloads. Links are omitted when unset. |
 | `GOOGLE_MAPS_API_KEY` | no | — | Google Places API (New) key enabling place autocomplete in the web UI event form. Key stays server-side; browsers call the `/api/places/*` proxy. Without it, the location field is free text. |
 
 \* `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGIN` must both be set to enable passkey login; otherwise it's disabled and every other auth method still works.
@@ -128,7 +130,7 @@ Under Docker Compose, run subcommands with `docker compose run --rm app <command
 docker compose run --rm app create-admin admin admin@example.com correcthorsebatterystaple
 ```
 
-`serve` also starts an in-process worker that fires VALARM reminders, sends outbound iTIP invitations, and purges expired data on a schedule — no separate process to run.
+`serve` also starts an in-process worker that scans for due VALARM reminders, dispatches them on the configured channels, sends outbound iTIP invitations, and purges expired data on a schedule — no separate process to run.
 
 ## Usage
 
@@ -136,9 +138,9 @@ docker compose run --rm app create-admin admin admin@example.com correcthorsebat
 
 Open `http://<BIND_ADDR>/` (redirects to `/login` if unauthenticated). Register an account, create a calendar, and use the built-in week-view calendar to add events.
 
-- **Account** (nav bar, every signed-in user) — change your password; revokes every other live session.
+- **Account** (nav bar, every signed-in user) — change your password (revokes every other live session), toggle email/SMS/push reminder delivery per user, and enable Web Push notifications on the current device.
 - **Rules** (nav bar, scoped to whichever calendar is selected) — create/enable/disable/delete trigger → action automation, per calendar or tenant-wide.
-- **Providers** (nav bar) — configure Postmark, SMTP, or Twilio credentials used for outbound iTIP mail and (once wired up) SMS.
+- **Providers** (nav bar) — configure Postmark, SMTP, Twilio, or Web Push (VAPID) credentials; edit any provider later; send a test message from any row. Postmark's MessageStream is configurable (defaults to `outbound`); Web Push key pairs are generated server-side on first save.
 - **Admin** (nav bar, visible only to `is_admin` users) — list accounts, create users, promote/demote admin status, enable/disable accounts.
 
 Self-registration never sets `is_admin` — it's required for the Admin page and the audit log endpoint. Create the first admin via the CLI (see [Running](#running)); every admin after that can be promoted from the Admin page itself.
