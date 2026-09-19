@@ -412,6 +412,7 @@ const APP_PAGE_HEAD: &str = concat!(
       <div class="nav-item dropdown">
         <a href="#" class="nav-link d-flex lh-1 p-0 px-2" data-bs-toggle="dropdown" aria-label="Open user menu" aria-expanded="false"><i class="bi bi-person-circle fs-3"></i></a>
         <div class="dropdown-menu dropdown-menu-end dropdown-menu-arrow">
+          <button type="button" class="dropdown-item" id="conn-info-btn">Connection info</button>
           <button type="button" class="dropdown-item" id="account-btn">Account</button>
           <button type="button" class="dropdown-item" id="logout-btn">Sign out</button>
         </div>
@@ -605,13 +606,32 @@ const APP_PAGE_HEAD: &str = concat!(
     </div>
   </div></div>
 </div>
+<div class="modal fade" id="conn-modal" aria-hidden="true">
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5">Connection info</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+      <div id="conn-calendar-row" class="mb-3">
+        <label class="form-label">Calendar CalDAV URL</label>
+        <div class="input-group"><input class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div>
+      </div>
+      <div class="mb-3"><label class="form-label">Server URL</label>
+        <div class="input-group"><input class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
+      <div class="mb-3"><label class="form-label">Username</label>
+        <div class="input-group"><input class="form-control conn-copy" readonly><button class="btn btn-outline-secondary" type="button" title="Copy"><i class="bi bi-clipboard"></i></button></div></div>
+      <div class="mb-3"><label class="form-label">Password</label>
+        <p class="mb-1 text-body-secondary small">Use an <strong>app password</strong>, not your login password — DAV clients authenticate with Basic auth against app passwords only.</p>
+        <a href="/credentials" class="btn btn-outline-primary btn-sm">Manage app passwords</a></div>
+    </div>
+  </div></div>
+</div>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/bs-calendar.min.js"></script>
 <script src="/assets/js/summernote-bs5.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/app.js?v=12"></script>
+<script src="/assets/js/app.js?v=13"></script>
 </body></html>"#
 );
 
