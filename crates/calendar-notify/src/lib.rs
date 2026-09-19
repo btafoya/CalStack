@@ -52,6 +52,8 @@ pub struct EmailProvider {
     pub from: String,
     /// Postmark auth token (SMTP relays may also take credentials).
     pub token: Option<String>,
+    /// Postmark MessageStream; unused by SMTP. Defaults to "outbound".
+    pub message_stream: String,
 }
 
 impl EmailProvider {
@@ -68,6 +70,7 @@ impl EmailProvider {
             server: get("server").ok_or_else(|| NotifyError::Config("server missing".into()))?,
             from: get("from").ok_or_else(|| NotifyError::Config("from missing".into()))?,
             token: get("token"),
+            message_stream: get("message_stream").unwrap_or_else(|| "outbound".to_string()),
         })
     }
 
@@ -93,7 +96,7 @@ impl EmailProvider {
             "To": to,
             "Subject": subject,
             "TextBody": text,
-            "MessageStream": "outbound",
+            "MessageStream": self.message_stream,
         });
         let response = client
             .post("https://api.postmarkapp.com/email")
@@ -179,5 +182,30 @@ impl SmsProvider {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_stream_defaults_to_outbound() {
+        let config = serde_json::json!({"server": "postmark", "from": "a@b.c", "token": "t"});
+        assert_eq!(
+            EmailProvider::from_config(Provider::Postmark, &config)
+                .unwrap()
+                .message_stream,
+            "outbound"
+        );
+        let config = serde_json::json!({
+            "server": "postmark", "from": "a@b.c", "token": "t", "message_stream": "broadcasts"
+        });
+        assert_eq!(
+            EmailProvider::from_config(Provider::Postmark, &config)
+                .unwrap()
+                .message_stream,
+            "broadcasts"
+        );
     }
 }
