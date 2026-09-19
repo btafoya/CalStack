@@ -643,7 +643,7 @@ const APP_PAGE_HEAD: &str = concat!(
 <script src="/assets/js/bs-calendar.min.js"></script>
 <script src="/assets/js/summernote-bs5.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/app.js?v=14"></script>
+<script src="/assets/js/app.js?v=15"></script>
 </body></html>"#
 );
 
@@ -936,6 +936,28 @@ const PROVIDERS_PAGE: &str = concat!(
     <thead><tr><th>Kind</th><th>Name</th><th>Enabled</th><th></th></tr></thead>
     <tbody id="provider-rows"></tbody>
   </table>
+</div>
+<div class="modal fade" id="provider-edit-modal" aria-hidden="true">
+  <div class="modal-dialog"><form id="provider-edit-form" class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5">Edit provider</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+      <input type="hidden" id="pe-id">
+      <div class="row g-2">
+        <div class="col-auto"><label class="form-label" for="pe-kind">Kind</label>
+          <input class="form-control" id="pe-kind" readonly></div>
+        <div class="col"><label class="form-label" for="pe-name">Name</label>
+          <input class="form-control" id="pe-name" required></div>
+      </div>
+      <div id="pe-fields" class="row g-2 mt-1"></div>
+      <div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="pe-enabled">
+        <label class="form-check-label" for="pe-enabled">Enabled</label></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" type="submit">Save</button>
+      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
+    </div>
+  </form></div>
 </div>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
