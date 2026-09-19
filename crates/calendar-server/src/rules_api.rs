@@ -2,7 +2,10 @@
 //! simple trigger → optional conditions → actions engine, executed inline on
 //! event mutations, with executions recorded for the audit trail.
 
-use crate::{AppError, AppState, require_admin, require_capability, require_csrf, resolve_auth};
+use crate::{
+    AppError, AppState, require_admin, require_capability, require_csrf, require_session,
+    resolve_auth,
+};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -267,6 +270,9 @@ async fn get_provider(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
+    // Decrypted provider secrets (incl. the VAPID private key) must not be
+    // readable by scoped bearer tokens: session + admin only.
+    require_session(&auth)?;
     let crypto = crypto
         .as_ref()
         .ok_or_else(|| AppError::internal("APP_ENCRYPTION_KEY is not set"))?;

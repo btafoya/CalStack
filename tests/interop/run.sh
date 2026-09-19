@@ -321,6 +321,23 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-To
   -X DELETE "$BASE/api/notification-providers/$PROV_ID")
 [ "$CODE" = 200 ] || fail "delete twilio provider, got $CODE"
 
+step "Decrypted provider config is session-only (bearer tokens get 403)"
+RTOK=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/auth/tokens" -d '{"name":"probe","scopes":["read"]}' \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['secret'])")
+[ -n "$RTOK" ] || fail "read-scoped token create"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $RTOK" \
+  "$BASE/api/notification-providers/00000000-0000-0000-0000-000000000000")
+[ "$CODE" = 403 ] || fail "bearer token must not read decrypted provider config, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" \
+  "$BASE/api/notification-providers/$PROV_ID")
+[ "$CODE" = 404 ] || fail "session GET on a deleted provider should reach the lookup (404), got $CODE"
+
+step "Postmark inbound webhook is fail-closed without POSTMARK_INBOUND_SECRET"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+  -X POST "$BASE/webhooks/postmark/inbound" -d '{"From":"x@example.com"}')
+[ "$CODE" = 403 ] || fail "unconfigured secret must fail closed, got $CODE"
+
 step "Web UI: /rules, /admin and /providers pages exist (admin-gated since 00a9e13/3275b18)"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/rules")
 [ "$CODE" = 303 ] || fail "anonymous /rules should redirect, got $CODE"

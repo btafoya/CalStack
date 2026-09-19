@@ -135,6 +135,16 @@ pub(crate) fn require_csrf(auth: &Auth, headers: &HeaderMap) -> Result<(), AuthE
     Ok(())
 }
 
+/// The request must be session-authenticated: bearer tokens (of any scope)
+/// and Basic auth may not touch secrets-bearing endpoints.
+pub(crate) fn require_session(auth: &Auth) -> Result<(), AppError> {
+    if auth.session.is_some() {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
 /// Token scope model: empty (legacy) or "full" = everything; "write" implies
 /// "read"; "read" grants GET/HEAD only. Enforced for Bearer tokens by
 /// [`token_scope_guard`]; session-cookie requests are not scoped.
@@ -201,7 +211,7 @@ pub(crate) async fn admin_page_guard(
     next.run(req).await
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

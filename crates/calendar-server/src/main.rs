@@ -19,7 +19,9 @@ mod scheduling;
 mod sharing_api;
 mod xml;
 
-pub(crate) use auth::{require_admin, require_csrf, resolve_auth, set_session_cookie};
+pub(crate) use auth::{
+    require_admin, require_csrf, require_session, resolve_auth, set_session_cookie,
+};
 pub(crate) use calendars_api::require_capability;
 
 use anyhow::{Context, Result};
