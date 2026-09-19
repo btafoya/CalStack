@@ -14,3 +14,6 @@ verify: fmt check lint test
 
 interop:
 	tests/interop/run.sh
+
+interop-docker:
+	tests/interop/components_hrefs.sh

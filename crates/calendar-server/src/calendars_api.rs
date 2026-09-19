@@ -193,6 +193,7 @@ async fn patch_calendar(
         color: body.color,
         timezone: body.timezone,
         order_index: body.order_index,
+        components: None, // ponytail: API editing of components lands with the tasks API (Stage 5)
     };
     let calendar = db::update_calendar(&pool, calendar_id, &changes).await?;
     let cap = db::calendar_capability(&pool, calendar_id, auth.user.id)

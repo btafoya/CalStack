@@ -21,6 +21,9 @@ this index organizes by linking, not by relocating.
 
 - [`CARDDAV_REQUIREMENTS.md`](CARDDAV_REQUIREMENTS.md) — CardDAV requirements discovery (settled, implemented).
 - [`CARDDAV_DESIGN.md`](CARDDAV_DESIGN.md) — CardDAV implementation design following those requirements.
+- [`TASKS_JOURNALS_REQUIREMENTS.md`](TASKS_JOURNALS_REQUIREMENTS.md) — VTODO/VJOURNAL requirements discovery (settled).
+- [`TASKS_JOURNALS_DESIGN.md`](TASKS_JOURNALS_DESIGN.md) — VTODO/VJOURNAL design, spike findings and staged plan.
+- [`INTEROP_CAPTURE.md`](INTEROP_CAPTURE.md) — client fixture session: how to capture real client traffic and the per-client checklist.
 - [`DESIGN-category-registry.md`](DESIGN-category-registry.md) — the event category registry design (hybrid slug-match metadata, calendar/tenant scoping).
 
 ## Changelog

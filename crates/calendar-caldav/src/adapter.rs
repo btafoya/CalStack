@@ -14,7 +14,7 @@
 
 use crate::{ExportRow, events_to_ics};
 use calendar_core::CalendarCapability;
-use calendar_db::{self as db, AttendeeRow, CalendarRow, EventRow};
+use calendar_db::{self as db, CalendarRow, EventRow};
 use chrono::{DateTime, Utc};
 use dav_server::davpath::DavPath;
 use dav_server::fs::{
@@ -26,7 +26,6 @@ use sqlx::PgPool;
 use std::io::SeekFrom;
 use std::sync::Arc;
 use std::time::SystemTime;
-use uuid::Uuid;
 
 /// Request credentials: the authenticated user (app password / API token /
 /// session) — authorization is enforced here at the resource boundary.
@@ -45,8 +44,8 @@ pub struct PgDavFs {
 pub(crate) enum Location {
     Root,
     User,
-    Calendar(String),     // slug
-    Object(String, Uuid), // slug, resource uuid
+    Calendar(String),       // slug
+    Object(String, String), // slug, resource filename (decoded, as the client chose it)
 }
 
 /// `/calendars/{user}/{slug}` → Location. The user segment is always the
@@ -62,9 +61,9 @@ pub(crate) fn parse_location(path: &DavPath) -> Option<Location> {
         ["calendars"] => Some(Location::Root),
         ["calendars", _user] => Some(Location::User),
         ["calendars", _user, slug] => Some(Location::Calendar(slug.to_string())),
-        ["calendars", _user, slug, file] => Uuid::parse_str(file.trim_end_matches(".ics"))
-            .ok()
-            .map(|id| Location::Object(slug.to_string(), id)),
+        ["calendars", _user, slug, _file] => path
+            .file_name()
+            .map(|name| Location::Object(slug.to_string(), name.to_string())),
         _ => None,
     }
 }
@@ -171,17 +170,36 @@ impl PgDavFs {
             .ok_or(FsError::NotFound)
     }
 
-    async fn event_with_attendees(
-        &self,
-        calendar: &CalendarRow,
-        id: Uuid,
-    ) -> FsResult<(EventRow, Vec<AttendeeRow>)> {
-        let (event, _) = db::get_event(&self.pool, id).await.map_err(fs_err)?;
-        if event.calendar_id != calendar.id {
-            return Err(FsError::NotFound);
+    /// The series master served under `name`.
+    async fn master_at(&self, calendar: &CalendarRow, name: &str) -> FsResult<EventRow> {
+        let (event, _) = db::get_event_by_href(&self.pool, calendar.id, name)
+            .await
+            .map_err(fs_err)?;
+        Ok(event)
+    }
+
+    /// The whole series as one VCALENDAR: the master, then its overrides.
+    async fn series_ics(&self, master: &EventRow) -> FsResult<String> {
+        let mut events = vec![master.clone()];
+        events.extend(
+            db::list_exceptions(&self.pool, &[master.id])
+                .await
+                .map_err(fs_err)?,
+        );
+        let mut rows = Vec::with_capacity(events.len());
+        for event in events {
+            rows.push(ExportRow {
+                attendees: db::list_attendees(&self.pool, event.id)
+                    .await
+                    .map_err(fs_err)?,
+                alarms: db::alarms::list_alarms(&self.pool, event.id)
+                    .await
+                    .unwrap_or_default(),
+                location: db::location_for_event(&self.pool, &event).await,
+                event,
+            });
         }
-        let attendees = db::list_attendees(&self.pool, id).await.map_err(fs_err)?;
-        Ok((event, attendees))
+        Ok(events_to_ics(&rows))
     }
 
     async fn resolve(&self, creds: &DavAuth, path: &DavPath) -> FsResult<(Location, Meta)> {
@@ -204,20 +222,11 @@ impl PgDavFs {
                     },
                 ))
             }
-            Location::Object(slug, id) => {
+            Location::Object(slug, name) => {
                 let (cal, cap) = self.calendar_by_slug(creds, slug).await?;
                 capability_guard(cap, CalendarCapability::ReadOnly)?;
-                let (event, attendees) = self.event_with_attendees(&cal, *id).await?;
-                let alarms = db::alarms::list_alarms(&self.pool, *id)
-                    .await
-                    .unwrap_or_default();
-                let event_location = db::location_for_event(&self.pool, &event).await;
-                let ics = events_to_ics(&[ExportRow {
-                    event: event.clone(),
-                    attendees,
-                    alarms,
-                    location: event_location,
-                }]);
+                let event = self.master_at(&cal, name).await?;
+                let ics = self.series_ics(&event).await?;
                 Ok((
                     location,
                     Meta {
@@ -255,22 +264,13 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
         Box::pin(async move {
             let location = parse_location(path).ok_or(FsError::NotFound)?;
             match location {
-                Location::Object(slug, id) => {
+                Location::Object(slug, name) => {
                     let (cal, cap) = self.calendar_by_slug(creds, &slug).await?;
                     let reading = options.read && !options.write;
                     if reading {
                         capability_guard(cap, CalendarCapability::ReadOnly)?;
-                        let (event, attendees) = self.event_with_attendees(&cal, id).await?;
-                        let alarms = db::alarms::list_alarms(&self.pool, id)
-                            .await
-                            .unwrap_or_default();
-                        let location = db::location_for_event(&self.pool, &event).await;
-                        let ics = events_to_ics(&[ExportRow {
-                            event: event.clone(),
-                            attendees,
-                            alarms,
-                            location,
-                        }]);
+                        let event = self.master_at(&cal, &name).await?;
+                        let ics = self.series_ics(&event).await?;
                         let modified: SystemTime = event.updated_at.into();
                         let meta = Meta {
                             len: ics.len() as u64,
@@ -288,23 +288,22 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     }
                     if options.write {
                         capability_guard(cap, CalendarCapability::ReadWrite)?;
-                        let existing = match db::get_event(&self.pool, id).await {
-                            Ok((e, _)) => !e.deleted_at.is_some(),
+                        let exists = match db::get_event_by_href(&self.pool, cal.id, &name).await {
+                            Ok(_) => true,
                             Err(db::DbError::NotFound) => false,
                             Err(_) => return Err(FsError::GeneralFailure),
                         };
-                        if existing && options.create_new {
+                        if exists && options.create_new {
                             return Err(FsError::Exists); // If-None-Match: *
                         }
-                        if !existing && !options.create {
+                        if !exists && !options.create {
                             return Err(FsError::NotFound); // PUT update of a gone resource
                         }
                         return Ok(Box::new(WriteFile {
                             pool: self.pool.clone(),
                             calendar: cal,
                             user: creds.user.clone(),
-                            event_id: Some(id),
-                            existing,
+                            name,
                             buffer: Vec::new(),
                             new_meta: None,
                         }) as Box<dyn DavFile>);
@@ -370,24 +369,13 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     // push-down arrives when a profiled calendar needs it.
                     let mut entries = Vec::new();
                     for event in rows {
-                        if event.deleted_at.is_some() {
+                        // Overrides are part of their master's resource.
+                        if event.deleted_at.is_some() || event.master_event_id.is_some() {
                             continue;
                         }
-                        let attendees = db::list_attendees(&self.pool, event.id)
-                            .await
-                            .unwrap_or_default();
-                        let alarms = db::alarms::list_alarms(&self.pool, event.id)
-                            .await
-                            .unwrap_or_default();
-                        let event_location = db::location_for_event(&self.pool, &event).await;
-                        let ics = events_to_ics(&[ExportRow {
-                            event: event.clone(),
-                            attendees,
-                            alarms,
-                            location: event_location,
-                        }]);
+                        let ics = self.series_ics(&event).await?;
                         entries.push(Entry {
-                            name: format!("{}.ics", event.id).into_bytes(),
+                            name: event.resource_name().into_bytes(),
                             meta: Meta {
                                 len: ics.len() as u64,
                                 modified: event.updated_at.into(),
@@ -461,10 +449,13 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
         Box::pin(async move {
             let (location, _) = self.resolve(creds, path).await?;
             match location {
-                Location::Object(slug, id) => {
-                    let (_cal, cap) = self.calendar_by_slug(creds, &slug).await?;
+                Location::Object(slug, name) => {
+                    let (cal, cap) = self.calendar_by_slug(creds, &slug).await?;
                     capability_guard(cap, CalendarCapability::ReadWrite)?;
-                    db::delete_event(&self.pool, id, None)
+                    let (event, _) = db::get_event_by_href(&self.pool, cal.id, &name)
+                        .await
+                        .map_err(fs_err)?;
+                    db::delete_event(&self.pool, event.id, None)
                         .await
                         .map_err(fs_err)?;
                     Ok(())
@@ -653,8 +644,8 @@ struct WriteFile {
     pool: PgPool,
     calendar: CalendarRow,
     user: db::UserRow,
-    event_id: Option<Uuid>,
-    existing: bool,
+    /// Filename the client is PUTting to.
+    name: String,
     buffer: Vec<u8>,
     new_meta: Option<Meta>,
 }
@@ -702,60 +693,34 @@ impl DavFile for WriteFile {
                     return Err(FsError::Forbidden);
                 }
             };
-            if events.len() != 1 {
-                tracing::warn!("CalDAV PUT resource must contain exactly one VEVENT");
+            // One resource = one UID: a master VEVENT plus its own overrides.
+            // (An override without its master, e.g. an invitation to a single
+            // occurrence, is not supported.)
+            let (masters, overrides): (Vec<_>, Vec<_>) = events
+                .iter()
+                .partition(|e| e.recurrence_id.is_none() && e.recurrence_id_date.is_none());
+            if masters.len() != 1 || events.iter().any(|e| e.uid != masters[0].uid) {
+                tracing::warn!(
+                    "CalDAV PUT resource must hold one master VEVENT and only its own overrides"
+                );
                 return Err(FsError::Forbidden);
             }
-            let parsed = &events[0];
             // The ReadWrite capability was already enforced at open() time.
-            let mut data = crate::upsert_data(parsed);
-            // organizer_email is NOT NULL; an organizer-less VEVENT PUTs as
-            // owned by the writing user.
-            data.organizer_email
-                .get_or_insert_with(|| self.user.email.clone());
-            let result = match (self.event_id, self.existing) {
-                (Some(id), true) => {
-                    db::ics_upsert::update_ics_event(&self.pool, id, None, &data).await
-                }
-                (Some(id), false) => {
-                    // The URL uuid is the new resource id.
-                    let mut data = data;
-                    if data.organizer_email.is_none() {
-                        data.organizer_email = Some(self.user.email.clone());
-                    }
-                    let organizer_user_id = data
-                        .organizer_email
-                        .as_deref()
-                        .is_some_and(|e| e.eq_ignore_ascii_case(&self.user.email))
-                        .then_some(self.user.id);
-                    db::ics_upsert::create_ics_event_inner(
-                        &self.pool,
-                        self.calendar.id,
-                        self.user.id,
-                        organizer_user_id,
-                        Some(id),
-                        &data,
-                    )
-                    .await
-                }
-                (None, _) => {
-                    let organizer_user_id = data
-                        .organizer_email
-                        .as_deref()
-                        .is_some_and(|e| e.eq_ignore_ascii_case(&self.user.email))
-                        .then_some(self.user.id);
-                    db::ics_upsert::create_ics_event_inner(
-                        &self.pool,
-                        self.calendar.id,
-                        self.user.id,
-                        organizer_user_id,
-                        None,
-                        &data,
-                    )
-                    .await
-                }
-            };
-            let event = result.map_err(|e| {
+            let master = upsert_for(&self.user, masters[0]);
+            let overrides: Vec<_> = overrides
+                .iter()
+                .map(|e| upsert_for(&self.user, e))
+                .collect();
+            let result = db::ics_upsert::put_series(
+                &self.pool,
+                self.calendar.id,
+                self.user.id,
+                &self.name,
+                &master,
+                &overrides,
+            )
+            .await;
+            let (event, _) = result.map_err(|e| {
                 tracing::warn!(error = %e, "CalDAV PUT failed to store event");
                 match e {
                     db::DbError::NotFound => FsError::NotFound,
@@ -778,13 +743,57 @@ impl DavFile for WriteFile {
     }
 }
 
+/// Storage record for one parsed VEVENT written by `user`. organizer_email is
+/// NOT NULL: an organizer-less VEVENT PUTs as owned by the writer.
+fn upsert_for(user: &db::UserRow, parsed: &crate::ParsedEvent) -> db::ics_upsert::IcsEventUpsert {
+    let mut data = crate::upsert_data(parsed);
+    if data.organizer_email.is_empty() {
+        data.organizer_email = user.email.clone();
+    }
+    data.organizer_user_id = data
+        .organizer_email
+        .eq_ignore_ascii_case(&user.email)
+        .then_some(user.id);
+    data
+}
+
+/// Text content of a PROPPATCH property element:
+/// `<D:displayname xmlns:D="DAV:">Work &amp; Co</D:displayname>` -> `Work & Co`.
 fn xml_text(value: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(value).ok()?;
-    Some(text.trim().to_string())
+    let mut text = std::str::from_utf8(value).ok()?.trim();
+    if text.starts_with("<?") {
+        text = text[text.find("?>")? + 2..].trim(); // dav-server prefixes an XML declaration
+    }
+    let inner = if text.starts_with('<') {
+        text[text.find('>')? + 1..text.rfind("</")?].trim()
+    } else {
+        text
+    };
+    Some(
+        inner
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+    )
 }
 
 fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn property_text_is_unwrapped_and_unescaped() {
+        let el = br#"<D:displayname xmlns:D="DAV:">Work &amp; Co</D:displayname>"#;
+        assert_eq!(xml_text(el).as_deref(), Some("Work & Co"));
+        let declared = br#"<?xml version="1.0" encoding="utf-8"?><D:displayname xmlns:D="DAV:">Work</D:displayname>"#;
+        assert_eq!(xml_text(declared).as_deref(), Some("Work"));
+        assert_eq!(xml_text(b"plain").as_deref(), Some("plain"));
+        assert_eq!(xml_text(b"<D:displayname/>"), None);
+    }
 }
