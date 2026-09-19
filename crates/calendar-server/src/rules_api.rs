@@ -8,7 +8,7 @@ use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
     response::IntoResponse,
-    routing::{delete, patch, post},
+    routing::{patch, post},
 };
 use calendar_core::CalendarCapability;
 use calendar_db::{self as db};
@@ -249,6 +249,97 @@ async fn delete_provider(
     Ok(Json(json!({"ok": true})))
 }
 
+/// One provider with its decrypted config (admin-only; the edit modal
+/// pre-fills credentials from this).
+async fn get_provider(
+    State(AppState { pool, crypto, .. }): State<AppState>,
+    headers: HeaderMap,
+    Path(provider_id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
+    let crypto = crypto
+        .as_ref()
+        .ok_or_else(|| AppError::internal("APP_ENCRYPTION_KEY is not set"))?;
+    let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        kind: String,
+        name: String,
+        enabled: bool,
+        config_encrypted: Vec<u8>,
+    }
+    let row: Row = sqlx::query_as(
+        "SELECT kind, name, enabled, config_encrypted FROM notification_providers
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(provider_id)
+    .bind(tenant_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| AppError::from(db::DbError::Sql(e)))?
+    .ok_or(AppError::NotFound)?;
+    let config: Value = serde_json::from_slice(
+        &crypto
+            .decrypt(&row.config_encrypted)
+            .map_err(|e| AppError::internal(e.to_string()))?,
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    Ok(Json(json!({
+        "id": provider_id, "kind": row.kind, "name": row.name,
+        "enabled": row.enabled, "config": config,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderPatch {
+    name: Option<String>,
+    enabled: Option<bool>,
+    config: Option<Value>,
+}
+
+async fn patch_provider(
+    State(AppState { pool, crypto, .. }): State<AppState>,
+    headers: HeaderMap,
+    Path(provider_id): Path<Uuid>,
+    Json(body): Json<ProviderPatch>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    require_admin(&auth)?;
+    require_csrf(&auth, &headers)?;
+    let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
+    let encrypted = match &body.config {
+        Some(config) => {
+            let crypto = crypto
+                .as_ref()
+                .ok_or_else(|| AppError::internal("APP_ENCRYPTION_KEY is not set"))?;
+            Some(
+                crypto
+                    .encrypt(config.to_string().as_bytes())
+                    .map_err(|e| AppError::internal(e.to_string()))?,
+            )
+        }
+        None => None,
+    };
+    sqlx::query(
+        "UPDATE notification_providers SET
+            name = COALESCE($3, name),
+            enabled = COALESCE($4, enabled),
+            config_encrypted = COALESCE($5, config_encrypted),
+            updated_at = now()
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(provider_id)
+    .bind(tenant_id)
+    .bind(body.name)
+    .bind(body.enabled)
+    .bind(encrypted)
+    .execute(&pool)
+    .await
+    .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
+    Ok(Json(json!({"ok": true})))
+}
+
 #[derive(sqlx::FromRow)]
 struct RuleListRow {
     id: Uuid,
@@ -374,7 +465,12 @@ pub fn router() -> axum::Router<crate::AppState> {
             "/api/notification-providers",
             post(create_provider).get(list_providers),
         )
-        .route("/api/notification-providers/{id}", delete(delete_provider))
+        .route(
+            "/api/notification-providers/{id}",
+            axum::routing::get(get_provider)
+                .patch(patch_provider)
+                .delete(delete_provider),
+        )
         .route("/api/rules", post(create_rule).get(list_rules))
         .route("/api/rules/{id}", patch(update_rule).delete(delete_rule))
 }
