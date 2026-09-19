@@ -578,7 +578,6 @@ async fn send_push(
     body: Option<String>,
     data: Value,
 ) -> Result<(), calendar_notify::NotifyError> {
-    use base64::Engine;
     let Some(user_id) = user_id else {
         return Err(calendar_notify::NotifyError::Config(
             "push row without user".into(),
@@ -594,7 +593,9 @@ async fn send_push(
         "body": body.unwrap_or_default(),
         "url": std::env::var("APP_PUBLIC_URL").unwrap_or_default(),
     });
-    let raw = base64::engine::general_purpose::STANDARD.encode(payload.to_string());
+    // The service worker does `event.data.json()`: send raw JSON bytes, not a
+    // base64 string of them.
+    let raw = payload.to_string();
     let _ = &data;
     let subs: Vec<(Uuid, String, String, String)> = sqlx::query_as(
         "SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1",
