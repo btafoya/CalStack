@@ -54,17 +54,22 @@ fn known_tz(tzid: Option<&str>) -> Option<Tz> {
     tzid.and_then(|tz| tz.parse::<Tz>().ok())
 }
 
-/// DTSTART/DTEND/RECURRENCE-ID property: `VALUE=DATE` for all-day, local
-/// wall-clock with TZID for known zones, UTC with `Z` otherwise.
+/// DTSTART/DTEND/RECURRENCE-ID property: `VALUE=DATE` for all-day, the bare
+/// wall clock for floating, local wall-clock with TZID for known zones, UTC
+/// with `Z` otherwise.
 fn date_time_property(
     key: &str,
     tzid: Option<&str>,
     all_day: bool,
+    floating: bool,
     at: DateTime<Utc>,
     date: NaiveDate,
 ) -> icalendar::Property {
+    let tzid = tzid.filter(|_| !floating);
     let mut prop = if all_day {
         icalendar::Property::new(key, date.format("%Y%m%d").to_string())
+    } else if floating {
+        icalendar::Property::new(key, at.format("%Y%m%dT%H%M%S").to_string())
     } else if let Some(tz) = known_tz(tzid) {
         let local = at.with_timezone(&tz).format("%Y%m%dT%H%M%S").to_string();
         icalendar::Property::new(key, local)
@@ -85,16 +90,13 @@ fn recurrence_id_property(event: &EventRow) -> Option<icalendar::Property> {
         prop.add_parameter("VALUE", "DATE");
         Some(prop)
     } else if let Some(naive) = event.recurrence_id {
-        let mut prop = match known_tz(event.tzid.as_deref()) {
-            Some(_) => {
-                icalendar::Property::new("RECURRENCE-ID", naive.format("%Y%m%dT%H%M%S").to_string())
-            }
-            None => icalendar::Property::new(
-                "RECURRENCE-ID",
-                naive.format("%Y%m%dT%H%M%SZ").to_string(),
-            ),
+        let tz = known_tz(event.tzid.as_deref()).filter(|_| !event.floating);
+        let mut prop = if tz.is_some() || event.floating {
+            icalendar::Property::new("RECURRENCE-ID", naive.format("%Y%m%dT%H%M%S").to_string())
+        } else {
+            icalendar::Property::new("RECURRENCE-ID", naive.format("%Y%m%dT%H%M%SZ").to_string())
         };
-        if let Some(tz) = known_tz(event.tzid.as_deref()) {
+        if let Some(tz) = tz {
             prop.add_parameter("TZID", tz.name());
         }
         Some(prop)
@@ -149,6 +151,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
                     "DTSTART",
                     event.tzid.as_deref(),
                     false,
+                    event.floating,
                     at,
                     today(),
                 ));
@@ -158,6 +161,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
                     "DTSTART",
                     event.tzid.as_deref(),
                     true,
+                    false,
                     Utc::now(),
                     date,
                 ));
@@ -169,6 +173,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
                 "DTEND",
                 event.tzid.as_deref(),
                 false,
+                event.floating,
                 at,
                 today(),
             ));
@@ -178,6 +183,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
                 "DTEND",
                 event.tzid.as_deref(),
                 true,
+                false,
                 Utc::now(),
                 date,
             ));
@@ -186,11 +192,11 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
             ev.add_property("RRULE", rrule);
         }
         if event.rdate.as_array().is_some_and(|a| !a.is_empty()) {
-            let values = json_points_to_ics(&event.rdate, event.tzid.as_deref());
+            let values = json_points_to_ics(&event.rdate, event.floating);
             ev.add_property("RDATE", &values);
         }
         if event.exdate.as_array().is_some_and(|a| !a.is_empty()) {
-            let values = json_points_to_ics(&event.exdate, event.tzid.as_deref());
+            let values = json_points_to_ics(&event.exdate, event.floating);
             ev.add_property("EXDATE", &values);
         }
         if let Some(recurrence) = recurrence_id_property(event) {
@@ -297,8 +303,12 @@ fn serialize_alarm(
     icalendar::EventLike::alarm(ev, valarm);
 }
 
-fn json_points_to_ics(value: &serde_json::Value, tzid: Option<&str>) -> String {
-    let _ = tzid;
+fn json_points_to_ics(value: &serde_json::Value, floating: bool) -> String {
+    let time_format = if floating {
+        "%Y%m%dT%H%M%S"
+    } else {
+        "%Y%m%dT%H%M%SZ"
+    };
     value
         .as_array()
         .map(|arr| {
@@ -306,7 +316,7 @@ fn json_points_to_ics(value: &serde_json::Value, tzid: Option<&str>) -> String {
                 .filter_map(|v| v.as_str())
                 .map(|s| {
                     if let Ok(at) = DateTime::parse_from_rfc3339(s) {
-                        at.format("%Y%m%dT%H%M%SZ").to_string()
+                        at.format(time_format).to_string()
                     } else if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
                         d.format("%Y%m%d").to_string()
                     } else {
@@ -339,6 +349,8 @@ pub struct ParsedEvent {
     pub duration_secs: Option<i64>,
     pub tzid: Option<String>,
     pub all_day: bool,
+    /// DTSTART carried neither Z nor TZID; times are the wall clock as if UTC.
+    pub floating: bool,
     pub rrule: Option<String>,
     pub rdate: Vec<DateOrDateTime>,
     pub exdate: Vec<DateOrDateTime>,
@@ -440,6 +452,10 @@ fn parse_event(event: icalendar::Event) -> Result<ParsedEvent, IcsError> {
     {
         parsed.tzid = Some(tzid.clone());
     }
+    parsed.floating = matches!(
+        points,
+        DatePerhapsTime::DateTime(icalendar::CalendarDateTime::Floating(_))
+    );
     let Some(point) = points_to_core(&points) else {
         return Err(IcsError::MissingDtstart);
     };
@@ -698,6 +714,10 @@ fn instant_in_zone(tz: Tz, naive: NaiveDateTime) -> Option<DateTime<Utc>> {
 fn points_to_core(point: &DatePerhapsTime) -> Option<DateOrDateTime> {
     match point {
         DatePerhapsTime::Date(date) => Some(DateOrDateTime::AllDay(*date)),
+        // Floating: the wall clock is stored as if it were UTC (events.floating).
+        DatePerhapsTime::DateTime(icalendar::CalendarDateTime::Floating(naive)) => {
+            Some(DateOrDateTime::Timed(naive.and_utc()))
+        }
         DatePerhapsTime::DateTime(dt) => dt.try_into_utc().map(DateOrDateTime::Timed),
     }
 }
@@ -808,6 +828,51 @@ END:VCALENDAR\r\n";
     }
 
     #[test]
+    fn floating_times_round_trip_without_zone() {
+        let ics = "BEGIN:VCALENDAR\r\nPRODID:-//x//EN\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+UID:float-1\r\nDTSTAMP:20260911T120000Z\r\nDTSTART:20260915T090000\r\n\
+DTEND:20260915T100000\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEXDATE:20260916T090000\r\n\
+SUMMARY:Floating\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:float-1\r\nDTSTAMP:20260911T120000Z\r\n\
+RECURRENCE-ID:20260917T090000\r\nDTSTART:20260917T110000\r\nDTEND:20260917T120000\r\n\
+SUMMARY:Moved\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let parsed = parse_ics(ics).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.iter().all(|e| e.floating && e.tzid.is_none()));
+        let rows: Vec<ExportRow> = parsed
+            .iter()
+            .map(|p| {
+                let mut row = sample_event_row();
+                row.uid = p.uid.clone();
+                row.tzid = None;
+                row.floating = p.floating;
+                row.starts_at = p.starts_at;
+                row.ends_at = p.ends_at;
+                row.rrule = p.rrule.clone();
+                row.recurrence_id = p.recurrence_id;
+                row.master_event_id = p.recurrence_id.map(|_| uuid::Uuid::new_v4());
+                row.rdate = serde_json::json!([]);
+                row.exdate = serde_json::json!(
+                    p.exdate
+                        .iter()
+                        .map(|d| match d {
+                            DateOrDateTime::Timed(at) => at.to_rfc3339(),
+                            DateOrDateTime::AllDay(d) => d.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                );
+                ExportRow::from((row, vec![]))
+            })
+            .collect();
+        let out = events_to_ics(&rows);
+        assert!(out.contains("DTSTART:20260915T090000\r\n"), "{out}");
+        assert!(out.contains("DTEND:20260915T100000\r\n"), "{out}");
+        assert!(out.contains("EXDATE:20260916T090000\r\n"), "{out}");
+        assert!(out.contains("RECURRENCE-ID:20260917T090000\r\n"), "{out}");
+        assert!(!out.contains("TZID"), "{out}");
+    }
+
+    #[test]
     fn vtodo_rejected() {
         let todo = "BEGIN:VCALENDAR\r\nPRODID:-//x//EN\r\nVERSION:2.0\r\n\
 BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
@@ -820,6 +885,7 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
             id: uuid::Uuid::new_v4(),
             calendar_id: uuid::Uuid::new_v4(),
             uid: "round-trip-uid".into(),
+            href: None,
             master_event_id: None,
             recurrence_id: None,
             recurrence_id_date: None,
@@ -831,6 +897,7 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
             duration: None,
             tzid: Some("America/Denver".into()),
             all_day: false,
+            floating: false,
             rrule: Some("FREQ=DAILY;COUNT=3".into()),
             rdate: serde_json::json!([]),
             exdate: serde_json::json!([]),

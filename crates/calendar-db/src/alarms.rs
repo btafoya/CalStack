@@ -32,13 +32,13 @@ impl AlarmRow {
     }
 }
 
-/// Replaces all alarms of an event (VALARM set is fully owned by its resource).
+/// Replaces all alarms of an event (VALARM set is fully owned by its resource)
+/// inside the caller's transaction.
 pub async fn replace_alarms(
-    pool: &PgPool,
+    tx: &mut sqlx::PgConnection,
     event_id: Uuid,
     alarms: &[NewAlarm],
 ) -> Result<(), DbError> {
-    let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM event_alarms WHERE event_id = $1")
         .bind(event_id)
         .execute(&mut *tx)
@@ -70,7 +70,6 @@ pub async fn replace_alarms(
         .execute(&mut *tx)
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 

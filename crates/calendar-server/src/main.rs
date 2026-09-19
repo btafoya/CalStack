@@ -4,6 +4,7 @@
 mod admin_api;
 mod auth;
 mod calendars_api;
+mod capture;
 mod categories_api;
 mod contacts_api;
 mod dav;
@@ -15,6 +16,7 @@ mod places;
 mod rules_api;
 mod scheduling;
 mod sharing_api;
+mod xml;
 
 pub(crate) use auth::{require_admin, require_csrf, resolve_auth, set_session_cookie};
 pub(crate) use calendars_api::require_capability;
@@ -186,7 +188,7 @@ fn security_headers() -> tower_http::set_header::SetResponseHeaderLayer<axum::ht
 }
 
 fn build_router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .merge(calendar_web::router())
         .merge(mfa::router())
         .merge(extras::router())
@@ -210,14 +212,14 @@ fn build_router(state: AppState) -> Router {
         .route("/calendars/{*rest}", axum::routing::any(dav::entry))
         .route(
             "/.well-known/caldav",
-            get(|| async { axum::response::Redirect::permanent("/calendars/") }),
+            axum::routing::any(|| async { axum::response::Redirect::permanent("/calendars/") }),
         )
         .route("/contacts", axum::routing::any(dav::entry_carddav))
         .route("/contacts/", axum::routing::any(dav::entry_carddav))
         .route("/contacts/{*rest}", axum::routing::any(dav::entry_carddav))
         .route(
             "/.well-known/carddav",
-            get(|| async { axum::response::Redirect::permanent("/contacts/") }),
+            axum::routing::any(|| async { axum::response::Redirect::permanent("/contacts/") }),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -228,12 +230,24 @@ fn build_router(state: AppState) -> Router {
             auth::token_scope_guard,
         ))
         .layer(security_headers())
-        .with_state(state)
+        .with_state(state);
+    // Outermost, so requests the guards reject are captured too.
+    if capture::dir().is_some() {
+        router.layer(axum::middleware::from_fn(capture::middleware))
+    } else {
+        router
+    }
 }
 
 // ============ commands ============
 
 async fn serve(cfg: &Config) -> Result<()> {
+    if let Some(dir) = capture::dir() {
+        tracing::warn!(
+            dir = %dir.display(),
+            "DAV_CAPTURE_DIR set: DAV requests, including calendar content, are written to disk (dev only)"
+        );
+    }
     let pool = db::connect(&cfg.database_url, cfg.database_max_connections)
         .await
         .context("connecting to PostgreSQL")?;

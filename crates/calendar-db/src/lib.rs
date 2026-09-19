@@ -150,6 +150,7 @@ pub struct CalendarRow {
     pub color: Option<String>,
     pub timezone: Option<String>,
     pub order_index: i32,
+    pub components: Vec<String>, // VEVENT | VTODO | VJOURNAL
     pub ctag: i64,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
@@ -281,6 +282,7 @@ pub struct CalendarUpdate {
     pub color: Option<String>,
     pub timezone: Option<String>,
     pub order_index: Option<i32>,
+    pub components: Option<Vec<String>>,
 }
 
 pub async fn update_calendar(
@@ -295,6 +297,7 @@ pub async fn update_calendar(
             color = COALESCE($4, color),
             timezone = COALESCE($5, timezone),
             order_index = COALESCE($6, order_index),
+            components = COALESCE($7, components),
             updated_at = now()
          WHERE id = $1 AND deleted_at IS NULL
          RETURNING *",
@@ -305,6 +308,7 @@ pub async fn update_calendar(
     .bind(changes.color.as_deref())
     .bind(changes.timezone.as_deref())
     .bind(changes.order_index)
+    .bind(changes.components.as_deref())
     .fetch_optional(pool)
     .await?
     .ok_or(DbError::NotFound)
@@ -723,6 +727,7 @@ pub struct EventRow {
     pub id: Uuid,
     pub calendar_id: Uuid,
     pub uid: String,
+    pub href: Option<String>, // client-chosen filename; NULL = "{id}.ics"
     pub master_event_id: Option<Uuid>,
     pub recurrence_id: Option<chrono::NaiveDateTime>,
     pub recurrence_id_date: Option<chrono::NaiveDate>,
@@ -734,6 +739,8 @@ pub struct EventRow {
     pub duration: Option<sqlx::postgres::types::PgInterval>,
     pub tzid: Option<String>,
     pub all_day: bool,
+    /// Wall clock stored as if UTC; exported without Z or TZID.
+    pub floating: bool,
     pub rrule: Option<String>,
     pub rdate: serde_json::Value,
     pub exdate: serde_json::Value,
@@ -760,12 +767,34 @@ pub struct EventRow {
 
 /// Writes one sync-visible change and bumps the calendar CTag; callers must
 /// run this inside the same transaction as the resource mutation.
+///
+/// A RECURRENCE-ID override is part of its master's CalDAV resource: the
+/// master's etag is refreshed and the master is reported as updated instead.
 async fn append_change(
     tx: &mut sqlx::PgConnection,
     calendar_id: Uuid,
     resource_id: Uuid,
     operation: &str,
 ) -> Result<(), DbError> {
+    let master = sqlx::query_as::<_, EventRow>(
+        "UPDATE events SET updated_at = now()
+         WHERE id = (SELECT master_event_id FROM events WHERE id = $1)
+         RETURNING *",
+    )
+    .bind(resource_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (resource_id, operation) = match master {
+        Some(master) => {
+            sqlx::query("UPDATE events SET etag = $2 WHERE id = $1")
+                .bind(master.id)
+                .bind(event_etag(&master))
+                .execute(&mut *tx)
+                .await?;
+            (master.id, "updated")
+        }
+        None => (resource_id, operation),
+    };
     sqlx::query("INSERT INTO change_log (calendar_id, resource_id, operation) VALUES ($1, $2, $3)")
         .bind(calendar_id)
         .bind(resource_id)
@@ -1103,6 +1132,35 @@ pub async fn delete_event(
     Ok(())
 }
 
+impl EventRow {
+    /// The filename this event is served under over CalDAV.
+    pub fn resource_name(&self) -> String {
+        self.href
+            .clone()
+            .unwrap_or_else(|| format!("{}.ics", self.id))
+    }
+}
+
+/// The live event served under `name` in a calendar (CalDAV URL last segment).
+pub async fn get_event_by_href(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    name: &str,
+) -> Result<(EventRow, String), DbError> {
+    let event = sqlx::query_as::<_, EventRow>(
+        "SELECT * FROM events
+         WHERE calendar_id = $1 AND COALESCE(href, id::text || '.ics') = $2
+           AND deleted_at IS NULL AND master_event_id IS NULL",
+    )
+    .bind(calendar_id)
+    .bind(name)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(DbError::NotFound)?;
+    let etag = etag_for(event.calendar_id, event.sequence, event.updated_at);
+    Ok((event, etag))
+}
+
 pub async fn get_event(pool: &PgPool, event_id: Uuid) -> Result<(EventRow, String), DbError> {
     let event =
         sqlx::query_as::<_, EventRow>("SELECT * FROM events WHERE id = $1 AND deleted_at IS NULL")
@@ -1181,7 +1239,8 @@ pub async fn list_exceptions(pool: &PgPool, master_ids: &[Uuid]) -> Result<Vec<E
     sqlx::query_as::<_, EventRow>(
         "SELECT e.* FROM events e
          JOIN calendars c ON c.id = e.calendar_id AND c.deleted_at IS NULL
-         WHERE e.master_event_id = ANY($1) AND e.deleted_at IS NULL",
+         WHERE e.master_event_id = ANY($1) AND e.deleted_at IS NULL
+         ORDER BY e.recurrence_id, e.recurrence_id_date",
     )
     .bind(master_ids)
     .fetch_all(pool)

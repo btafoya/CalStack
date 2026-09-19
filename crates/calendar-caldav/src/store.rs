@@ -14,6 +14,7 @@ pub(crate) fn upsert_data(parsed: &crate::ParsedEvent) -> IcsEventUpsert {
         duration_secs: parsed.duration_secs,
         tzid: parsed.tzid.clone(),
         all_day: parsed.all_day,
+        floating: parsed.floating,
         rrule: parsed.rrule.clone(),
         rdate: points_to_json(&parsed.rdate),
         exdate: points_to_json(&parsed.exdate),
@@ -33,8 +34,9 @@ pub(crate) fn upsert_data(parsed: &crate::ParsedEvent) -> IcsEventUpsert {
         sequence: parsed.sequence,
         recurrence_id: parsed.recurrence_id,
         recurrence_id_date: parsed.recurrence_id_date,
-        organizer_email: parsed.organizer_email.clone(),
+        organizer_email: parsed.organizer_email.clone().unwrap_or_default(),
         organizer_name: parsed.organizer_name.clone(),
+        organizer_user_id: None, // set by the PUT path, which knows the writer
         alarms: parsed
             .alarms
             .iter()
@@ -100,7 +102,7 @@ pub fn sync_collection_xml(
         out.push_str(&format!(
             "<D:href>{}/{}</D:href>",
             xml_escape(base),
-            change.href_suffix
+            xml_escape(&percent_encode_segment(&change.href_suffix))
         ));
         if change.deleted {
             out.push_str("<D:status>HTTP/1.1 404 Not Found</D:status>");
@@ -119,6 +121,19 @@ pub fn sync_collection_xml(
     out
 }
 
+/// One URL path segment: everything but unreserved characters is %XX-encoded.
+fn percent_encode_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -128,6 +143,20 @@ fn xml_escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hrefs_are_percent_encoded() {
+        let xml = sync_collection_xml(
+            "/calendars/alice/work",
+            &[SyncChange {
+                href_suffix: "my task@x y.ics".into(),
+                etag: None,
+                deleted: true,
+            }],
+            1,
+        );
+        assert!(xml.contains("/calendars/alice/work/my%20task%40x%20y.ics"));
+    }
 
     #[test]
     fn sync_xml_shape() {

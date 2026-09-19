@@ -126,7 +126,6 @@ async fn retention_purge(pool: &sqlx::PgPool, days: i64) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     for query in [
         "DELETE FROM sessions WHERE expires_at < now() - interval '7 days'",
-        "DELETE FROM webauthn_challenges WHERE expires_at < now()",
         "DELETE FROM notifications WHERE read_at IS NOT NULL AND created_at < now() - interval '30 days'",
     ] {
         sqlx::query(query)

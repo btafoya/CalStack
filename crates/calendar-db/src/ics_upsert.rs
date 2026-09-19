@@ -1,8 +1,10 @@
-//! CalDAV PUT storage: create/update/delete event rows from parsed iCalendar
-//! data (one resource = one VEVENT). Kept here so calendar-caldav only maps
+//! CalDAV PUT storage. A resource is a series (RFC 4791 4.1): one master
+//! VEVENT plus its RECURRENCE-ID overrides, all sharing a UID. A PUT replaces
+//! the whole series in one transaction. Kept here so calendar-caldav only maps
 //! wire types onto it.
 
 use chrono::{DateTime, Utc};
+use sqlx::postgres::types::PgInterval;
 use uuid::Uuid;
 
 use super::{DbError, EventRow, NewLocation};
@@ -19,6 +21,7 @@ pub struct IcsEventUpsert {
     pub duration_secs: Option<i64>,
     pub tzid: Option<String>,
     pub all_day: bool,
+    pub floating: bool,
     pub rrule: Option<String>,
     pub rdate: serde_json::Value,
     pub exdate: serde_json::Value,
@@ -35,8 +38,11 @@ pub struct IcsEventUpsert {
     pub sequence: Option<i32>,
     pub recurrence_id: Option<chrono::NaiveDateTime>,
     pub recurrence_id_date: Option<chrono::NaiveDate>,
-    pub organizer_email: Option<String>,
+    /// NOT NULL in the table: the caller defaults an organizer-less VEVENT to the writer.
+    pub organizer_email: String,
     pub organizer_name: Option<String>,
+    /// Set on insert only: the writer, when the organizer is the writer.
+    pub organizer_user_id: Option<Uuid>,
     pub attendees: Vec<IcsAttendee>,
     pub alarms: Vec<super::alarms::NewAlarm>,
 }
@@ -73,59 +79,177 @@ async fn resolve_location(
     }
 }
 
-/// Creates the event row. When `resource_id` is given (the CalDAV URL's
-/// uuid) the row id matches the URL; conflicts on (calendar, uid,
-/// occurrence) surface as DbError::Conflict.
-#[allow(clippy::too_many_arguments)]
-pub async fn create_ics_event_inner(
+fn interval(secs: Option<i64>) -> Option<PgInterval> {
+    secs.map(|s| PgInterval {
+        months: 0,
+        days: 0,
+        microseconds: s * 1_000_000,
+    })
+}
+
+/// Stores one PUT resource: the master (`overrides` empty for a plain event)
+/// and its overrides, atomically, with a single change_log entry for the
+/// resource. Returns the master row (its etag already refreshed) and whether
+/// the resource is new to the client (created, or resurrected after a delete).
+///
+/// `href` is the filename the client PUT to. Overrides absent from the PUT
+/// are removed. A UID that is live at another filename is a Conflict.
+pub async fn put_series(
     pool: &sqlx::PgPool,
     calendar_id: Uuid,
     created_by: Uuid,
-    organizer_user_id: Option<Uuid>,
-    resource_id: Option<Uuid>,
+    href: &str,
+    master: &IcsEventUpsert,
+    overrides: &[IcsEventUpsert],
+) -> Result<(EventRow, bool), DbError> {
+    let master_location = resolve_location(pool, &master.location_text).await?;
+    let mut override_locations = Vec::with_capacity(overrides.len());
+    for o in overrides {
+        override_locations.push(resolve_location(pool, &o.location_text).await?);
+    }
+    // A canonical "{uuid}.ics" URL keeps id == URL uuid and needs no stored
+    // href; any other filename is remembered as the client sent it.
+    let canonical = href
+        .strip_suffix(".ics")
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .filter(|u| format!("{u}.ics") == href);
+
+    let mut tx = pool.begin().await?;
+    let at_href: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM events
+         WHERE calendar_id = $1 AND deleted_at IS NULL
+           AND master_event_id IS NULL AND recurrence_id IS NULL AND recurrence_id_date IS NULL
+           AND COALESCE(href, id::text || '.ics') = $2
+         FOR UPDATE",
+    )
+    .bind(calendar_id)
+    .bind(href)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let by_uid: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT id, deleted_at FROM events
+         WHERE calendar_id = $1 AND uid = $2
+           AND master_event_id IS NULL AND recurrence_id IS NULL AND recurrence_id_date IS NULL
+         FOR UPDATE",
+    )
+    .bind(calendar_id)
+    .bind(&master.uid)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (existing, resurrect) = match (at_href, by_uid) {
+        (Some(id), _) => (Some(id), false),
+        (None, Some((_, None))) => {
+            return Err(DbError::Conflict(
+                "event uid already exists at another resource".into(),
+            ));
+        }
+        (None, Some((id, Some(_)))) => (Some(id), true), // same UID PUT again after a delete
+        (None, None) => (None, false),
+    };
+    let created = existing.is_none() || resurrect;
+    let mut row = match existing {
+        Some(id) => {
+            update_master(
+                &mut tx,
+                id,
+                resurrect.then_some(href),
+                master,
+                master_location,
+            )
+            .await?
+        }
+        None => {
+            insert_row(
+                &mut tx,
+                calendar_id,
+                created_by,
+                canonical.unwrap_or_else(Uuid::new_v4),
+                canonical.is_none().then_some(href),
+                None,
+                master_location,
+                master,
+            )
+            .await?
+        }
+    };
+    sqlx::query("DELETE FROM events WHERE master_event_id = $1")
+        .bind(row.id)
+        .execute(&mut *tx)
+        .await?;
+    for (data, location_id) in overrides.iter().zip(override_locations) {
+        insert_row(
+            &mut tx,
+            calendar_id,
+            created_by,
+            Uuid::new_v4(),
+            None,
+            Some(row.id),
+            location_id,
+            data,
+        )
+        .await?;
+    }
+    row.etag = super::event_etag(&row);
+    sqlx::query("UPDATE events SET etag = $2 WHERE id = $1")
+        .bind(row.id)
+        .bind(&row.etag)
+        .execute(&mut *tx)
+        .await?;
+    super::append_change(
+        &mut tx,
+        calendar_id,
+        row.id,
+        if created { "created" } else { "updated" },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((row, created))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_row(
+    tx: &mut sqlx::PgConnection,
+    calendar_id: Uuid,
+    created_by: Uuid,
+    id: Uuid,
+    href: Option<&str>,
+    master_id: Option<Uuid>,
+    location_id: Option<Uuid>,
     data: &IcsEventUpsert,
 ) -> Result<EventRow, DbError> {
-    let location_id = resolve_location(pool, &data.location_text).await?;
-    let mut tx = pool.begin().await?;
-    let event = sqlx::query_as::<_, EventRow>(
+    let row = sqlx::query_as::<_, EventRow>(
         "INSERT INTO events (
             id, calendar_id, uid, master_event_id, recurrence_id, recurrence_id_date,
             starts_at, ends_at, start_date, end_date, duration, tzid, all_day,
             rrule, rdate, exdate,
             summary, description_html, description_text, url,
             status, priority, class, transp, categories, location_id,
-            organizer_user_id, organizer_email, organizer_name, created_by
+            organizer_user_id, organizer_email, organizer_name, created_by, href, floating
          ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $9, $10, $11, $12,
             $13, $14, $15,
             $16, $17, $18, $19,
             $20, $21, $22, $23, $24, $25,
-            $26, $27, $28, $29, $30
+            $26, $27, $28, $29, $30, $31, $32
          )
          RETURNING *",
     )
-    .bind(resource_id.unwrap_or_else(Uuid::new_v4))
+    .bind(id)
     .bind(calendar_id)
     .bind(&data.uid)
-    .bind(master_event_id(pool, calendar_id, data).await?)
+    .bind(master_id)
     .bind(data.recurrence_id)
     .bind(data.recurrence_id_date)
     .bind(data.starts_at)
     .bind(data.ends_at)
     .bind(data.start_date)
     .bind(data.end_date)
-    .bind(
-        data.duration_secs
-            .map(|s| sqlx::postgres::types::PgInterval {
-                months: 0,
-                days: 0,
-                microseconds: s * 1_000_000,
-            }),
-    )
+    .bind(interval(data.duration_secs))
     .bind(&data.tzid)
     .bind(data.all_day)
-    .bind(&data.rrule)
+    // Overrides never recur (CHECK); a stray RRULE on one is ignored.
+    .bind(data.rrule.as_ref().filter(|_| master_id.is_none()))
     .bind(&data.rdate)
     .bind(&data.exdate)
     .bind(data.summary.as_deref().unwrap_or(""))
@@ -138,10 +262,12 @@ pub async fn create_ics_event_inner(
     .bind(&data.transp)
     .bind(&data.categories)
     .bind(location_id)
-    .bind(organizer_user_id)
+    .bind(data.organizer_user_id)
     .bind(&data.organizer_email)
     .bind(&data.organizer_name)
     .bind(created_by)
+    .bind(href)
+    .bind(data.floating)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
@@ -150,61 +276,22 @@ pub async fn create_ics_event_inner(
         }
         other => other.into(),
     })?;
-    write_attendees(&mut tx, event.id, &data.attendees).await?;
-    let etag = super::event_etag(&event);
-    sqlx::query("UPDATE events SET etag = $2 WHERE id = $1")
-        .bind(event.id)
-        .bind(&etag)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "INSERT INTO change_log (calendar_id, resource_id, operation) VALUES ($1, $2, 'created')",
-    )
-    .bind(calendar_id)
-    .bind(event.id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE calendars SET ctag = ctag + 1 WHERE id = $1")
-        .bind(calendar_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    if !data.alarms.is_empty() {
-        super::alarms::replace_alarms(pool, event.id, &data.alarms).await?;
-    }
-    Ok(event)
+    write_attendees(tx, row.id, &data.attendees).await?;
+    super::alarms::replace_alarms(tx, row.id, &data.alarms).await?;
+    Ok(row)
 }
 
-/// Replaces the full row content of an existing resource (PUT to a known URL).
-pub async fn update_ics_event(
-    pool: &sqlx::PgPool,
-    event_id: Uuid,
-    if_match: Option<&str>,
+/// Replaces the full content of an existing master (a PUT replaces the whole
+/// resource, so an absent LOCATION clears it, unlike the partial-patch API).
+/// `href` is Some only when a soft-deleted master is brought back.
+async fn update_master(
+    tx: &mut sqlx::PgConnection,
+    id: Uuid,
+    href: Option<&str>,
     data: &IcsEventUpsert,
+    location_id: Option<Uuid>,
 ) -> Result<EventRow, DbError> {
-    let mut tx = pool.begin().await?;
-    let current = sqlx::query_as::<_, EventRow>(
-        "SELECT * FROM events WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-    )
-    .bind(event_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(DbError::NotFound)?;
-    if let Some(expected) = if_match
-        && !current.etag.is_empty()
-        && !current
-            .etag
-            .trim_matches('"')
-            .eq(expected.trim_matches('"'))
-    {
-        return Err(DbError::Conflict("etag mismatch".into()));
-    }
-    // A PUT replaces the whole resource, so an absent LOCATION clears it
-    // (unlike the partial-patch API, which leaves fields it doesn't mention
-    // untouched).
-    let location_id = resolve_location(pool, &data.location_text).await?;
-    // Recurring masters: RRULE updates are fine; exceptions never carry RRULE.
-    let event = sqlx::query_as::<_, EventRow>(
+    let row = sqlx::query_as::<_, EventRow>(
         "UPDATE events SET
             uid = $2,
             starts_at = $3, ends_at = $4, start_date = $5, end_date = $6,
@@ -215,24 +302,20 @@ pub async fn update_ics_event(
             organizer_email = $22, organizer_name = $23,
             sequence = GREATEST($24, sequence) + 1,
             location_id = $25,
+            floating = $26,
+            href = COALESCE($27, href),
+            deleted_at = NULL,
             updated_at = now()
          WHERE id = $1
          RETURNING *",
     )
-    .bind(event_id)
+    .bind(id)
     .bind(&data.uid)
     .bind(data.starts_at)
     .bind(data.ends_at)
     .bind(data.start_date)
     .bind(data.end_date)
-    .bind(
-        data.duration_secs
-            .map(|s| sqlx::postgres::types::PgInterval {
-                months: 0,
-                days: 0,
-                microseconds: s * 1_000_000,
-            }),
-    )
+    .bind(interval(data.duration_secs))
     .bind(&data.tzid)
     .bind(data.all_day)
     .bind(&data.rrule)
@@ -247,59 +330,27 @@ pub async fn update_ics_event(
     .bind(&data.class)
     .bind(&data.transp)
     .bind(&data.categories)
-    .bind(data.organizer_email.clone())
+    .bind(&data.organizer_email)
     .bind(&data.organizer_name)
     .bind(data.sequence.unwrap_or(0))
     .bind(location_id)
+    .bind(data.floating)
+    .bind(href)
     .fetch_one(&mut *tx)
-    .await?;
-    sqlx::query("DELETE FROM event_attendees WHERE event_id = $1")
-        .bind(event_id)
-        .execute(&mut *tx)
-        .await?;
-    write_attendees(&mut tx, event_id, &data.attendees).await?;
-    let etag = super::event_etag(&event);
-    sqlx::query("UPDATE events SET etag = $2 WHERE id = $1")
-        .bind(event.id)
-        .bind(&etag)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "INSERT INTO change_log (calendar_id, resource_id, operation) VALUES ($1, $2, 'updated')",
-    )
-    .bind(event.calendar_id)
-    .bind(event.id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE calendars SET ctag = ctag + 1 WHERE id = $1")
-        .bind(event.calendar_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    super::alarms::replace_alarms(pool, event.id, &data.alarms).await?;
-    Ok(event)
-}
-
-/// The recurring master this parsed exception belongs to (same uid, no
-/// master itself). PUT of an exception to a series without the master is
-/// rejected.
-async fn master_event_id(
-    pool: &sqlx::PgPool,
-    calendar_id: Uuid,
-    data: &IcsEventUpsert,
-) -> Result<Option<Uuid>, DbError> {
-    if data.recurrence_id.is_none() && data.recurrence_id_date.is_none() {
-        return Ok(None);
-    }
-    sqlx::query_scalar(
-        "SELECT id FROM events
-         WHERE calendar_id = $1 AND uid = $2 AND master_event_id IS NULL AND deleted_at IS NULL",
-    )
-    .bind(calendar_id)
-    .bind(&data.uid)
-    .fetch_optional(pool)
     .await
-    .map_err(Into::into)
+    .map_err(|e| match e {
+        sqlx::Error::Database(db) if db.is_unique_violation() => {
+            DbError::Conflict("event uid already exists".into())
+        }
+        other => other.into(),
+    })?;
+    sqlx::query("DELETE FROM event_attendees WHERE event_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    write_attendees(tx, id, &data.attendees).await?;
+    super::alarms::replace_alarms(tx, id, &data.alarms).await?;
+    Ok(row)
 }
 
 async fn write_attendees(

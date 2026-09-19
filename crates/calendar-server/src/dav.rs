@@ -53,6 +53,24 @@ pub(crate) async fn entry(
         Ok(bytes) => bytes,
         Err(_) => return (StatusCode::BAD_REQUEST, "bad request").into_response(),
     };
+    let creds = DavAuth {
+        user: auth.user.clone(),
+    };
+
+    // A PUT may only carry components its collection allows (RFC 4791
+    // supported-calendar-component precondition).
+    if method == axum::http::Method::PUT
+        && let Some((calendar, _)) = calendar_at(&pool, &creds, collection_of(&path)).await
+        && body_components(&String::from_utf8_lossy(&bytes))
+            .any(|kind| !calendar.components.iter().any(|c| c == kind))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
+            COMPONENT_ERROR_BODY,
+        )
+            .into_response();
+    }
 
     // ADR-011: PUT of a VTODO is rejected with a CalDAV error body.
     if method == axum::http::Method::PUT
@@ -63,7 +81,7 @@ pub(crate) async fn entry(
         return (
             StatusCode::FORBIDDEN,
             [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
-            VTODO_ERROR_BODY,
+            COMPONENT_ERROR_BODY,
         )
             .into_response();
     }
@@ -96,15 +114,165 @@ pub(crate) async fn entry(
         }
     }
 
+    // dav-server ignores the MKCALENDAR body; apply displayname, description
+    // and component set once it has created the collection.
+    let mkcalendar_body =
+        (method.as_str() == "MKCALENDAR").then(|| String::from_utf8_lossy(&bytes).into_owned());
     let request = axum::http::Request::from_parts(parts, Body::from(bytes));
     let response = dav
-        .handle_guarded(
-            request,
-            "/calendars/".to_string(),
-            DavAuth { user: auth.user },
-        )
+        .handle_guarded(request, "/calendars/".to_string(), creds.clone())
         .await;
-    convert(response)
+    if let Some(body) = mkcalendar_body
+        && response.status() == StatusCode::CREATED
+    {
+        apply_mkcalendar(&pool, &creds, &path, &body).await;
+    }
+    let response = convert(response);
+    if method.as_str() == "PROPFIND" {
+        return rewrite_component_sets(&pool, &creds, response).await;
+    }
+    response
+}
+
+/// Directory part of a resource path: "/calendars/u/slug/x.ics" -> "/calendars/u/slug".
+fn collection_of(path: &str) -> &str {
+    path.trim_end_matches('/')
+        .rsplit_once('/')
+        .map_or("", |(dir, _)| dir)
+}
+
+/// Component types a calendar body declares, in document order.
+fn body_components(ics: &str) -> impl Iterator<Item = &str> {
+    ics.lines()
+        .filter_map(|line| line.trim().strip_prefix("BEGIN:"))
+        .map(str::trim)
+        .filter(|kind| matches!(*kind, "VEVENT" | "VTODO" | "VJOURNAL"))
+}
+
+async fn apply_mkcalendar(pool: &sqlx::PgPool, creds: &DavAuth, path: &str, body: &str) {
+    // No (or unparsable) body still gets applied: it clears the default
+    // description dav-server writes on every MKCALENDAR.
+    let root = crate::xml::parse(body).unwrap_or_else(|| xmltree::Element::new("mkcalendar"));
+    let text_of = |name| {
+        crate::xml::find(&root, name)
+            .map(crate::xml::text)
+            .filter(|s| !s.is_empty())
+    };
+    let mut components: Vec<String> = Vec::new();
+    for comp in crate::xml::find(&root, "supported-calendar-component-set")
+        .into_iter()
+        .flat_map(|set| set.children.iter().filter_map(|n| n.as_element()))
+    {
+        // ponytail: VFREEBUSY/VTIMEZONE requests are ignored, they are never stored.
+        if let Some(name) = comp.attributes.get("name")
+            && matches!(name.as_str(), "VEVENT" | "VTODO" | "VJOURNAL")
+            && !components.contains(name)
+        {
+            components.push(name.clone());
+        }
+    }
+    let changes = db::CalendarUpdate {
+        name: text_of("displayname"),
+        description: Some(text_of("calendar-description").unwrap_or_default()),
+        components: (!components.is_empty()).then_some(components),
+        ..Default::default()
+    };
+    let Some((calendar, _)) = calendar_at(pool, creds, path).await else {
+        return;
+    };
+    if let Err(e) = db::update_calendar(pool, calendar.id, &changes).await {
+        tracing::warn!(error = %e, "MKCALENDAR properties not applied");
+    }
+}
+
+/// dav-server hardcodes supported-calendar-component-set for every
+/// collection; replace it with the calendar's stored set.
+async fn rewrite_component_sets(
+    pool: &sqlx::PgPool,
+    creds: &DavAuth,
+    response: axum::response::Response,
+) -> axum::response::Response {
+    if response.status() != StatusCode::MULTI_STATUS {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 16 * 1024 * 1024).await else {
+        return internal("PROPFIND response too large");
+    };
+    let sets: std::collections::HashMap<String, Vec<String>> =
+        db::list_calendars_for_user(pool, creds.user.id)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(cal, _)| (cal.slug, cal.components))
+                    .collect()
+            })
+            .unwrap_or_default();
+    let out = match std::str::from_utf8(&bytes) {
+        Ok(xml) => rewrite_component_set_xml(xml, &sets).into_bytes().into(),
+        Err(_) => bytes,
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, Body::from(out))
+}
+
+const SET_OPEN: &str = "<C:supported-calendar-component-set";
+const SET_CLOSE: &str = "</C:supported-calendar-component-set>";
+
+/// Per `<D:response>` whose href is `/calendars/{user}/{slug}/`, swaps the
+/// component-set element for that calendar's stored set. Component names come
+/// from a CHECK-constrained column, so they are safe to interpolate.
+fn rewrite_component_set_xml(
+    xml: &str,
+    sets: &std::collections::HashMap<String, Vec<String>>,
+) -> String {
+    const OPEN: &str = "<D:response>";
+    let mut out = String::with_capacity(xml.len());
+    let mut rest = xml;
+    while let Some(start) = rest.find(OPEN) {
+        let body = start + OPEN.len();
+        let end = rest[body..]
+            .find("</D:response>")
+            .map_or(rest.len(), |i| body + i);
+        out.push_str(&rest[..body]);
+        out.push_str(&rewrite_response(&rest[body..end], sets));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn rewrite_response(chunk: &str, sets: &std::collections::HashMap<String, Vec<String>>) -> String {
+    let href = chunk
+        .split("<D:href>")
+        .nth(1)
+        .and_then(|h| h.split("</D:href>").next())
+        .unwrap_or_default();
+    let mut segments = href.trim_matches('/').split('/');
+    let comps = match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some("calendars"), Some(_), Some(slug), None) => sets.get(slug),
+        _ => None,
+    };
+    let (Some(comps), Some(start)) = (comps, chunk.find(SET_OPEN)) else {
+        return chunk.to_string();
+    };
+    let Some(close) = chunk[start..].find(SET_CLOSE) else {
+        return chunk.to_string();
+    };
+    let inner: String = comps
+        .iter()
+        .map(|c| format!(r#"<C:comp name="{c}"/>"#))
+        .collect();
+    format!(
+        "{}{SET_OPEN}>{inner}{SET_CLOSE}{}",
+        &chunk[..start],
+        &chunk[start + close + SET_CLOSE.len()..]
+    )
 }
 
 pub(crate) async fn entry_carddav(
@@ -273,23 +441,13 @@ fn dav_body_stream(
 // ============ sync-collection REPORT (RFC 6578) ============
 
 fn xml_element_text(body: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}");
-    let start = body.find(&open)?;
-    let content_start = body[start..].find('>')? + start + 1;
-    let end_tag = format!("</{tag}>");
-    let end = body[content_start..].find(&end_tag)? + content_start;
-    Some(body[content_start..end].trim().to_string())
+    let root = crate::xml::parse(body)?;
+    crate::xml::find(&root, tag).map(crate::xml::text)
 }
 
 fn xml_attr(body: &str, tag: &str, attr: &str) -> Option<String> {
-    let open = format!("<{tag}");
-    let start = body.find(&open)?;
-    let end = body[start..].find('>')? + start;
-    let fragment = &body[start..end];
-    let needle = format!("{attr}=\"");
-    let pos = fragment.find(&needle)? + needle.len();
-    let rest = &fragment[pos..];
-    Some(rest[..rest.find('"')?].to_string())
+    let root = crate::xml::parse(body)?;
+    crate::xml::find(&root, tag)?.attributes.get(attr).cloned()
 }
 
 // ============ sync-collection REPORT (RFC 6578) ============
@@ -327,9 +485,11 @@ async fn sync_collection(
         operation: String,
         etag: Option<String>,
         deleted_at: Option<chrono::DateTime<Utc>>,
+        href: String,
     }
     let rows = sqlx::query_as::<_, Row>(
-        "SELECT cl.seq, cl.resource_id, cl.operation, e.etag, e.deleted_at
+        "SELECT cl.seq, cl.resource_id, cl.operation, e.etag, e.deleted_at,
+                COALESCE(e.href, cl.resource_id::text || '.ics') AS href
          FROM change_log cl
          LEFT JOIN events e ON e.id = cl.resource_id
          WHERE cl.calendar_id = $1 AND cl.seq > $2
@@ -349,7 +509,7 @@ async fn sync_collection(
     let changes: Vec<calendar_caldav::store::SyncChange> = latest
         .into_values()
         .map(|row| calendar_caldav::store::SyncChange {
-            href_suffix: format!("{}.ics", row.resource_id),
+            href_suffix: row.href,
             etag: row
                 .etag
                 .filter(|_| row.operation != "deleted" && row.deleted_at.is_none()),
@@ -500,7 +660,7 @@ async fn calendar_at(
         .find(|(cal, _)| cal.slug == slug)
 }
 
-const VTODO_ERROR_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+const COMPONENT_ERROR_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <C:supported-calendar-component/>
 </D:error>"#;
@@ -561,4 +721,48 @@ fn unauthorized_basic() -> axum::response::Response {
         [(header::WWW_AUTHENTICATE, r#"Basic realm="calendar""#)],
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // Shape emitted by dav-server 0.11: hardcoded four-component set on every collection.
+    const PROPFIND: &str = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:">"#,
+        r#"<D:response><D:href>/calendars/alice/tasks/</D:href><D:propstat><D:prop>"#,
+        r#"<C:supported-calendar-component-set><C:comp name="VEVENT"/><C:comp name="VTODO"/><C:comp name="VJOURNAL"/><C:comp name="VFREEBUSY"/></C:supported-calendar-component-set>"#,
+        r#"<D:displayname>My Tasks</D:displayname></D:prop></D:propstat></D:response>"#,
+        r#"<D:response><D:href>/calendars/alice/tasks/x.ics</D:href><D:propstat><D:prop>"#,
+        r#"<C:supported-calendar-component-set><C:comp name="VEVENT"/></C:supported-calendar-component-set>"#,
+        r#"</D:prop></D:propstat></D:response></D:multistatus>"#,
+    );
+
+    #[test]
+    fn propfind_component_set_is_replaced_per_collection_only() {
+        let sets = HashMap::from([("tasks".to_string(), vec!["VTODO".to_string()])]);
+        let out = rewrite_component_set_xml(PROPFIND, &sets);
+        assert!(out.contains(
+            r#"<C:supported-calendar-component-set><C:comp name="VTODO"/></C:supported-calendar-component-set><D:displayname>My Tasks"#
+        ));
+        assert!(!out.contains("VFREEBUSY"));
+        // A resource href (4 segments) is left alone.
+        assert!(out.contains(r#"/x.ics</D:href><D:propstat><D:prop><C:supported-calendar-component-set><C:comp name="VEVENT"/>"#));
+        // Unknown collections are untouched.
+        assert_eq!(
+            rewrite_component_set_xml(PROPFIND, &HashMap::new()),
+            PROPFIND
+        );
+    }
+
+    #[test]
+    fn put_gate_helpers() {
+        assert_eq!(
+            collection_of("/calendars/alice/work/a.ics"),
+            "/calendars/alice/work"
+        );
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nBEGIN:VALARM\r\nEND:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        assert_eq!(body_components(ics).collect::<Vec<_>>(), ["VTODO"]);
+    }
 }

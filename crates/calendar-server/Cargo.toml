@@ -27,6 +27,7 @@ calendar-notify = { path = "../calendar-notify" }
 calendar-web = { path = "../calendar-web" }
 base64.workspace = true
 dav-server.workspace = true
+xmltree.workspace = true
 bytes.workspace = true
 http.workspace = true
 futures-util.workspace = true
