@@ -55,3 +55,7 @@ Recurrence expansion is an own iterator over the RFC 5545 subset (freq/interval/
 ## ADR-014 Place autocomplete is a server-side proxy, never Maps JS
 
 Google Places integration (web UI event form autocomplete) runs entirely server-side: the browser calls authenticated `/api/places/autocomplete` and `/api/places/{place_id}` endpoints, which proxy the Places API (New) REST endpoints using the optional `GOOGLE_MAPS_API_KEY` env var. The key never reaches the browser, the web UI loads no third-party script (the no-CDN rule holds), and unset key means the feature is off with free-text locations unchanged. Structured place data maps onto the existing Google Places-style `locations` model; locations without a provider ID remain fully valid.
+
+## ADR-015 Tasks and journals are stored as typed relational components
+
+VTODO and VJOURNAL are first-class stored components (`tasks`, `journals`) with per-collection component sets. Supersedes ADR-011. ADR-011's reasoning still holds for opaque storage: unmodelled properties are kept in `extra_props` beside normalized columns, never as an ICS blob. Resources are addressed by client-chosen href; a resource is a whole series (master plus RECURRENCE-ID overrides). Design and implementation plan: `docs/TASKS_JOURNALS_DESIGN.md`.

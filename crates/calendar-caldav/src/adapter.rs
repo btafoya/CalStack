@@ -629,12 +629,20 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
             db::update_calendar(&self.pool, cal.id, &changes)
                 .await
                 .map_err(fs_err)?;
+            // Per-prop statuses: a set on an unsupported property is a 409
+            // (RFC 4918 §9.9.1), never a silent drop.
             Ok(patch
                 .into_iter()
-                .filter(|(set, prop)| {
-                    *set && matches!(prop.name.as_str(), "displayname" | "calendar-description")
+                .map(|(set, prop)| {
+                    let handled =
+                        set && matches!(prop.name.as_str(), "displayname" | "calendar-description");
+                    let status = if handled {
+                        http::StatusCode::OK
+                    } else {
+                        http::StatusCode::CONFLICT
+                    };
+                    (status, prop)
                 })
-                .map(|(_, prop)| (http::StatusCode::OK, prop))
                 .collect())
         })
     }

@@ -235,10 +235,10 @@ pub(crate) async fn token_scope_guard(
         let token = db::find_live_api_token(&pool, &calendar_auth::sha256(bearer.as_bytes()))
             .await
             .map_err(|_| AuthExtractError::Unauthorized)?;
-        let required = match *req.method() {
-            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS => {
-                "read"
-            }
+        // PROPFIND/REPORT only exist on the DAV mounts and are reads, so a
+        // "read"-scoped token can sync.
+        let required = match req.method().as_str() {
+            "GET" | "HEAD" | "OPTIONS" | "PROPFIND" | "REPORT" => "read",
             _ => "write",
         };
         if !scope_allows(&token.scopes, required) {
@@ -257,7 +257,7 @@ pub(crate) async fn admin_page_guard(
     next: Next,
 ) -> Response {
     if matches!(
-        req.uri().path(),
+        req.uri().path().trim_end_matches('/'),
         "/admin" | "/rules" | "/providers" | "/credentials"
     ) {
         let verdict = match resolve_auth(&pool, req.headers()).await {
@@ -289,10 +289,16 @@ pub(crate) fn require_admin(auth: &Auth) -> Result<(), AppError> {
 }
 
 pub(crate) fn set_session_cookie(response: &mut axum::response::Response, token: &str) {
-    // ponytail: no Secure flag — TLS termination is deployment's concern; flip when behind TLS.
+    // SESSION_COOKIE_SECURE=1 for TLS-terminated deployments; default off so
+    // plain-HTTP dev still works.
+    let secure = if std::env::var("SESSION_COOKIE_SECURE").is_ok_and(|v| v == "1") {
+        "; Secure"
+    } else {
+        ""
+    };
     response.headers_mut().insert(
         axum::http::header::SET_COOKIE,
-        format!("session={token}; Path=/; HttpOnly; SameSite=Lax")
+        format!("session={token}; Path=/; HttpOnly; SameSite=Lax{secure}")
             .parse()
             .unwrap(),
     );
