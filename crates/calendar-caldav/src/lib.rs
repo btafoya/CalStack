@@ -372,6 +372,9 @@ pub struct ParsedEvent {
     pub sequence: Option<i32>,
     pub recurrence_id: Option<NaiveDateTime>,
     pub recurrence_id_date: Option<NaiveDate>,
+    /// VCALENDAR-level METHOD (REQUEST/REPLY/CANCEL/...) when present. Lives
+    /// on each event because `parse_ics` returns a flat Vec of VEVENTs.
+    pub method: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -403,6 +406,12 @@ pub fn parse_ics(text: &str) -> Result<Vec<ParsedEvent>, IcsError> {
     // The icalendar 0.17 parser rejects RFC 5545 line folding; unfold first.
     let unfolded = unfold(text);
     let calendar = icalendar::parser::read_calendar(&unfolded).map_err(IcsError::Parse)?;
+    let method = calendar
+        .properties
+        .iter()
+        .find(|prop| prop.name.as_ref() == "METHOD")
+        .map(|prop| prop.val.as_str().trim().to_string())
+        .filter(|m| !m.is_empty());
     let mut out = Vec::new();
     for component in calendar.components {
         let name = component.name.as_ref();
@@ -421,6 +430,7 @@ pub fn parse_ics(text: &str) -> Result<Vec<ParsedEvent>, IcsError> {
         let event = to_owned_event(&component);
         let mut parsed = parse_event(event)?;
         parsed.alarms = alarms;
+        parsed.method = method.clone();
         out.push(parsed);
     }
     Ok(out)
@@ -794,6 +804,22 @@ ATTENDEE;CN=Al;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:al@exampl
 SEQUENCE:2\r\n\
 END:VEVENT\r\n\
 END:VCALENDAR\r\n";
+
+    #[test]
+    fn calendar_method_is_captured_and_absent_is_none() {
+        let ics = "BEGIN:VCALENDAR\r\n\
+METHOD:CANCEL\r\n\
+BEGIN:VEVENT\r\n\
+UID:m-1\r\n\
+DTSTART:20260301T100000Z\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let events = parse_ics(ics).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].method.as_deref(), Some("CANCEL"));
+        // SAMPLE has no METHOD property.
+        assert_eq!(parse_ics(SAMPLE).unwrap()[0].method, None);
+    }
 
     #[test]
     fn parse_round_trip_fields() {

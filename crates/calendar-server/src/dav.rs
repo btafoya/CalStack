@@ -536,6 +536,41 @@ fn parse_ics_time(value: &str) -> Option<DateTime<Utc>> {
     Some(Utc.from_utc_datetime(&naive))
 }
 
+/// Busy instants of an all-day row: RFC 5545 DTEND is the inclusive last day,
+/// so the busy span is [start midnight, day-after-last-day midnight) at UTC.
+/// All-day rows carry no timezone; UTC matches the SQL range filter.
+fn all_day_span(
+    start: chrono::NaiveDate,
+    end: Option<chrono::NaiveDate>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let midnight = |d: chrono::NaiveDate| d.and_hms_opt(0, 0, 0).map(|n| Utc.from_utc_datetime(&n));
+    Some((
+        midnight(start)?,
+        midnight(end.unwrap_or(start).succ_opt()?)?,
+    ))
+}
+
+/// One non-recurring row's busy interval: the timed instants, or an all-day
+/// row's whole date range (there is no `ends_at` to read).
+fn event_period(row: &db::EventRow) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    if let (Some(starts), Some(ends)) = (row.starts_at, row.ends_at) {
+        return Some((starts, ends));
+    }
+    all_day_span(row.start_date?, row.end_date)
+}
+
+/// Trim a period to the query window (all-day spans can extend beyond it).
+fn clamp_period(
+    period: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let (start, end) = period?;
+    let start = start.max(from);
+    let end = end.min(to);
+    (start < end).then_some((start, end))
+}
+
 /// Busy periods for one calendar over the requested window: non-TRANSPARENT,
 /// non-CANCELLED events, expanded for recurrence, exceptions overlaid.
 async fn busy_periods(
@@ -551,71 +586,114 @@ async fn busy_periods(
         .map(|r| r.id)
         .collect();
     let exceptions = db::list_exceptions(pool, &masters).await?;
+    Ok(busy_periods_from(&rows, &exceptions, from, to))
+}
+
+fn busy_periods_from(
+    rows: &[db::EventRow],
+    exceptions: &[db::EventRow],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
     let mut periods: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
-    for event in &rows {
+    for event in rows {
         if event.transp.as_deref() == Some("TRANSPARENT")
             || event.status.as_deref() == Some("CANCELLED")
         {
             continue;
         }
-        if event.master_event_id.is_some() {
-            continue; // surfaces through the master's overlay
+        if event.master_event_id.is_some() || event.rrule.is_some() {
+            continue; // recurring masters surface through expansion below
         }
-        if let (Some(starts), Some(ends)) = (event.starts_at, event.ends_at) {
-            periods.push((starts, ends));
+        if let Some(period) = clamp_period(event_period(event), from, to) {
+            periods.push(period);
         }
     }
     for master in rows.iter().filter(|r| r.rrule.is_some()) {
-        let Some(dtstart) = master.starts_at else {
-            continue;
-        };
-        let duration = master.ends_at.map(|e| e - dtstart).unwrap_or_else(|| {
-            master
-                .duration
-                .map(|d| chrono::Duration::microseconds(d.microseconds))
-                .unwrap_or_else(|| chrono::Duration::hours(1))
-        });
         let rdate = json_to_points(&master.rdate);
         let exdate = json_to_points(&master.exdate);
         let tz = calendar_core::recurrence::resolve_tz(master.tzid.as_deref());
-        let expanded = calendar_core::recurrence::expand_occurrences(
-            calendar_core::DateOrDateTime::Timed(dtstart),
-            master.tzid.as_deref(),
-            Some(master.rrule.as_deref().unwrap_or_default()),
-            &rdate,
-            &exdate,
-            from,
-            to,
-        );
-        let Ok(expanded) = expanded else { continue };
-        for point in expanded {
-            let calendar_core::DateOrDateTime::Timed(at) = point else {
-                continue;
-            };
-            // Exceptions keyed on the original occurrence wall-clock.
-            let wall = at.with_timezone(&tz).naive_local();
-            let matched = exceptions.iter().find(|ex| {
+        // Exceptions keyed on the original occurrence wall-clock.
+        let exception_at = |wall: chrono::NaiveDateTime| {
+            exceptions.iter().find(|ex| {
                 ex.master_event_id == Some(master.id)
                     && (ex.recurrence_id == Some(wall)
                         || ex.recurrence_id_date == Some(wall.date()))
-            });
-            if matched.is_some() {
-                continue; // the exception row supplies its own period
+            })
+        };
+        let expanded = if let Some(dtstart) = master.starts_at {
+            calendar_core::recurrence::expand_occurrences(
+                calendar_core::DateOrDateTime::Timed(dtstart),
+                master.tzid.as_deref(),
+                Some(master.rrule.as_deref().unwrap_or_default()),
+                &rdate,
+                &exdate,
+                from,
+                to,
+            )
+        } else if let Some(start) = master.start_date {
+            calendar_core::recurrence::expand_occurrences(
+                calendar_core::DateOrDateTime::AllDay(start),
+                master.tzid.as_deref(),
+                Some(master.rrule.as_deref().unwrap_or_default()),
+                &rdate,
+                &exdate,
+                from,
+                to,
+            )
+        } else {
+            continue;
+        };
+        let Ok(expanded) = expanded else { continue };
+        for point in expanded {
+            // Timed occurrences keep their duration; all-day occurrences
+            // occupy the master's whole inclusive date range each time.
+            let period = match point {
+                calendar_core::DateOrDateTime::Timed(at) => {
+                    if exception_at(at.with_timezone(&tz).naive_local()).is_some() {
+                        continue; // the exception row supplies its own period
+                    }
+                    let Some(dtstart) = master.starts_at else {
+                        continue;
+                    };
+                    let duration = master.ends_at.map(|e| e - dtstart).unwrap_or_else(|| {
+                        master
+                            .duration
+                            .map(|d| chrono::Duration::microseconds(d.microseconds))
+                            .unwrap_or_else(|| chrono::Duration::hours(1))
+                    });
+                    Some((at, at + duration))
+                }
+                calendar_core::DateOrDateTime::AllDay(date) => {
+                    let Some(wall) = date.and_hms_opt(0, 0, 0) else {
+                        continue;
+                    };
+                    if exception_at(wall).is_some() {
+                        continue; // the exception row supplies its own period
+                    }
+                    let Some(start) = master.start_date else {
+                        continue;
+                    };
+                    let span_days = (master.end_date.unwrap_or(start) - start).num_days() + 1;
+                    all_day_span(date, Some(date + chrono::Duration::days(span_days - 1)))
+                }
+            };
+            if let Some(period) = clamp_period(period, from, to) {
+                periods.push(period);
             }
-            let end = at + duration;
-            periods.push((at, end));
         }
     }
-    for ex in exceptions.iter().filter(|e| !e.deleted_at.is_some()) {
+    for ex in exceptions.iter().filter(|e| e.deleted_at.is_none()) {
         if ex.transp.as_deref() == Some("TRANSPARENT") || ex.status.as_deref() == Some("CANCELLED")
         {
             continue;
         }
-        if let (Some(starts), Some(ends)) = (ex.starts_at, ex.ends_at) {
-            periods.push((starts, ends));
+        if let Some(period) = clamp_period(event_period(ex), from, to) {
+            periods.push(period);
         }
     }
-    Ok(periods)
+    periods.sort();
+    periods
 }
 
 fn json_to_points(value: &serde_json::Value) -> Vec<calendar_core::DateOrDateTime> {
@@ -671,9 +749,14 @@ async fn free_busy_report(
     path: &str,
     body: &str,
 ) -> Result<axum::response::Response, AppError> {
-    let Some((calendar, _cap)) = calendar_at(pool, creds, path).await else {
+    let Some((calendar, cap)) = calendar_at(pool, creds, path).await else {
         return Ok(not_found());
     };
+    // Free-busy is calendar content: require read access, like the other
+    // REPORT paths.
+    if !cap.satisfies(CalendarCapability::ReadOnly) {
+        return Ok(not_found());
+    }
     let start = xml_attr(body, "time-range", "start")
         .and_then(|s| parse_ics_time(&s))
         .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
@@ -764,5 +847,136 @@ mod tests {
         );
         let ics = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nBEGIN:VALARM\r\nEND:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
         assert_eq!(body_components(ics).collect::<Vec<_>>(), ["VTODO"]);
+    }
+
+    fn base_row(id: Uuid) -> db::EventRow {
+        db::EventRow {
+            id,
+            calendar_id: Uuid::new_v4(),
+            uid: id.to_string(),
+            href: None,
+            master_event_id: None,
+            recurrence_id: None,
+            recurrence_id_date: None,
+            is_exception: false,
+            starts_at: None,
+            ends_at: None,
+            start_date: None,
+            end_date: None,
+            duration: None,
+            tzid: None,
+            all_day: false,
+            floating: false,
+            rrule: None,
+            rdate: serde_json::json!([]),
+            exdate: serde_json::json!([]),
+            summary: String::new(),
+            description_html: None,
+            description_text: None,
+            url: None,
+            status: None,
+            priority: None,
+            class: None,
+            transp: None,
+            categories: Vec::new(),
+            location_id: None,
+            organizer_user_id: None,
+            organizer_email: String::new(),
+            organizer_name: None,
+            sequence: 0,
+            etag: String::new(),
+            created_by: None,
+            deleted_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn at(y: i32, m: u32, d: u32, h: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn free_busy_includes_all_day_events() {
+        let from = at(2026, 9, 15, 10);
+        let to = at(2026, 9, 15, 12);
+        let mut single = base_row(Uuid::new_v4());
+        single.start_date = Some(date(2026, 9, 15));
+        let mut multi = base_row(Uuid::new_v4());
+        multi.start_date = Some(date(2026, 9, 13));
+        multi.end_date = Some(date(2026, 9, 17));
+        let mut private = base_row(Uuid::new_v4());
+        private.start_date = Some(date(2026, 9, 15));
+        private.class = Some("CONFIDENTIAL".into());
+        let mut transparent = base_row(Uuid::new_v4());
+        transparent.start_date = Some(date(2026, 9, 15));
+        transparent.transp = Some("TRANSPARENT".into());
+        let mut outside = base_row(Uuid::new_v4());
+        outside.start_date = Some(date(2026, 9, 16));
+        let mut timed = base_row(Uuid::new_v4());
+        timed.starts_at = Some(at(2026, 9, 15, 10));
+        timed.ends_at = Some(at(2026, 9, 15, 11));
+        // All-day rows become busy (multi-day clipped to the window),
+        // PRIVATE/CONFIDENTIAL stay busy, TRANSPARENT and non-overlapping do not.
+        assert_eq!(
+            busy_periods_from(
+                &[single, multi, private, transparent, outside, timed],
+                &[],
+                from,
+                to
+            ),
+            vec![
+                (from, at(2026, 9, 15, 11)),
+                (from, to),
+                (from, to),
+                (from, to),
+            ]
+        );
+    }
+
+    #[test]
+    fn free_busy_expands_all_day_recurrence_with_exceptions() {
+        let from = at(2026, 9, 14, 0);
+        let to = at(2026, 9, 21, 0);
+        let mut master = base_row(Uuid::new_v4());
+        master.start_date = Some(date(2026, 9, 14));
+        master.end_date = Some(date(2026, 9, 15)); // two days per occurrence
+        master.rrule = Some("FREQ=DAILY;INTERVAL=2".into());
+        // Overrides the 2026-09-16 occurrence, moving it to the 17th.
+        let mut ex = base_row(Uuid::new_v4());
+        ex.master_event_id = Some(master.id);
+        ex.recurrence_id_date = Some(date(2026, 9, 16));
+        ex.start_date = Some(date(2026, 9, 17));
+        let periods = busy_periods_from(&[master], &[ex], from, to);
+        // Every other day starting on the 14th, each spanning two whole days;
+        // the 16th occurrence is replaced by the moved exception, and the
+        // 20th occurrence is clipped at the window end.
+        assert_eq!(
+            periods,
+            vec![
+                (at(2026, 9, 14, 0), at(2026, 9, 16, 0)),
+                (at(2026, 9, 17, 0), at(2026, 9, 18, 0)),
+                (at(2026, 9, 18, 0), at(2026, 9, 20, 0)),
+                (at(2026, 9, 20, 0), at(2026, 9, 21, 0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn free_busy_timed_recurrence_keeps_duration() {
+        let from = at(2026, 9, 14, 0);
+        let to = at(2026, 9, 15, 0);
+        let mut master = base_row(Uuid::new_v4());
+        master.starts_at = Some(at(2026, 9, 14, 9));
+        master.ends_at = Some(at(2026, 9, 14, 10));
+        master.rrule = Some("FREQ=DAILY".into());
+        assert_eq!(
+            busy_periods_from(&[master], &[], from, to),
+            vec![(at(2026, 9, 14, 9), at(2026, 9, 14, 10))]
+        );
     }
 }

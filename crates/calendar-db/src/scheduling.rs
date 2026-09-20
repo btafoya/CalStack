@@ -74,7 +74,9 @@ pub async fn mark_message_status(
     Ok(())
 }
 
-/// Inbound message dedupe anchor on Message-ID; None when already seen.
+/// Inbound message dedupe anchors on Message-ID (or the caller-supplied
+/// fallback hash when the mail has none); None when already seen. Uniqueness
+/// is (event_id, attendee_email, method, direction, message_id).
 pub async fn record_inbound(
     pool: &PgPool,
     event_id: Uuid,
@@ -102,6 +104,18 @@ pub async fn record_inbound(
 /// Records outbound REQUEST intents for all non-organizer attendees and
 /// queues the send job. Call after event creation/update with attendees.
 pub async fn schedule_requests(pool: &PgPool, event_id: Uuid) {
+    queue_outbound(pool, event_id, "REQUEST").await;
+}
+
+/// Records outbound CANCEL intents for every current attendee and queues the
+/// send job. Call when an event is cancelled or deleted.
+pub async fn schedule_cancels(pool: &PgPool, event_id: Uuid) {
+    queue_outbound(pool, event_id, "CANCEL").await;
+}
+
+/// Records one outbound message per emailable non-organizer attendee and
+/// enqueues the send job when anything new was queued.
+async fn queue_outbound(pool: &PgPool, event_id: Uuid, method: &str) {
     let attendees = match list_attendees(pool, event_id).await {
         Ok(attendees) => attendees,
         Err(_) => return,
@@ -119,7 +133,7 @@ pub async fn schedule_requests(pool: &PgPool, event_id: Uuid) {
         if email.eq_ignore_ascii_case(&event.organizer_email) {
             continue;
         }
-        if record_outbound(pool, event_id, email, "REQUEST")
+        if record_outbound(pool, event_id, email, method)
             .await
             .ok()
             .flatten()

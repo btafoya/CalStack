@@ -22,6 +22,20 @@ use uuid::Uuid;
 
 // ============ rules CRUD ============
 
+/// Only the triggers the engine actually fires on event mutations.
+const TRIGGER_TYPES: [&str; 3] = ["event_created", "event_updated", "event_deleted"];
+
+fn validate_trigger_type(trigger_type: &str) -> Result<(), AppError> {
+    if TRIGGER_TYPES.contains(&trigger_type) {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(format!(
+            "trigger_type must be one of: {}",
+            TRIGGER_TYPES.join(", ")
+        )))
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct RuleBody {
     name: String,
@@ -106,17 +120,52 @@ pub(crate) async fn run_rules(
             for action in actions {
                 let kind = action.get("type").and_then(Value::as_str).unwrap_or("");
                 let ok = match kind {
-                    "create_notification" => db::alarms::create_notification_deduped(
-                        pool,
-                        Some(Uuid::nil()),
-                        "in_app",
-                        action.get("title").and_then(Value::as_str),
-                        action.get("body").and_then(Value::as_str),
-                        Some(context.clone()),
-                        &format!("rule:{}:{}", rule.id, subject_id),
-                    )
-                    .await
-                    .is_ok(),
+                    "create_notification" => {
+                        // Address the event calendar's principals so the
+                        // in-app rows are actually visible (user_id = NULL
+                        // rows never appear in /api/notifications); a
+                        // calendar without ACL rows falls back to tenant
+                        // members.
+                        let mut users: Vec<Uuid> = sqlx::query_scalar(
+                            "SELECT u.id FROM calendar_acl acl
+                             JOIN users u ON u.id = acl.principal_user_id
+                             WHERE acl.calendar_id = $1",
+                        )
+                        .bind(calendar_id)
+                        .fetch_all(pool)
+                        .await
+                        .unwrap_or_default();
+                        if users.is_empty() {
+                            users = sqlx::query_scalar(
+                                "SELECT user_id FROM tenant_members WHERE tenant_id = $1",
+                            )
+                            .bind(tenant_id)
+                            .fetch_all(pool)
+                            .await
+                            .unwrap_or_default();
+                        }
+                        if users.is_empty() {
+                            false
+                        } else {
+                            let title = action.get("title").and_then(Value::as_str);
+                            let body = action.get("body").and_then(Value::as_str);
+                            let mut ok = true;
+                            for user_id in users {
+                                ok &= db::alarms::create_notification_deduped(
+                                    pool,
+                                    Some(user_id),
+                                    "in_app",
+                                    title,
+                                    body,
+                                    Some(context.clone()),
+                                    &format!("rule:{}:{}", rule.id, subject_id),
+                                )
+                                .await
+                                .is_ok();
+                            }
+                            ok
+                        }
+                    }
                     "sms" => match action.get("to").and_then(Value::as_str) {
                         Some(to) => match load_sms_provider(pool, tenant_id, crypto).await {
                             Some(sms) => {
@@ -156,8 +205,39 @@ pub(crate) async fn run_rules(
     }
 }
 
-fn conditions_match(conditions: &[Value], _context: &Value) -> bool {
-    conditions.iter().all(|_| true) // ponytail: condition DSL (field/op/value) lands with the rules UI
+/// One condition is `{"field": "dot.path", "op": "eq|ne|contains|in|exists", "value": ...}`;
+/// all stored conditions must hold. A field that is missing from the context
+/// fails every op except `exists` (whose `value` true/false asserts presence).
+fn conditions_match(conditions: &[Value], context: &Value) -> bool {
+    conditions.iter().all(|c| {
+        let field = c.get("field").and_then(Value::as_str).unwrap_or("");
+        let op = c.get("op").and_then(Value::as_str).unwrap_or("");
+        let value = c.get("value").unwrap_or(&Value::Null);
+        let actual = match lookup(context, field) {
+            Some(actual) => actual,
+            // Absent field: only `exists` with value false (asserting absence) passes.
+            None => return op == "exists" && value.as_bool() == Some(false),
+        };
+        match op {
+            "eq" => actual == value,
+            "ne" => actual != value,
+            "contains" => match actual {
+                Value::Array(items) => items.contains(value),
+                Value::String(s) => value.as_str().is_some_and(|v| s.contains(v)),
+                _ => false,
+            },
+            "in" => value
+                .as_array()
+                .is_some_and(|options| options.contains(actual)),
+            "exists" => value.as_bool().unwrap_or(true),
+            _ => false, // unknown op: condition fails
+        }
+    })
+}
+
+fn lookup<'a>(context: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.')
+        .try_fold(context, |value, segment| value.get(segment))
 }
 
 // ============ provider CRUD ============
@@ -453,6 +533,7 @@ async fn create_rule(
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
+    validate_trigger_type(&body.trigger_type)?;
     if let Some(calendar_id) = body.calendar_id {
         require_capability(&pool, calendar_id, auth.user.id, CalendarCapability::Owner).await?;
     }
@@ -513,6 +594,8 @@ async fn list_rules(
 #[derive(serde::Deserialize)]
 struct RuleUpdateBody {
     enabled: bool,
+    /// Only present when the caller changes the trigger; validated like create.
+    trigger_type: Option<String>,
 }
 
 async fn update_rule(
@@ -525,13 +608,20 @@ async fn update_rule(
     require_admin(&auth)?;
     require_csrf(&auth, &headers)?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
-    sqlx::query("UPDATE rules SET enabled = $1 WHERE id = $2 AND tenant_id = $3")
-        .bind(body.enabled)
-        .bind(rule_id)
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
+    if let Some(trigger_type) = &body.trigger_type {
+        validate_trigger_type(trigger_type)?;
+    }
+    sqlx::query(
+        "UPDATE rules SET enabled = $1, trigger_type = COALESCE($2, trigger_type)
+         WHERE id = $3 AND tenant_id = $4",
+    )
+    .bind(body.enabled)
+    .bind(body.trigger_type)
+    .bind(rule_id)
+    .bind(tenant_id)
+    .execute(&pool)
+    .await
+    .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -568,4 +658,117 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/notification-providers/{id}/test", post(test_provider))
         .route("/api/rules", post(create_rule).get(list_rules))
         .route("/api/rules/{id}", patch(update_rule).delete(delete_rule))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn matches(conditions: Value, context: Value) -> bool {
+        conditions_match(conditions.as_array().unwrap(), &context)
+    }
+
+    #[test]
+    fn eq_ne_on_top_level_field() {
+        let ctx = json!({"summary": "Standup", "starts_at": "2026-09-19T10:00:00Z"});
+        assert!(matches(
+            json!([{"field": "summary", "op": "eq", "value": "Standup"}]),
+            ctx.clone()
+        ));
+        assert!(!matches(
+            json!([{"field": "summary", "op": "eq", "value": "Other"}]),
+            ctx.clone()
+        ));
+        assert!(matches(
+            json!([{"field": "summary", "op": "ne", "value": "Other"}]),
+            ctx.clone()
+        ));
+        assert!(!matches(
+            json!([{"field": "summary", "op": "ne", "value": "Standup"}]),
+            ctx
+        ));
+    }
+
+    #[test]
+    fn dot_path_walks_nested_fields() {
+        let ctx = json!({"location": {"display_name": "Library"}});
+        assert!(matches(
+            json!([{"field": "location.display_name", "op": "eq", "value": "Library"}]),
+            ctx
+        ));
+    }
+
+    #[test]
+    fn contains_array_and_string() {
+        assert!(matches(
+            json!([{"field": "categories", "op": "contains", "value": "work"}]),
+            json!({"categories": ["work", "focus"]})
+        ));
+        assert!(matches(
+            json!([{"field": "summary", "op": "contains", "value": "standup"}]),
+            json!({"summary": "Team standup"})
+        ));
+        assert!(!matches(
+            json!([{"field": "categories", "op": "contains", "value": "home"}]),
+            json!({"categories": ["work"]})
+        ));
+    }
+
+    #[test]
+    fn in_matches_any_option() {
+        let ctx = json!({"summary": "Standup"});
+        assert!(matches(
+            json!([{"field": "summary", "op": "in", "value": ["Standup", "Retro"]}]),
+            ctx.clone()
+        ));
+        assert!(!matches(
+            json!([{"field": "summary", "op": "in", "value": ["Retro", "Planning"]}]),
+            ctx
+        ));
+    }
+
+    #[test]
+    fn exists_checks_presence() {
+        assert!(matches(
+            json!([{"field": "summary", "op": "exists", "value": true}]),
+            json!({"summary": "x"})
+        ));
+        assert!(!matches(
+            json!([{"field": "url", "op": "exists", "value": true}]),
+            json!({"summary": "x"})
+        ));
+        assert!(matches(
+            json!([{"field": "url", "op": "exists", "value": false}]),
+            json!({"summary": "x"})
+        ));
+        assert!(matches(
+            json!([{"field": "location.display_name", "op": "exists", "value": true}]),
+            json!({"location": {"display_name": "x"}})
+        ));
+        // A null intermediate segment is still an absent field.
+        assert!(!matches(
+            json!([{"field": "location.display_name", "op": "exists", "value": true}]),
+            json!({"location": null})
+        ));
+    }
+
+    #[test]
+    fn unknown_op_or_field_fails() {
+        let ctx = json!({"summary": "Standup"});
+        assert!(!matches(
+            json!([{"field": "summary", "op": "regex", "value": "."}]),
+            ctx.clone()
+        ));
+        // Absent field fails every op except exists.
+        assert!(!matches(
+            json!([{"field": "url", "op": "eq", "value": null}]),
+            ctx.clone()
+        ));
+        // Malformed condition (no op) fails rather than passing silently.
+        assert!(!matches(
+            json!([{"field": "summary", "value": "Standup"}]),
+            ctx
+        ));
+    }
 }

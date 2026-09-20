@@ -107,7 +107,11 @@ pub struct AlarmScanRow {
     pub calendar_id: Uuid,
 }
 
-/// Every alarm on a non-exception, non-all-day, non-deleted event.
+/// Every alarm on a live (non-deleted) event: masters and RECURRENCE-ID
+/// exception overrides alike — exception rows own their alarms, and the scan
+/// anchors their triggers on the override's own start. All-day events are
+/// included; the worker maps their date to a midnight instant in the event's
+/// timezone.
 pub async fn list_scannable_alarms(pool: &PgPool) -> Result<Vec<AlarmScanRow>, DbError> {
     #[derive(sqlx::FromRow)]
     struct Joined {
@@ -120,8 +124,7 @@ pub async fn list_scannable_alarms(pool: &PgPool) -> Result<Vec<AlarmScanRow>, D
         "SELECT a.*, e.*
          FROM event_alarms a
          JOIN events e ON e.id = a.event_id AND e.deleted_at IS NULL
-         JOIN calendars c ON c.id = e.calendar_id AND c.deleted_at IS NULL
-         WHERE e.master_event_id IS NULL AND NOT e.all_day",
+         JOIN calendars c ON c.id = e.calendar_id AND c.deleted_at IS NULL",
     )
     .fetch_all(pool)
     .await?;
