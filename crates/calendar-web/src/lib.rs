@@ -698,6 +698,8 @@ const RULES_PAGE: &str = concat!(
       <div class="col-auto"><label class="form-label" for="rule-trigger">Trigger</label>
         <select class="form-select" id="rule-trigger">
           <option value="event_created">event_created</option>
+          <option value="event_updated">event_updated</option>
+          <option value="event_deleted">event_deleted</option>
         </select></div>
       <div class="col-auto form-check mb-2">
         <input class="form-check-input" type="checkbox" id="rule-enabled" checked>
@@ -711,6 +713,7 @@ const RULES_PAGE: &str = concat!(
         <select class="form-select" id="rule-action-type">
           <option value="create_notification">In-app notification</option>
           <option value="sms">SMS (requires a Twilio provider)</option>
+          <option value="webhook">Webhook (delivers to the tenant's webhooks)</option>
         </select></div>
       <div id="rule-title-row" class="col"><label class="form-label" for="rule-title">Notification title</label>
         <input class="form-control" id="rule-title" required></div>

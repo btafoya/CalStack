@@ -20,15 +20,17 @@ CalStack speaks CalDAV to real clients (Apple Calendar, Thunderbird, DAVx5, Outl
 
 - **CalDAV** (RFC 4791) discovery, `MKCALENDAR`, CRUD, `calendar-query`/`calendar-multiget` REPORTs, `sync-collection` incremental sync, `free-busy-query`.
 - **OpenAPI 3.1** domain API — the full model, not a CalDAV wrapper. Served live at `/api/openapi.json`.
-- **PostgreSQL-normalized events** — full RRULE/RDATE/EXDATE/RECURRENCE-ID recurrence, hand-rolled and DST-correct. iCalendar is a wire format, never the source of truth.
+- **PostgreSQL-normalized events** — full RRULE/RDATE/EXDATE/RECURRENCE-ID recurrence, hand-rolled and DST-correct, with client-supplied VTIMEZONE definitions parsed, stored per calendar, and honored during expansion (custom tzids never silently become UTC). iCalendar is a wire format, never the source of truth.
 - **ACLs** — multiple owners per calendar, owner/read-write/read-only/free-busy capabilities.
-- **Public sharing** — revocable, optionally-expiring share tokens; anonymous read-only `.ics` feeds that withhold private/confidential events and attendee contact data.
+- **Public sharing** — revocable, optionally-expiring share tokens; anonymous read-only `.ics` feeds that withhold private/confidential events and attendee contact data. A share token also works as a read-only CalDAV credential when `allows_caldav` is set.
 - **Auth** — local accounts (Argon2id), WebAuthn/passkeys, TOTP 2FA with recovery codes, scoped API bearer tokens, CalDAV app passwords.
 - **Reminders** — VALARMs fire from a PostgreSQL-backed durable job queue (no external scheduler) and reach you however you want: in-app always, plus email, SMS, and Web Push. Pick channels per alarm, opt out per user, and failed sends retry with backoff before giving up with a notice in the app.
 - **Attachments** — capped, stored as `bytea` in PostgreSQL.
 - **Search** — PostgreSQL full-text, no external search service.
 - **Scheduling** — outbound iTIP invitations and cancellations, inbound iMIP replies via a Postmark webhook. Sender identity is trusted from Postmark's inbound pipeline (SPF/DKIM/DMARC happen there); the server only checks the From against the attendee list. Do not configure the webhook if you do not trust your inbound mail pipeline.
-- **Rules** — trigger → condition → action automation (event created, RSVP changed, alarm due, …), scoped to one calendar or tenant-wide; managed from the web UI.
+- **Rules** — trigger → condition → action automation on event created/updated/deleted (field/op/value conditions, in-app / SMS / webhook actions), scoped to one calendar or tenant-wide; managed from the web UI.
+- **Webhooks** — register HMAC-SHA256-signed webhook URLs per tenant; every event create/update/delete (via the API or CalDAV) and rule webhook action delivers an at-least-once signed payload through the durable job queue, with retries, delivery history, and a send-test button.
+- **Audit trail** — every authenticated API mutation and login event is recorded (actor, action, object, status) and rendered on the Admin page; rows purge after `AUDIT_RETENTION_DAYS`.
 - **Notifications** — Postmark, generic SMTP, Twilio SMS, and Web Push (VAPID) credentials, all configured from the web UI. Every provider is editable and has a send-test button.
 - **Attendees** — invite by email or by phone alone; `sms:` attendee URIs round-trip through iCalendar.
 - **Embedded web UI** — Bootstrap 5.3 + jQuery 4 + [bs-calendar](https://github.com/ThomasDev-de/bs-calendar), vendored, no CDN, no build step. Calendar view, per-calendar rules, notification providers, and admin user management.
