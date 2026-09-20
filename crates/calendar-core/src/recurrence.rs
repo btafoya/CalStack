@@ -6,7 +6,9 @@
 //! behave the way clients expect, then converted to UTC instants. Expansion is
 //! bounded: a hard step cap plus the query window bounds unbounded RRULEs.
 
-use chrono::{DateTime, Datelike, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc, Weekday};
+use chrono::{
+    DateTime, Datelike, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc, Weekday,
+};
 use chrono_tz::Tz;
 
 use crate::DateOrDateTime;
@@ -15,6 +17,8 @@ use crate::DateOrDateTime;
 pub enum RecurrenceError {
     #[error("unsupported RRULE: {0}")]
     Unsupported(String),
+    #[error("unknown timezone: {0}")]
+    UnknownTimezone(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -106,10 +110,22 @@ impl ParsedRRule {
                     )
                 }
                 "UNTIL" => {
+                    // RFC 5545 compact UNTIL forms: RFC 3339, and the compact
+                    // forms real clients send — `...Z` is a UTC instant, a
+                    // bare local wall clock is bounded by day.
                     until_instant = DateTime::parse_from_rfc3339(val)
                         .ok()
-                        .map(|d| d.with_timezone(&Utc));
-                    until_date = NaiveDate::parse_from_str(val, "%Y%m%d").ok();
+                        .map(|d| d.with_timezone(&Utc))
+                        .or_else(|| {
+                            NaiveDateTime::parse_from_str(val, "%Y%m%dT%H%M%SZ")
+                                .ok()
+                                .map(|n| Utc.from_utc_datetime(&n))
+                        });
+                    until_date = NaiveDate::parse_from_str(val, "%Y%m%d").ok().or_else(|| {
+                        NaiveDateTime::parse_from_str(val, "%Y%m%dT%H%M%S")
+                            .ok()
+                            .map(|n| n.date())
+                    });
                     if until_instant.is_none() && until_date.is_none() {
                         return Err(RecurrenceError::Unsupported(format!("UNTIL={val}")));
                     }
@@ -152,29 +168,216 @@ impl ParsedRRule {
     }
 }
 
-/// Resolves a tzid to a chrono-tz zone; unknown ids (including client-supplied
-/// custom VTIMEZONEs, ADR-012) fall back to UTC.
-/// `ponytail`: expansion honoring stored custom VTIMEZONE definitions arrives
-/// when the timezones table is wired into expansion.
-pub fn resolve_tz(tzid: Option<&str>) -> Tz {
-    tzid.and_then(|tz| tz.parse::<Tz>().ok())
-        .unwrap_or(chrono_tz::UTC)
+/// One compiled STANDARD/DAYLIGHT sub-component of a VTIMEZONE (ADR-012):
+/// the transition anchor in wall-clock time and the offsets it switches
+/// between. Stored as JSONB in the `timezones` table.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ZoneRule {
+    /// DTSTART of the sub-component, in the zone's own wall clock
+    /// (interpreted against `offset_from_secs`).
+    pub dtstart: NaiveDateTime,
+    /// TZOFFSETFROM: offset in effect just before this transition.
+    pub offset_from_secs: i32,
+    /// TZOFFSETTO: offset in effect from this transition onward.
+    pub offset_to_secs: i32,
+    /// RRULE for the recurrence of this transition, if any.
+    pub rrule: Option<String>,
+    /// Explicit RDATE transition points (wall clock, same basis as DTSTART).
+    pub rdates: Vec<NaiveDateTime>,
+}
+
+/// Compile window around load time.
+/// ponytail: transitions are compiled ±[`ZONE_WINDOW_YEARS`] (4-year window);
+/// expansions queried outside it run on the window-edge offset. Widen the
+/// constant if long-horizon alarms ever need more.
+pub const ZONE_WINDOW_YEARS: i64 = 2;
+
+/// Compiles VTIMEZONE rules into UTC offset transition pairs over
+/// `[window_from, window_to]`. The first pair is the base offset in effect at
+/// the window start (each rule's occurrence instants are
+/// `wall_clock - offset_from`). Errors on rules the RRULE subset can't
+/// represent — callers reject such VTIMEZONEs at PUT.
+pub fn compile_zone(
+    rules: &[ZoneRule],
+    window_from: DateTime<Utc>,
+    window_to: DateTime<Utc>,
+) -> Result<Vec<(i64, i32)>, RecurrenceError> {
+    // ponytail: candidate generation reuses the RRULE engine with UTC as a
+    // pseudo-zone (transitions are wall-clock minus offset_from), so UNTIL
+    // comparisons are off by the zone offset (<1 day) — irrelevant for
+    // termination semantics.
+    let mut raw: Vec<(i64, i32, i32)> = Vec::new(); // (utc, offset_to, offset_from)
+    for rule in rules {
+        let parsed = rule.rrule.as_deref().map(ParsedRRule::parse).transpose()?;
+        let mut candidates = vec![rule.dtstart];
+        if let Some(parsed) = parsed {
+            let pseudo = Zone::Tz(chrono_tz::UTC);
+            candidates.extend(expand_rrule(
+                &parsed,
+                rule.dtstart,
+                &pseudo,
+                window_to.naive_utc(),
+            )?);
+        }
+        candidates.extend(rule.rdates.iter().copied());
+        // Bound memory: keep in-window transitions plus, per rule, the single
+        // latest pre-window transition (it fixes the offset carried into the
+        // window — a fixed-offset zone's DTSTART may sit decades back).
+        let mut last_before: Option<(i64, i32, i32)> = None;
+        for naive in candidates {
+            let instant = naive.and_utc() - chrono::Duration::seconds(rule.offset_from_secs as i64);
+            let t = instant.timestamp();
+            let entry = (t, rule.offset_to_secs, rule.offset_from_secs);
+            if t > window_to.timestamp() {
+                continue;
+            }
+            if t < window_from.timestamp() {
+                last_before = Some(match last_before {
+                    Some(prev) if prev.0 >= t => prev,
+                    _ => entry,
+                });
+            } else {
+                raw.push(entry);
+            }
+        }
+        if let Some(entry) = last_before {
+            raw.push(entry);
+        }
+    }
+    if raw.is_empty() {
+        return Err(RecurrenceError::Unsupported(
+            "no transitions compile in the window".into(),
+        ));
+    }
+    raw.sort_by_key(|(t, _, _)| *t);
+    raw.dedup_by_key(|(t, _, _)| *t);
+    // Offset in effect at the window start: the latest pre-window transition's
+    // target offset, else the first transition's prior offset.
+    let first_in_window = raw.partition_point(|(t, _, _)| *t < window_from.timestamp());
+    let base = if first_in_window > 0 {
+        raw[first_in_window - 1].1
+    } else {
+        raw[0].2
+    };
+    let mut out: Vec<(i64, i32)> = Vec::with_capacity(raw.len() - first_in_window + 1);
+    out.push((window_from.timestamp(), base));
+    out.extend(raw[first_in_window..].iter().map(|(t, to, _)| (*t, *to)));
+    Ok(out)
+}
+
+/// tzid → UTC offset transitions for zones that are not in the tzdb
+/// (client-supplied VTIMEZONEs, ADR-012). Each zone's list is sorted
+/// `(utc_epoch_secs, offset_secs)`; the first entry is the base offset at the
+/// compile window start.
+#[derive(Debug, Clone, Default)]
+pub struct TzResolver {
+    zones: std::collections::HashMap<String, Vec<(i64, i32)>>,
+}
+
+impl TzResolver {
+    pub fn insert(&mut self, tzid: impl Into<String>, transitions: Vec<(i64, i32)>) {
+        self.zones.insert(tzid.into(), transitions);
+    }
+
+    pub fn get(&self, tzid: &str) -> Option<&Vec<(i64, i32)>> {
+        self.zones.get(tzid)
+    }
+}
+
+/// A resolved zone: either a tzdb zone or compiled custom transitions.
+#[derive(Debug, Clone)]
+pub enum Zone {
+    Tz(Tz),
+    Custom(Vec<(i64, i32)>),
+}
+
+impl Zone {
+    /// Offset (seconds east of UTC) in effect at epoch second `secs`.
+    fn offset_secs_at(&self, secs: i64) -> i32 {
+        match self {
+            Zone::Tz(tz) => Utc
+                .timestamp_opt(secs, 0)
+                .single()
+                .map(|at| at.with_timezone(tz).offset().fix().local_minus_utc())
+                .unwrap_or(0),
+            Zone::Custom(transitions) => transitions
+                .iter()
+                .rev()
+                .find(|(t, _)| *t <= secs)
+                .map(|(_, o)| *o)
+                .or_else(|| transitions.first().map(|(_, o)| *o))
+                .unwrap_or(0),
+        }
+    }
+
+    /// The earliest UTC instant mapping to this local wall clock. A
+    /// nonexistent local time (spring-forward gap) maps to the transition
+    /// boundary instead of `None` — custom zones are compiled data, and the
+    /// tzdb variant keeps chrono's skip semantics.
+    pub fn from_local(&self, naive: NaiveDateTime) -> Option<DateTime<Utc>> {
+        match self {
+            Zone::Tz(tz) => match tz.from_local_datetime(&naive) {
+                LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
+                LocalResult::Ambiguous(earliest, _) => Some(earliest.with_timezone(&Utc)),
+                LocalResult::None => None,
+            },
+            Zone::Custom(_) => {
+                let t = naive.and_utc().timestamp();
+                let before = self.offset_secs_at(t);
+                let instant = t - before as i64;
+                let after = self.offset_secs_at(instant);
+                let best = if before == after {
+                    instant
+                } else {
+                    instant.min(t - after as i64)
+                };
+                Utc.timestamp_opt(best, 0).single()
+            }
+        }
+    }
+
+    /// The local wall clock at this instant.
+    pub fn to_local(&self, at: DateTime<Utc>) -> NaiveDateTime {
+        match self {
+            Zone::Tz(tz) => at.with_timezone(tz).naive_local(),
+            Zone::Custom(_) => {
+                let offset = self.offset_secs_at(at.timestamp());
+                (at + chrono::Duration::seconds(offset as i64)).naive_utc()
+            }
+        }
+    }
+}
+
+/// True when the tzid is a tzdb (IANA) zone. tzdb zones keep precedence over
+/// stored VTIMEZONE definitions (IANA identity per the data rules).
+pub fn is_tzdb_tzid(tzid: &str) -> bool {
+    tzid.parse::<Tz>().is_ok()
+}
+
+/// Resolves a tzid to a zone. `custom` carries stored VTIMEZONE transitions
+/// for client-supplied ids; a tzid that is neither tzdb nor resolvable is an
+/// error — there is no silent UTC fallback (ADR-012). `None` (floating
+/// events) is UTC by definition.
+pub fn resolve_tz(
+    tzid: Option<&str>,
+    custom: Option<&TzResolver>,
+) -> Result<Zone, RecurrenceError> {
+    let Some(tzid) = tzid else {
+        return Ok(Zone::Tz(chrono_tz::UTC));
+    };
+    if let Ok(tz) = tzid.parse::<Tz>() {
+        return Ok(Zone::Tz(tz));
+    }
+    if let Some(transitions) = custom.and_then(|r| r.get(tzid)) {
+        return Ok(Zone::Custom(transitions.clone()));
+    }
+    Err(RecurrenceError::UnknownTimezone(tzid.to_string()))
 }
 
 /// Week index in local calendar space (weeks are 7-day blocks from Monday).
 fn week_index(date: NaiveDate) -> i64 {
     // days since Unix epoch, shifted so Monday starts the block
     (date.num_days_from_ce() - 1) as i64 / 7
-}
-
-fn to_instant(tz: Tz, naive: NaiveDateTime) -> Option<DateTime<Utc>> {
-    match tz.from_local_datetime(&naive) {
-        LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-        // Spring-forward ambiguity: take the earlier mapping; a nonexistent
-        // local time has no mapping and is skipped.
-        LocalResult::Ambiguous(earliest, _) => Some(earliest.with_timezone(&Utc)),
-        LocalResult::None => None,
-    }
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -226,9 +429,13 @@ fn matches_monthday(date: NaiveDate, rules: &[i32]) -> bool {
 /// Expands one event's recurrence set (RRULE + RDATE, minus EXDATE) to the
 /// occurrences whose UTC instant falls in `[window_from, window_to)`.
 /// All-day events yield `AllDay` dates; timed events yield `Timed` instants.
+/// `custom` resolves client-supplied tzids against stored VTIMEZONE
+/// transitions; an unknown tzid is an error, never UTC (ADR-012).
+#[allow(clippy::too_many_arguments)]
 pub fn expand_occurrences(
     dtstart: DateOrDateTime,
     tzid: Option<&str>,
+    custom: Option<&TzResolver>,
     rrule: Option<&str>,
     rdate: &[DateOrDateTime],
     exdate: &[DateOrDateTime],
@@ -236,20 +443,20 @@ pub fn expand_occurrences(
     window_to: DateTime<Utc>,
 ) -> Result<Vec<DateOrDateTime>, RecurrenceError> {
     let all_day = matches!(dtstart, DateOrDateTime::AllDay(_));
-    let tz = resolve_tz(tzid);
+    let zone = resolve_tz(tzid, custom)?;
 
     // Anchor in wall-clock space.
     let anchor: NaiveDateTime = match dtstart {
-        DateOrDateTime::Timed(at) => at.with_timezone(&tz).naive_local(),
+        DateOrDateTime::Timed(at) => zone.to_local(at),
         DateOrDateTime::AllDay(date) => date.and_hms_opt(0, 0, 0).expect("midnight is valid"),
     };
 
-    let window_to_local = window_to.with_timezone(&tz).naive_local();
+    let window_to_local = zone.to_local(window_to);
 
     let mut candidates: Vec<NaiveDateTime> = Vec::new();
     if let Some(rrule) = rrule {
         let rule = ParsedRRule::parse(rrule)?;
-        candidates = expand_rrule(&rule, anchor, tz, window_to_local)?;
+        candidates = expand_rrule(&rule, anchor, &zone, window_to_local)?;
     } else {
         candidates.push(anchor);
     }
@@ -257,7 +464,7 @@ pub fn expand_occurrences(
     // RDATE adds explicit occurrences.
     for point in rdate {
         let naive = match point {
-            DateOrDateTime::Timed(at) => at.with_timezone(&tz).naive_local(),
+            DateOrDateTime::Timed(at) => zone.to_local(*at),
             DateOrDateTime::AllDay(date) => date.and_hms_opt(0, 0, 0).expect("midnight is valid"),
         };
         candidates.push(naive);
@@ -268,7 +475,7 @@ pub fn expand_occurrences(
     let ex_exact: Vec<NaiveDateTime> = exdate
         .iter()
         .filter_map(|p| match p {
-            DateOrDateTime::Timed(at) => Some(at.with_timezone(&tz).naive_local()),
+            DateOrDateTime::Timed(at) => Some(zone.to_local(*at)),
             DateOrDateTime::AllDay(_) => None,
         })
         .collect();
@@ -288,7 +495,7 @@ pub fn expand_occurrences(
                 NaiveDate::from_ymd_opt(candidate.year(), candidate.month(), candidate.day())
                     .map(DateOrDateTime::AllDay)
             } else {
-                to_instant(tz, candidate).map(DateOrDateTime::Timed)
+                zone.from_local(candidate).map(DateOrDateTime::Timed)
             }
         })
         .collect();
@@ -301,9 +508,9 @@ pub fn expand_occurrences(
                 return false;
             };
             let end_naive = start_naive.checked_add_signed(chrono::Duration::days(1));
-            let start = to_instant(tz, start_naive).unwrap_or(window_from);
+            let start = zone.from_local(start_naive).unwrap_or(window_from);
             let end = end_naive
-                .and_then(|n| to_instant(tz, n))
+                .and_then(|n| zone.from_local(n))
                 .unwrap_or(window_to);
             end > window_from && start < window_to
         }
@@ -313,10 +520,50 @@ pub fn expand_occurrences(
     Ok(out)
 }
 
+/// Candidate dates for one month of a MONTHLY/YEARLY rule: BYMONTHDAY
+/// filters, BYDAY (with MONTHLY-style ordinals), or the anchor's day.
+fn month_dates(rule: &ParsedRRule, year: i32, month: u32, anchor_day: u32) -> Vec<NaiveDate> {
+    if !rule.by_monthday.is_empty() {
+        (1..=days_in_month(year, month))
+            .filter(|d| {
+                NaiveDate::from_ymd_opt(year, month, *d)
+                    .is_some_and(|date| matches_monthday(date, &rule.by_monthday))
+            })
+            .filter_map(|d| NaiveDate::from_ymd_opt(year, month, d))
+            .collect()
+    } else if !rule.by_day.is_empty() {
+        let mut found: Vec<NaiveDate> = Vec::new();
+        for b in &rule.by_day {
+            match b.ordinal {
+                Some(ordinal) => {
+                    if let Some(date) = nth_weekday_of_month(year, month, b.weekday, ordinal) {
+                        found.push(date);
+                    }
+                }
+                None => {
+                    // every matching weekday of the month
+                    for d in 1..=days_in_month(year, month) {
+                        if let Some(date) = NaiveDate::from_ymd_opt(year, month, d)
+                            .filter(|date| date.weekday() == b.weekday)
+                        {
+                            found.push(date);
+                        }
+                    }
+                }
+            }
+        }
+        found
+    } else {
+        NaiveDate::from_ymd_opt(year, month, anchor_day)
+            .into_iter()
+            .collect()
+    }
+}
+
 fn expand_rrule(
     rule: &ParsedRRule,
     anchor: NaiveDateTime,
-    tz: Tz,
+    zone: &Zone,
     window_to_local: NaiveDateTime,
 ) -> Result<Vec<NaiveDateTime>, RecurrenceError> {
     let mut out: Vec<NaiveDateTime> = Vec::new();
@@ -328,7 +575,8 @@ fn expand_rrule(
         |candidate: NaiveDateTime, out: &mut Vec<NaiveDateTime>, emitted: &mut u32| -> bool {
             // Until/count checks; returns false to stop iteration.
             if rule.until_instant.is_some_and(|until| {
-                to_instant(tz, candidate).is_none_or(|instant| instant > until)
+                zone.from_local(candidate)
+                    .is_none_or(|instant| instant > until)
             }) {
                 return false;
             }
@@ -351,9 +599,10 @@ fn expand_rrule(
             return Ok(out);
         }
     } else if anchor <= window_to_local {
-        let fits_until = rule
-            .until_instant
-            .is_none_or(|until| to_instant(tz, anchor).is_none_or(|instant| instant <= until));
+        let fits_until = rule.until_instant.is_none_or(|until| {
+            zone.from_local(anchor)
+                .is_none_or(|instant| instant <= until)
+        });
         if fits_until {
             out.push(anchor);
             emitted += 1;
@@ -432,44 +681,7 @@ fn expand_rrule(
                 if !rule.by_month.is_empty() && !rule.by_month.contains(&month) {
                     continue;
                 }
-                let dates: Vec<NaiveDate> = if !rule.by_monthday.is_empty() {
-                    (1..=days_in_month(year, month))
-                        .filter(|d| {
-                            NaiveDate::from_ymd_opt(year, month, *d)
-                                .is_some_and(|date| matches_monthday(date, &rule.by_monthday))
-                        })
-                        .filter_map(|d| NaiveDate::from_ymd_opt(year, month, d))
-                        .collect()
-                } else if !rule.by_day.is_empty() {
-                    let mut found: Vec<NaiveDate> = Vec::new();
-                    for b in &rule.by_day {
-                        match b.ordinal {
-                            Some(ordinal) => {
-                                if let Some(date) =
-                                    nth_weekday_of_month(year, month, b.weekday, ordinal)
-                                {
-                                    found.push(date);
-                                }
-                            }
-                            None => {
-                                // every matching weekday of the month
-                                for d in 1..=days_in_month(year, month) {
-                                    if let Some(date) = NaiveDate::from_ymd_opt(year, month, d)
-                                        .filter(|date| date.weekday() == b.weekday)
-                                    {
-                                        found.push(date);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    found
-                } else {
-                    NaiveDate::from_ymd_opt(year, month, anchor.day())
-                        .into_iter()
-                        .collect()
-                };
-                for date in dates {
+                for date in month_dates(rule, year, month, anchor.day()) {
                     let candidate = date.and_time(time_of_day);
                     if candidate > window_to_local {
                         return Ok(out);
@@ -500,20 +712,7 @@ fn expand_rrule(
                     rule.by_month.clone()
                 };
                 for month in months {
-                    let dates: Vec<NaiveDate> = if !rule.by_monthday.is_empty() {
-                        (1..=days_in_month(year, month))
-                            .filter(|d| {
-                                NaiveDate::from_ymd_opt(year, month, *d)
-                                    .is_some_and(|date| matches_monthday(date, &rule.by_monthday))
-                            })
-                            .filter_map(|d| NaiveDate::from_ymd_opt(year, month, d))
-                            .collect()
-                    } else {
-                        NaiveDate::from_ymd_opt(year, month, anchor.day())
-                            .into_iter()
-                            .collect()
-                    };
-                    for date in dates {
+                    for date in month_dates(rule, year, month, anchor.day()) {
                         let candidate = date.and_time(time_of_day);
                         if candidate > window_to_local {
                             return Ok(out);
@@ -548,6 +747,7 @@ mod tests {
         let result = expand_occurrences(
             dtstart,
             tzid,
+            None,
             Some(rrule),
             &[],
             &[],
@@ -746,6 +946,7 @@ mod tests {
         let out = expand_occurrences(
             dtstart,
             None,
+            None,
             Some("FREQ=WEEKLY"),
             &[],
             &[],
@@ -775,6 +976,7 @@ mod tests {
         let out = expand_occurrences(
             DateOrDateTime::Timed(start),
             None,
+            None,
             Some("FREQ=DAILY"),
             &rdate,
             &exdate,
@@ -795,12 +997,157 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tz_falls_back_to_utc() {
-        assert_eq!(resolve_tz(Some("Not/AZone")), chrono_tz::UTC);
-        assert_eq!(resolve_tz(None), chrono_tz::UTC);
-        assert_eq!(
-            resolve_tz(Some("America/Denver")),
-            chrono_tz::America::Denver
+    fn unknown_tz_is_an_error_without_resolver_entry() {
+        // No silent UTC fallback remains (ADR-012).
+        assert!(matches!(
+            resolve_tz(Some("Not/AZone"), None),
+            Err(RecurrenceError::UnknownTimezone(_))
+        ));
+        assert!(matches!(
+            resolve_tz(Some("Not/AZone"), Some(&TzResolver::default())),
+            Err(RecurrenceError::UnknownTimezone(_))
+        ));
+        // Floating events (no tzid) are UTC by definition.
+        assert!(matches!(resolve_tz(None, None), Ok(Zone::Tz(z)) if z == chrono_tz::UTC));
+        // tzdb zones keep precedence over any resolver entry.
+        assert!(matches!(
+            resolve_tz(Some("America/Denver"), None),
+            Ok(Zone::Tz(z)) if z == chrono_tz::America::Denver
+        ));
+        assert!(is_tzdb_tzid("America/Denver"));
+        assert!(!is_tzdb_tzid("Custom/Test"));
+    }
+
+    /// Custom zone switching MST(-7) → MDT(-6) on the second Sunday of March
+    /// (2026-03-08) and back on the first Sunday of November.
+    fn custom_zone() -> TzResolver {
+        let rules = vec![
+            ZoneRule {
+                dtstart: NaiveDateTime::parse_from_str("19700308T020000", "%Y%m%dT%H%M%S").unwrap(),
+                offset_from_secs: -7 * 3600,
+                offset_to_secs: -6 * 3600,
+                rrule: Some("FREQ=YEARLY;BYMONTH=3;BYDAY=2SU".into()),
+                rdates: vec![],
+            },
+            ZoneRule {
+                dtstart: NaiveDateTime::parse_from_str("19701101T020000", "%Y%m%dT%H%M%S").unwrap(),
+                offset_from_secs: -6 * 3600,
+                offset_to_secs: -7 * 3600,
+                rrule: Some("FREQ=YEARLY;BYMONTH=11;BYDAY=1SU".into()),
+                rdates: vec![],
+            },
+        ];
+        let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2028, 1, 1, 0, 0, 0).unwrap();
+        let transitions = compile_zone(&rules, from, to).unwrap();
+        let mut resolver = TzResolver::default();
+        resolver.insert("Custom/Test", transitions);
+        resolver
+    }
+
+    #[test]
+    fn compile_zone_emits_dst_transitions() {
+        let transitions = custom_zone().get("Custom/Test").unwrap().clone();
+        // Mar 8 2026 02:00 local (offset_from -7) → 09:00Z switches to -6.
+        assert!(
+            transitions.contains(&(
+                Utc.with_ymd_and_hms(2026, 3, 8, 9, 0, 0)
+                    .unwrap()
+                    .timestamp(),
+                -6 * 3600
+            ))
         );
+        // Nov 1 2026 02:00 local (offset_from -6) → 08:00Z switches to -7.
+        assert!(
+            transitions.contains(&(
+                Utc.with_ymd_and_hms(2026, 11, 1, 8, 0, 0)
+                    .unwrap()
+                    .timestamp(),
+                -7 * 3600
+            ))
+        );
+        // First entry is the base offset at the window start.
+        assert_eq!(transitions[0].1, -7 * 3600);
+    }
+
+    #[test]
+    fn custom_zone_expands_wall_clock_across_dst() {
+        let resolver = custom_zone();
+        // Daily 09:00 wall clock around the 2026 spring-forward (Mar 8).
+        let dtstart = DateOrDateTime::Timed(
+            DateTime::parse_from_rfc3339("2026-03-05T16:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        let out = expand_occurrences(
+            dtstart,
+            Some("Custom/Test"),
+            Some(&resolver),
+            Some("FREQ=DAILY"),
+            &[],
+            &[],
+            Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 3, 15, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+        let instants: Vec<DateTime<Utc>> = out
+            .into_iter()
+            .map(|p| match p {
+                DateOrDateTime::Timed(at) => at,
+                _ => panic!("timed expected"),
+            })
+            .collect();
+        // UTC hour shifts with DST: 16:00Z before the transition (MST),
+        // 15:00Z after (MDT), through Mar 8 itself.
+        let utc: Vec<(u32, u32)> = instants
+            .iter()
+            .map(|d| (d.day(), Timelike::hour(d)))
+            .collect();
+        assert_eq!(
+            utc,
+            vec![
+                (5, 16),
+                (6, 16),
+                (7, 16),
+                (8, 15),
+                (9, 15),
+                (10, 15),
+                (11, 15),
+                (12, 15),
+                (13, 15),
+                (14, 15)
+            ]
+        );
+        // Wall clock stays 09:00 on every occurrence.
+        let zone = resolve_tz(Some("Custom/Test"), Some(&resolver)).unwrap();
+        for at in &instants {
+            assert_eq!(zone.to_local(*at).format("%H").to_string(), "09");
+        }
+    }
+
+    #[test]
+    fn unsupported_zone_rule_is_rejected() {
+        let rules = vec![ZoneRule {
+            dtstart: NaiveDateTime::parse_from_str("19700308T020000", "%Y%m%dT%H%M%S").unwrap(),
+            offset_from_secs: 0,
+            offset_to_secs: 3600,
+            rrule: Some("FREQ=MINUTELY".into()),
+            rdates: vec![],
+        }];
+        assert!(compile_zone(&rules, Utc::now() - chrono::Duration::days(1), Utc::now()).is_err());
+    }
+
+    #[test]
+    fn yearly_byday_ordinal_month() {
+        // FREQ=YEARLY;BYMONTH=3;BYDAY=2SU — the standard US DST-start rule.
+        let out = expand(
+            "FREQ=YEARLY;BYMONTH=3;BYDAY=2SU",
+            "2026-03-08T12:00:00Z",
+            None,
+            "2026-01-01T00:00:00Z",
+            "2028-01-01T00:00:00Z",
+        );
+        let dates: Vec<_> = out.iter().map(|d| (d.year(), d.month(), d.day())).collect();
+        assert_eq!(dates, vec![(2026, 3, 8), (2027, 3, 14)]);
     }
 }

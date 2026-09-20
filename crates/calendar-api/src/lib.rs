@@ -500,6 +500,42 @@ pub fn openapi_document() -> serde_json::Value {
         }}),
     );
     put(
+        "/api/webhooks",
+        json!({
+            "post": {"summary": "Register an outbound webhook (admin only)",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                    "type": "object", "required": ["url", "name"],
+                    "properties": {"url": {"type": "string", "format": "uri"}, "name": {"type": "string"},
+                        "enabled": {"type": ["boolean", "null"]},
+                        "sign_key": {"type": ["string", "null"]}}}}}},
+                "responses": {"201": {"description": "created"}}},
+            "get": {"summary": "List webhooks (admin only)", "responses": {"200": {"description": "list"}}},
+        }),
+    );
+    put(
+        "/api/webhooks/{id}",
+        json!({
+            "patch": {"summary": "Update a webhook (admin only)", "parameters": [param("id", true)],
+                "requestBody": {"content": {"application/json": {"schema": {"type": "object",
+                    "properties": {"url": {"type": "string"}, "name": {"type": "string"},
+                        "enabled": {"type": ["boolean", "null"]},
+                        "sign_key": {"type": ["string", "null"]}}}}}},
+                "responses": {"200": {"description": "updated"}}},
+            "delete": {"summary": "Remove a webhook (admin only)", "parameters": [param("id", true)],
+                "responses": {"200": {"description": "removed"}}},
+        }),
+    );
+    put(
+        "/api/webhooks/{id}/test",
+        json!({"post": {"summary": "Send a signed test delivery (admin only)", "parameters": [param("id", true)],
+            "responses": {"200": {"description": "delivery outcome"}}}}),
+    );
+    put(
+        "/api/webhooks/{id}/deliveries",
+        json!({"get": {"summary": "Recent deliveries (admin only)", "parameters": [param("id", true)],
+            "responses": {"200": {"description": "list"}}}}),
+    );
+    put(
         "/api/audit",
         json!({"get": {
             "summary": "Audit trail (admin only)", "responses": {"200": {"description": "entries"}}

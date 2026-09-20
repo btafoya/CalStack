@@ -21,3 +21,6 @@ icalendar.workspace = true
 dav-server.workspace = true
 calendar-core = { path = "../calendar-core" }
 calendar-db = { path = "../calendar-db" }
+
+[dev-dependencies]
+tokio.workspace = true

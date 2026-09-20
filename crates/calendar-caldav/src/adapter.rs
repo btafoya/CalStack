@@ -192,7 +192,8 @@ impl PgDavFs {
         Ok(event)
     }
 
-    /// The whole series as one VCALENDAR: the master, then its overrides.
+    /// The whole series as one VCALENDAR: the master, then its overrides,
+    /// plus the calendar's stored VTIMEZONE definitions (ADR-012).
     async fn series_ics(&self, master: &EventRow) -> FsResult<String> {
         let mut events = vec![master.clone()];
         events.extend(
@@ -200,6 +201,9 @@ impl PgDavFs {
                 .await
                 .map_err(fs_err)?,
         );
+        let zones = db::timezones::list_for_calendar(&self.pool, master.calendar_id)
+            .await
+            .unwrap_or_default();
         let mut rows = Vec::with_capacity(events.len());
         for event in events {
             rows.push(ExportRow {
@@ -210,6 +214,7 @@ impl PgDavFs {
                     .await
                     .unwrap_or_default(),
                 location: db::location_for_event(&self.pool, &event).await,
+                vtimezones: zones.clone(),
                 event,
             });
         }
@@ -525,6 +530,22 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                         .map_err(fs_err)?;
                     // Same as the JSON delete: attendees get METHOD:CANCEL.
                     db::scheduling::schedule_cancels(&self.pool, event.id).await;
+                    // Webhook trigger, same as the JSON API path.
+                    if let Ok(webhooks) =
+                        db::webhooks::matching_webhooks(&self.pool, cal.tenant_id, "event_deleted")
+                            .await
+                    {
+                        for webhook in webhooks {
+                            db::webhooks::enqueue_delivery(
+                                &self.pool,
+                                webhook.id,
+                                event.id,
+                                "event_deleted",
+                            )
+                            .await
+                            .ok();
+                        }
+                    }
                     Ok(())
                 }
                 _ => Err(FsError::Forbidden),
@@ -756,13 +777,25 @@ impl DavFile for WriteFile {
                     return Err(FsError::Forbidden);
                 }
             };
-            let events = match crate::parse_ics(text) {
-                Ok(events) => events,
+            let parsed = match crate::parse_calendar(text) {
+                Ok(parsed) => parsed,
                 Err(e) => {
                     tracing::warn!(error = %e, "CalDAV PUT body is not valid iCalendar");
                     return Err(FsError::Forbidden);
                 }
             };
+            let events = parsed.events;
+            // Client-supplied VTIMEZONEs ride along to the store (ADR-012); a
+            // non-compilable one already failed parse_calendar above.
+            let zones: Vec<db::timezones::NewTimezone> = parsed
+                .timezones
+                .iter()
+                .map(|tz| db::timezones::NewTimezone {
+                    tzid: tz.tzid.clone(),
+                    definition: tz.definition.clone(),
+                    rules: tz.rules.clone(),
+                })
+                .collect();
             // One resource = one UID: a master VEVENT plus its own overrides.
             // (An override without its master, e.g. an invitation to a single
             // occurrence, is not supported.)
@@ -788,6 +821,7 @@ impl DavFile for WriteFile {
                 &self.name,
                 &master,
                 &overrides,
+                &zones,
                 &self.precondition,
             )
             .await;
@@ -806,6 +840,24 @@ impl DavFile for WriteFile {
             })?;
             // New scheduled events fan out invitations.
             db::scheduling::schedule_requests(&self.pool, event.id).await;
+            // Webhook triggers, same as the JSON API path.
+            let trigger = if matches!(
+                self.precondition,
+                db::ics_upsert::PutPrecondition::MatchEtag(_)
+            ) {
+                "event_updated"
+            } else {
+                "event_created"
+            };
+            if let Ok(webhooks) =
+                db::webhooks::matching_webhooks(&self.pool, self.calendar.tenant_id, trigger).await
+            {
+                for webhook in webhooks {
+                    db::webhooks::enqueue_delivery(&self.pool, webhook.id, event.id, trigger)
+                        .await
+                        .ok();
+                }
+            }
             self.new_meta = Some(Meta {
                 len: 0,
                 modified: event.updated_at.into(),

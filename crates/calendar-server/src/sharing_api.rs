@@ -162,6 +162,11 @@ pub(crate) async fn public_feed(
     let Ok(rows) = db::sharing::list_public_events(&pool, share.calendar_id).await else {
         return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "feed failed").into_response();
     };
+    // Client-supplied VTIMEZONEs ride along so TZID-qualified events stay
+    // interpretable in the public feed (ADR-012).
+    let zones = db::timezones::list_for_calendar(&pool, share.calendar_id)
+        .await
+        .unwrap_or_default();
     let mut exports: Vec<ExportRow> = Vec::new();
     for event in rows {
         // No attendee PII in public feeds.
@@ -174,6 +179,7 @@ pub(crate) async fn public_feed(
             event,
             alarms,
             location,
+            vtimezones: zones.clone(),
         });
     }
     let ics = calendar_caldav::events_to_ics(&exports);

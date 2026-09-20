@@ -7,7 +7,7 @@
 
 use calendar_core::DateOrDateTime;
 use calendar_db::{self as db, alarms};
-use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -121,6 +121,7 @@ async fn execute(
             crate::scheduling::send_pending(pool, crypto).await;
             Ok(())
         }
+        "webhook_send" => webhook_send(pool, job, crypto).await,
         "retention_purge" => {
             retention_purge(pool, retention_days).await?;
             // Daily sweep.
@@ -136,6 +137,211 @@ async fn execute(
             Ok(())
         }
         other => Err(format!("unknown job type: {other}")),
+    }
+}
+
+/// Delivers one pending webhook delivery. Disabled/revoked webhooks and
+/// purged events stop the delivery (recorded, job completes); a failing
+/// target returns Err so db::jobs::fail retries with backoff until the
+/// 5-attempt terminal, with the last outcome recorded on the delivery row.
+async fn webhook_send(
+    pool: &sqlx::PgPool,
+    job: &db::jobs::JobRow,
+    crypto: Option<&calendar_auth::Crypto>,
+) -> Result<(), String> {
+    let Some(delivery_id) = job
+        .payload
+        .get("delivery_id")
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return Err("webhook_send job payload missing delivery_id".into());
+    };
+    #[derive(sqlx::FromRow)]
+    struct Delivery {
+        id: Uuid,
+        webhook_id: Uuid,
+        payload: Value,
+    }
+    // The delivery row is gone (webhook deleted cascades nothing — soft
+    // delete keeps it — but a hard DB delete may): nothing to deliver.
+    let Some(delivery) = sqlx::query_as::<_, Delivery>(
+        "SELECT id, webhook_id, payload FROM webhook_deliveries WHERE id = $1",
+    )
+    .bind(delivery_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    // Send-time re-check: disabling or revoking mid-retry must stop further
+    // attempts. NotFound here covers disabled, soft-deleted, and gone rows.
+    let webhook = match db::webhooks::get_webhook(pool, delivery.webhook_id).await {
+        Ok(webhook) if webhook.enabled => webhook,
+        _ => {
+            db::webhooks::record_delivery_result(
+                pool,
+                delivery.id,
+                "failed",
+                None,
+                Some("webhook disabled or deleted before delivery"),
+                job.attempts + 1,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+    };
+    let event_id = delivery
+        .payload
+        .get("event_id")
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or("delivery payload missing event_id")?;
+    let trigger = delivery
+        .payload
+        .get("trigger")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    // A deleted event still delivers (trigger event_deleted); a purged one
+    // has nothing left to describe.
+    let Some(event) = db::webhooks::get_event_for_delivery(pool, event_id)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        db::webhooks::record_delivery_result(
+            pool,
+            delivery.id,
+            "failed",
+            None,
+            Some("event no longer exists"),
+            job.attempts + 1,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    };
+    let attendees = db::list_attendees(pool, event_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut view = db::webhooks::event_view(&event);
+    view["attendees"] = attendees_json(&attendees);
+    send_delivery_once(
+        pool,
+        &webhook,
+        view,
+        &trigger,
+        delivery.id,
+        job.attempts + 1,
+        crypto,
+    )
+    .await
+}
+
+/// Attendee summaries for the envelope.
+fn attendees_json(attendees: &[db::AttendeeRow]) -> serde_json::Value {
+    serde_json::json!(
+        attendees
+            .iter()
+            .map(|a| serde_json::json!({
+                "email": a.email,
+                "display_name": a.display_name,
+                "telephone": a.telephone,
+                "role": a.role,
+                "partstat": a.partstat,
+            }))
+            .collect::<Vec<_>>()
+    )
+}
+
+/// Signs and POSTs one delivery (the pre-built compact event view), records
+/// the outcome, and fails the job (via Err) on a non-2xx so the durable
+/// queue's backoff retries — same 5-attempt terminal semantics as
+/// notify_send. The sign key is decrypted only here and never logged; errors
+/// carry the HTTP outcome, not the URL.
+pub(crate) async fn send_delivery_once(
+    pool: &sqlx::PgPool,
+    webhook: &db::webhooks::WebhookRow,
+    event_view: serde_json::Value,
+    trigger: &str,
+    delivery_id: Uuid,
+    attempt: i32,
+    crypto: Option<&calendar_auth::Crypto>,
+) -> Result<(), String> {
+    let event_id: Uuid = event_view["id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or("event view missing id")?;
+    let payload =
+        db::webhooks::payload_json(delivery_id, webhook.id, event_id, trigger, event_view);
+    let body = payload.to_string();
+    let started = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut request = client
+        .post(&webhook.url)
+        .header("content-type", "application/json")
+        .header(
+            "user-agent",
+            concat!("CalStack/", env!("CARGO_PKG_VERSION")),
+        )
+        .body(body.clone());
+    if let (Some(secret), Some(crypto)) = (&webhook.secret_encrypted, crypto)
+        && let Ok(key) = crypto.decrypt(secret)
+    {
+        request = request.header(
+            "X-CalStack-Signature",
+            db::webhooks::sign(body.as_bytes(), &key),
+        );
+    }
+    let result = request.send().await;
+    // HTTP status for 2xx judgment; transport errors strip the target URL
+    // (it may carry credentials) before being recorded.
+    let (outcome, transport_error) = match result {
+        Ok(response) => {
+            let code = response.status().as_u16() as i32;
+            let _ = response.text().await; // drain the connection
+            (Some(code), None)
+        }
+        Err(e) => (None, Some(e.without_url().to_string())),
+    };
+    let elapsed = started.elapsed().as_millis() as u64;
+    let succeeded = outcome.is_some_and(|code| (200..300).contains(&code));
+    // 5 attempts terminal, matching durable_jobs.max_attempts and notify_send.
+    let status = if succeeded {
+        "succeeded"
+    } else if attempt >= 5 {
+        "exhausted"
+    } else {
+        "pending"
+    };
+    let error = if succeeded {
+        None
+    } else {
+        Some(match (outcome, transport_error) {
+            (Some(code), _) => format!("{elapsed}ms: HTTP {code}"),
+            (None, Some(detail)) => format!("{elapsed}ms: {detail}"),
+            (None, None) => format!("{elapsed}ms: delivery failed"),
+        })
+    };
+    db::webhooks::record_delivery_result(
+        pool,
+        delivery_id,
+        status,
+        outcome,
+        error.as_deref(),
+        attempt,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if succeeded {
+        Ok(())
+    } else {
+        Err(error.unwrap_or_default())
     }
 }
 
@@ -222,10 +428,23 @@ async fn alarm_scan(
         std::collections::HashMap::new();
     let mut providers: std::collections::HashMap<Uuid, TenantProviders> =
         std::collections::HashMap::new();
+    // Per-calendar stored VTIMEZONEs (ADR-012), cached like the other lookups.
+    let mut resolvers: std::collections::HashMap<Uuid, calendar_core::recurrence::TzResolver> =
+        std::collections::HashMap::new();
 
     for (event_id, group) in &by_event {
         for scan in group {
-            for trigger in alarm_triggers(scan, lookback, horizon) {
+            let resolver = match resolvers.get(&scan.calendar_id) {
+                Some(resolver) => resolver.clone(),
+                None => {
+                    let resolver = db::timezones::load_for_calendar(pool, scan.calendar_id)
+                        .await
+                        .unwrap_or_default();
+                    resolvers.insert(scan.calendar_id, resolver.clone());
+                    resolver
+                }
+            };
+            for trigger in alarm_triggers(scan, &resolver, lookback, horizon) {
                 if trigger < lookback || trigger > horizon {
                     continue;
                 }
@@ -431,9 +650,11 @@ async fn alarm_scan(
 /// relative triggers anchor on the event's own start/end — exception
 /// overrides use their own times, all-day events start at midnight in the
 /// event's timezone — and recurring events expand within
-/// [lookback, horizon).
+/// [lookback, horizon). `resolver` carries the calendar's stored VTIMEZONEs
+/// (ADR-012); tzdb ids resolve without it.
 fn alarm_triggers(
     scan: &alarms::AlarmScanRow,
+    resolver: &calendar_core::recurrence::TzResolver,
     lookback: DateTime<Utc>,
     horizon: DateTime<Utc>,
 ) -> Vec<DateTime<Utc>> {
@@ -451,6 +672,7 @@ fn alarm_triggers(
         calendar_core::recurrence::expand_occurrences(
             base,
             scan.event.tzid.as_deref(),
+            Some(resolver),
             scan.event.rrule.as_deref(),
             &parse_points(&scan.event.rdate),
             &parse_points(&scan.event.exdate),
@@ -461,14 +683,18 @@ fn alarm_triggers(
         .into_iter()
         .filter_map(|p| match p {
             DateOrDateTime::Timed(at) => Some(at),
-            DateOrDateTime::AllDay(date) => day_start_instant(date, scan.event.tzid.as_deref()),
+            DateOrDateTime::AllDay(date) => {
+                day_start_instant(date, scan.event.tzid.as_deref(), resolver)
+            }
         })
         .map(|at| at + Duration::seconds(offset))
         .collect()
     } else {
         match base {
             DateOrDateTime::Timed(at) => Some(at),
-            DateOrDateTime::AllDay(date) => day_start_instant(date, scan.event.tzid.as_deref()),
+            DateOrDateTime::AllDay(date) => {
+                day_start_instant(date, scan.event.tzid.as_deref(), resolver)
+            }
         }
         .map(|at| at + Duration::seconds(offset))
         .into_iter()
@@ -494,12 +720,15 @@ fn base_point(event: &db::EventRow, related_end: bool) -> Option<DateOrDateTime>
 
 /// Midnight of an all-day occurrence as an instant: wall clock in the event's
 /// timezone; floating events (no tzid) store wall clock as if UTC.
-fn day_start_instant(date: NaiveDate, tzid: Option<&str>) -> Option<DateTime<Utc>> {
+fn day_start_instant(
+    date: NaiveDate,
+    tzid: Option<&str>,
+    resolver: &calendar_core::recurrence::TzResolver,
+) -> Option<DateTime<Utc>> {
     let naive = date.and_hms_opt(0, 0, 0)?;
-    calendar_core::recurrence::resolve_tz(tzid)
-        .from_local_datetime(&naive)
-        .earliest()
-        .map(|dt| dt.with_timezone(&Utc))
+    calendar_core::recurrence::resolve_tz(tzid, Some(resolver))
+        .ok()?
+        .from_local(naive)
 }
 
 /// Deletes pending (not yet dispatched) reminder rows whose alarm or trigger
@@ -548,7 +777,12 @@ async fn prune_stale_pending(
             Some(scan) => match row.trigger_at {
                 // Trigger moved (e.g. an API edit of the start time keeps the
                 // alarm rows): drop rows whose old trigger no longer matches.
-                Some(at) => !alarm_triggers(scan, lookback, horizon).contains(&at),
+                Some(at) => {
+                    let resolver = db::timezones::load_for_calendar(pool, scan.calendar_id)
+                        .await
+                        .unwrap_or_default();
+                    !alarm_triggers(scan, &resolver, lookback, horizon).contains(&at)
+                }
                 // Rows written before trigger_at existed age out via send
                 // backoff; only the alarm-identity check applies.
                 None => false,
@@ -894,6 +1128,10 @@ mod tests {
     use super::*;
     use calendar_db::EventRow;
 
+    fn resolver() -> calendar_core::recurrence::TzResolver {
+        calendar_core::recurrence::TzResolver::default()
+    }
+
     fn timed(at: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(at)
             .unwrap()
@@ -993,7 +1231,7 @@ mod tests {
         );
         let (lookback, horizon) = window();
         assert_eq!(
-            alarm_triggers(&scan, lookback, horizon),
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
             vec![timed("2026-01-20T14:45:00Z")]
         );
     }
@@ -1013,7 +1251,7 @@ mod tests {
         );
         let (lookback, horizon) = window();
         assert_eq!(
-            alarm_triggers(&scan, lookback, horizon),
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
             vec![timed("2026-01-15T04:45:00Z")]
         );
     }
@@ -1033,7 +1271,7 @@ mod tests {
         );
         let (lookback, horizon) = window();
         assert_eq!(
-            alarm_triggers(&scan, lookback, horizon),
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
             vec![timed("2026-01-15T00:00:00Z")]
         );
     }
@@ -1052,7 +1290,7 @@ mod tests {
         );
         let (lookback, horizon) = window();
         assert_eq!(
-            alarm_triggers(&scan, lookback, horizon),
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
             vec![
                 timed("2026-01-15T00:00:00Z"),
                 timed("2026-01-16T00:00:00Z"),
@@ -1075,7 +1313,7 @@ mod tests {
         );
         let (lookback, horizon) = window();
         assert_eq!(
-            alarm_triggers(&scan, lookback, horizon),
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
             vec![timed("2026-01-15T09:45:00Z"), timed("2026-01-16T09:45:00Z"),]
         );
     }
@@ -1089,7 +1327,7 @@ mod tests {
         scan.alarm.trigger_at = Some(timed("2026-02-01T08:00:00Z"));
         let (lookback, horizon) = window();
         assert_eq!(
-            alarm_triggers(&scan, lookback, horizon),
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
             vec![timed("2026-02-01T08:00:00Z")]
         );
     }

@@ -18,6 +18,8 @@ use icalendar::{Calendar, Component, DatePerhapsTime, Event, EventLike};
 pub enum IcsError {
     #[error("VTODO is not supported (ADR-011)")]
     TodoUnsupported,
+    #[error("VTIMEZONE {0} is not compilable: {1}")]
+    UnsupportedTimezone(String, String),
     #[error("parse error: {0}")]
     Parse(String),
     #[error("VEVENT missing UID")]
@@ -55,8 +57,8 @@ fn known_tz(tzid: Option<&str>) -> Option<Tz> {
 }
 
 /// DTSTART/DTEND/RECURRENCE-ID property: `VALUE=DATE` for all-day, the bare
-/// wall clock for floating, local wall-clock with TZID for known zones, UTC
-/// with `Z` otherwise.
+/// wall clock for floating, local wall-clock with TZID for known or
+/// custom-stored zones, UTC with `Z` otherwise.
 fn date_time_property(
     key: &str,
     tzid: Option<&str>,
@@ -64,40 +66,57 @@ fn date_time_property(
     floating: bool,
     at: DateTime<Utc>,
     date: NaiveDate,
+    custom_zones: &std::collections::HashMap<String, calendar_core::recurrence::Zone>,
 ) -> icalendar::Property {
     let tzid = tzid.filter(|_| !floating);
+    let zone = tzid.filter(|t| known_tz(Some(t)).is_some() || custom_zones.contains_key(*t));
     let mut prop = if all_day {
         icalendar::Property::new(key, date.format("%Y%m%d").to_string())
     } else if floating {
         icalendar::Property::new(key, at.format("%Y%m%dT%H%M%S").to_string())
-    } else if let Some(tz) = known_tz(tzid) {
-        let local = at.with_timezone(&tz).format("%Y%m%dT%H%M%S").to_string();
+    } else if let Some(tz) = zone {
+        let local = match known_tz(Some(tz)) {
+            Some(tz) => at.with_timezone(&tz).format("%Y%m%dT%H%M%S").to_string(),
+            // Custom zone: render the wall clock via its compiled offsets.
+            None => custom_zones.get(tz).map_or_else(
+                || at.format("%Y%m%dT%H%M%S").to_string(),
+                |zone| zone.to_local(at).format("%Y%m%dT%H%M%S").to_string(),
+            ),
+        };
         icalendar::Property::new(key, local)
     } else {
         icalendar::Property::new(key, at.format("%Y%m%dT%H%M%SZ").to_string())
     };
     if all_day {
         prop.add_parameter("VALUE", "DATE");
-    } else if let Some(tz) = known_tz(tzid) {
-        prop.add_parameter("TZID", tz.name());
+    } else if let Some(tz) = zone {
+        prop.add_parameter("TZID", tz);
     }
     prop
 }
 
-fn recurrence_id_property(event: &EventRow) -> Option<icalendar::Property> {
+fn recurrence_id_property(
+    event: &EventRow,
+    custom_zones: &std::collections::HashMap<String, calendar_core::recurrence::Zone>,
+) -> Option<icalendar::Property> {
     if let Some(date) = event.recurrence_id_date {
         let mut prop = icalendar::Property::new("RECURRENCE-ID", date.format("%Y%m%d").to_string());
         prop.add_parameter("VALUE", "DATE");
         Some(prop)
     } else if let Some(naive) = event.recurrence_id {
-        let tz = known_tz(event.tzid.as_deref()).filter(|_| !event.floating);
-        let mut prop = if tz.is_some() || event.floating {
+        // RECURRENCE-ID is stored as wall clock in the event's zone.
+        let has_zone = !event.floating
+            && event
+                .tzid
+                .as_deref()
+                .is_some_and(|t| known_tz(Some(t)).is_some() || custom_zones.contains_key(t));
+        let mut prop = if has_zone || event.floating {
             icalendar::Property::new("RECURRENCE-ID", naive.format("%Y%m%dT%H%M%S").to_string())
         } else {
             icalendar::Property::new("RECURRENCE-ID", naive.format("%Y%m%dT%H%M%SZ").to_string())
         };
-        if let Some(tz) = tz {
-            prop.add_parameter("TZID", tz.name());
+        if has_zone {
+            prop.add_parameter("TZID", event.tzid.as_deref().unwrap_or_default());
         }
         Some(prop)
     } else {
@@ -111,6 +130,11 @@ pub struct ExportRow {
     pub attendees: Vec<AttendeeRow>,
     pub alarms: Vec<calendar_db::alarms::AlarmRow>,
     pub location: Option<calendar_db::LocationRow>,
+    /// Stored VTIMEZONEs for the calendar (ADR-012): the raw definition is
+    /// re-emitted at the top of the VCALENDAR so clients round-trip their own
+    /// zone, and the compiled rules render custom-zone wall clocks. Empty
+    /// when the calendar has no client-supplied zones.
+    pub vtimezones: Vec<calendar_db::timezones::StoredTimezone>,
 }
 
 impl From<(EventRow, Vec<AttendeeRow>)> for ExportRow {
@@ -120,15 +144,34 @@ impl From<(EventRow, Vec<AttendeeRow>)> for ExportRow {
             attendees,
             alarms: vec![],
             location: None,
+            vtimezones: vec![],
         }
     }
 }
 
+/// Custom (non-tzdb) zones of an export, compiled to offset transitions for
+/// wall-clock rendering.
+fn custom_zones_of(
+    rows: &[ExportRow],
+) -> std::collections::HashMap<String, calendar_core::recurrence::Zone> {
+    rows.iter()
+        .flat_map(|row| row.vtimezones.iter())
+        .filter(|stored| !calendar_core::recurrence::is_tzdb_tzid(&stored.tzid))
+        .filter_map(|stored| {
+            compiled_zone(&stored.tzid, &stored.rules).map(|zone| (stored.tzid.clone(), zone))
+        })
+        .collect()
+}
+
 /// One VEVENT per row (masters and exceptions alike); a calendar export is a
-/// VCALENDAR of all of them.
+/// VCALENDAR of all of them, with the calendar's stored VTIMEZONE components
+/// spliced in ahead of the events.
 pub fn events_to_ics(rows: &[ExportRow]) -> String {
     let mut calendar = Calendar::new();
     calendar.name("calendar-server");
+    // Custom (non-tzdb) zones in the export: DTSTART/DTEND/RECURRENCE-ID with
+    // such a TZID render as local wall clock with the TZID parameter.
+    let custom_zones = custom_zones_of(rows);
     for row in rows {
         let (event, attendees) = (&row.event, &row.attendees);
         let alarms = &row.alarms;
@@ -154,6 +197,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
                     event.floating,
                     at,
                     today(),
+                    &custom_zones,
                 ));
             }
             (None, Some(date)) => {
@@ -164,6 +208,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
                     false,
                     Utc::now(),
                     date,
+                    &custom_zones,
                 ));
             }
             (None, None) => {}
@@ -176,6 +221,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
                 event.floating,
                 at,
                 today(),
+                &custom_zones,
             ));
         }
         if let Some(date) = event.end_date {
@@ -186,6 +232,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
                 false,
                 Utc::now(),
                 date,
+                &custom_zones,
             ));
         }
         if let Some(rrule) = &event.rrule {
@@ -199,7 +246,7 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
             let values = json_points_to_ics(&event.exdate, event.floating);
             ev.add_property("EXDATE", &values);
         }
-        if let Some(recurrence) = recurrence_id_property(event) {
+        if let Some(recurrence) = recurrence_id_property(event, &custom_zones) {
             ev.append_property(recurrence);
         }
         if let Some(status) = &event.status {
@@ -262,7 +309,31 @@ pub fn events_to_ics(rows: &[ExportRow]) -> String {
         ev.last_modified(event.updated_at);
         calendar.push(ev);
     }
-    calendar.to_string()
+    let mut out = calendar.to_string();
+    // Splice the calendar's stored VTIMEZONE components in ahead of the
+    // events (icalendar has no VTIMEZONE builder). Definitions are unfolded
+    // text; re-fold nothing, just normalize line endings to CRLF.
+    let mut zone_text = String::new();
+    let mut emitted = std::collections::HashSet::new();
+    for row in rows {
+        for stored in &row.vtimezones {
+            if !emitted.insert(stored.tzid.clone()) {
+                continue;
+            }
+            for line in stored.definition.lines() {
+                zone_text.push_str(line.trim_end_matches('\r'));
+                zone_text.push_str("\r\n");
+            }
+        }
+    }
+    if !zone_text.is_empty()
+        && let Some(pos) = out
+            .find("BEGIN:VEVENT")
+            .or_else(|| out.rfind("END:VCALENDAR"))
+    {
+        out.insert_str(pos, &zone_text);
+    }
+    out
 }
 
 /// VALARM: ACTION, TRIGGER (relative or absolute), RELATED, recipients.
@@ -400,9 +471,28 @@ pub struct ParsedAttendee {
     pub rsvp: Option<bool>,
 }
 
-/// Parses one VCALENDAR into its VEVENTs. VTODO (or any unsupported
-/// component) is rejected per ADR-011.
-pub fn parse_ics(text: &str) -> Result<Vec<ParsedEvent>, IcsError> {
+/// Parsed VCALENDAR: the VEVENTs plus any client-supplied VTIMEZONEs
+/// (ADR-012), ready for the PUT storage path.
+#[derive(Debug, Default)]
+pub struct ParsedCalendar {
+    pub events: Vec<ParsedEvent>,
+    pub timezones: Vec<ParsedTimezone>,
+}
+
+/// A parsed client-supplied VTIMEZONE: the tzid, the raw component text
+/// (re-emitted on export) and the compiled STANDARD/DAYLIGHT rules.
+#[derive(Debug, Clone)]
+pub struct ParsedTimezone {
+    pub tzid: String,
+    pub definition: String,
+    pub rules: Vec<calendar_core::recurrence::ZoneRule>,
+}
+
+/// Parses one VCALENDAR into its VEVENTs and VTIMEZONEs. VTODO (or any
+/// unsupported component) is rejected per ADR-011; a non-tzdb VTIMEZONE that
+/// cannot be compiled is rejected with `UnsupportedTimezone` naming the tzid
+/// (ADR-012) — nothing that would later expand as UTC is ever stored.
+pub fn parse_calendar(text: &str) -> Result<ParsedCalendar, IcsError> {
     // The icalendar 0.17 parser rejects RFC 5545 line folding; unfold first.
     let unfolded = unfold(text);
     let calendar = icalendar::parser::read_calendar(&unfolded).map_err(IcsError::Parse)?;
@@ -412,6 +502,10 @@ pub fn parse_ics(text: &str) -> Result<Vec<ParsedEvent>, IcsError> {
         .find(|prop| prop.name.as_ref() == "METHOD")
         .map(|prop| prop.val.as_str().trim().to_string())
         .filter(|m| !m.is_empty());
+    let timezones = parse_timezones(&unfolded, &calendar)?;
+    // Custom zones compiled for event parsing: DTSTART with a custom TZID is
+    // converted wall → instant via the zone the client supplied alongside it.
+    let custom = compiled_zones(&timezones);
     let mut out = Vec::new();
     for component in calendar.components {
         let name = component.name.as_ref();
@@ -428,12 +522,211 @@ pub fn parse_ics(text: &str) -> Result<Vec<ParsedEvent>, IcsError> {
             .map(|sub| parse_alarm(sub))
             .collect();
         let event = to_owned_event(&component);
-        let mut parsed = parse_event(event)?;
+        let mut parsed = parse_event(event, &custom)?;
         parsed.alarms = alarms;
         parsed.method = method.clone();
         out.push(parsed);
     }
-    Ok(out)
+    Ok(ParsedCalendar {
+        events: out,
+        timezones,
+    })
+}
+
+/// Compiles one VTIMEZONE's rules into a resolvable zone for wall-clock
+/// rendering. Failing zones are skipped — they were rejected at PUT, so this
+/// only guards against stale stored data.
+fn compiled_zone(
+    tzid: &str,
+    rules: &[calendar_core::recurrence::ZoneRule],
+) -> Option<calendar_core::recurrence::Zone> {
+    let now = Utc::now();
+    let window = (
+        now - chrono::Duration::days(366 * calendar_core::recurrence::ZONE_WINDOW_YEARS),
+        now + chrono::Duration::days(366 * calendar_core::recurrence::ZONE_WINDOW_YEARS),
+    );
+    let transitions = calendar_core::recurrence::compile_zone(rules, window.0, window.1).ok()?;
+    let mut resolver = calendar_core::recurrence::TzResolver::default();
+    resolver.insert(tzid.to_string(), transitions);
+    calendar_core::recurrence::resolve_tz(Some(tzid), Some(&resolver)).ok()
+}
+
+/// Compiles parsed VTIMEZONEs into tzid → zone lookups.
+fn compiled_zones(
+    timezones: &[ParsedTimezone],
+) -> std::collections::HashMap<String, calendar_core::recurrence::Zone> {
+    timezones
+        .iter()
+        .filter_map(|tz| compiled_zone(&tz.tzid, &tz.rules).map(|zone| (tz.tzid.clone(), zone)))
+        .collect()
+}
+
+/// Parses one VCALENDAR into its VEVENTs. VTODO (or any unsupported
+/// component) is rejected per ADR-011. VTIMEZONEs are ignored here — callers
+/// that store them use [`parse_calendar`].
+pub fn parse_ics(text: &str) -> Result<Vec<ParsedEvent>, IcsError> {
+    parse_calendar(text).map(|c| c.events)
+}
+
+/// Extracts every VTIMEZONE. tzdb-named zones are dropped (tzdb keeps
+/// precedence); every other zone must compile over the ADR-012 window.
+fn parse_timezones(
+    unfolded: &str,
+    calendar: &icalendar::parser::Calendar<'_>,
+) -> Result<Vec<ParsedTimezone>, IcsError> {
+    let now = Utc::now();
+    let window = (
+        now - chrono::Duration::days(366 * calendar_core::recurrence::ZONE_WINDOW_YEARS),
+        now + chrono::Duration::days(366 * calendar_core::recurrence::ZONE_WINDOW_YEARS),
+    );
+    let mut out = Vec::new();
+    for component in calendar
+        .components
+        .iter()
+        .filter(|c| c.name.as_ref() == "VTIMEZONE")
+    {
+        let parsed = parse_timezone(component)?;
+        // IANA-identified zones need no stored definition.
+        if calendar_core::recurrence::is_tzdb_tzid(&parsed.tzid) {
+            continue;
+        }
+        calendar_core::recurrence::compile_zone(&parsed.rules, window.0, window.1)
+            .map_err(|e| IcsError::UnsupportedTimezone(parsed.tzid.clone(), e.to_string()))?;
+        out.push(parsed);
+    }
+    // Raw definition text is captured from the unfolded input, not
+    // re-serialized: the client's zone round-trips byte-faithfully.
+    let raw = raw_vtimezones(unfolded);
+    Ok(out
+        .into_iter()
+        .map(|parsed| ParsedTimezone {
+            definition: raw
+                .iter()
+                .find(|text| text.contains(&format!("TZID:{}", parsed.tzid)))
+                .cloned()
+                .unwrap_or_default(),
+            ..parsed
+        })
+        .collect())
+}
+
+/// The raw BEGIN:VTIMEZONE..END:VTIMEZONE blocks (unfolded, one per zone).
+fn raw_vtimezones(unfolded: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    for line in unfolded.lines() {
+        match line.trim() {
+            "BEGIN:VTIMEZONE" => current = Some(format!("{line}\n")),
+            "END:VTIMEZONE" => {
+                if let Some(mut block) = current.take() {
+                    block.push_str(line);
+                    out.push(block);
+                }
+            }
+            _ => {
+                if let Some(block) = &mut current {
+                    block.push_str(line);
+                    block.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parses one VTIMEZONE component into tzid + compiled rules.
+fn parse_timezone(
+    component: &icalendar::parser::Component<'_>,
+) -> Result<ParsedTimezone, IcsError> {
+    let tzid = component
+        .properties
+        .iter()
+        .find(|p| p.name.as_ref() == "TZID")
+        .map(|p| p.val.as_str().trim().to_string())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            IcsError::UnsupportedTimezone(
+                "(missing TZID)".into(),
+                "VTIMEZONE without a TZID property".into(),
+            )
+        })?;
+    let mut rules = Vec::new();
+    for sub in &component.components {
+        let sub_name = sub.name.as_ref();
+        if sub_name != "STANDARD" && sub_name != "DAYLIGHT" {
+            return Err(IcsError::UnsupportedTimezone(
+                tzid.clone(),
+                format!("unsupported sub-component {sub_name}"),
+            ));
+        }
+        let get = |key: &str| {
+            sub.properties
+                .iter()
+                .find(|p| p.name.as_ref() == key)
+                .map(|p| p.val.as_str().trim().to_string())
+        };
+        let unsupported =
+            |what: &str| IcsError::UnsupportedTimezone(tzid.clone(), what.to_string());
+        let dtstart = get("DTSTART")
+            .filter(|v| !v.is_empty())
+            .and_then(|v| chrono::NaiveDateTime::parse_from_str(&v, "%Y%m%dT%H%M%S").ok())
+            .ok_or_else(|| unsupported("DTSTART is not a local date-time"))?;
+        let offset_from_secs = parse_utc_offset(
+            &get("TZOFFSETFROM")
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| unsupported("STANDARD/DAYLIGHT without TZOFFSETFROM"))?,
+        )?;
+        let offset_to_secs = parse_utc_offset(
+            &get("TZOFFSETTO")
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| unsupported("STANDARD/DAYLIGHT without TZOFFSETTO"))?,
+        )?;
+        let rrule = get("RRULE").filter(|v| !v.is_empty());
+        let mut rdates = Vec::new();
+        if let Some(rdate) = get("RDATE") {
+            for value in rdate.split(',') {
+                rdates.push(
+                    chrono::NaiveDateTime::parse_from_str(value.trim(), "%Y%m%dT%H%M%S")
+                        .map_err(|_| unsupported("RDATE is not a local date-time"))?,
+                );
+            }
+        }
+        rules.push(calendar_core::recurrence::ZoneRule {
+            dtstart,
+            offset_from_secs,
+            offset_to_secs,
+            rrule,
+            rdates,
+        });
+    }
+    if rules.is_empty() {
+        return Err(IcsError::UnsupportedTimezone(
+            tzid.clone(),
+            "no STANDARD/DAYLIGHT sub-components".into(),
+        ));
+    }
+    Ok(ParsedTimezone {
+        tzid,
+        definition: String::new(),
+        rules,
+    })
+}
+
+/// Parses a ±HHMM or ±HHMMSS UTC offset into seconds.
+fn parse_utc_offset(value: &str) -> Result<i32, IcsError> {
+    let (sign, digits) = value.split_at(1);
+    let sign: i32 = match sign {
+        "+" => 1,
+        "-" => -1,
+        _ => return Err(IcsError::Parse(format!("bad TZOFFSET {value}"))),
+    };
+    let h: i32 = digits
+        .get(0..2)
+        .and_then(|d| d.parse().ok())
+        .ok_or_else(|| IcsError::Parse(format!("bad TZOFFSET {value}")))?;
+    let m: i32 = digits.get(2..4).and_then(|d| d.parse().ok()).unwrap_or(0);
+    let s: i32 = digits.get(4..6).and_then(|d| d.parse().ok()).unwrap_or(0);
+    Ok(sign * (h * 3600 + m * 60 + s))
 }
 
 /// Converts a borrowed parser component into an owned `Event`, collecting
@@ -447,7 +740,10 @@ fn to_owned_event(component: &icalendar::parser::Component<'_>) -> icalendar::Ev
     event
 }
 
-fn parse_event(event: icalendar::Event) -> Result<ParsedEvent, IcsError> {
+fn parse_event(
+    event: icalendar::Event,
+    custom: &std::collections::HashMap<String, calendar_core::recurrence::Zone>,
+) -> Result<ParsedEvent, IcsError> {
     use icalendar::Component;
     let uid = event.get_uid().ok_or(IcsError::MissingUid)?.to_string();
     let mut parsed = ParsedEvent {
@@ -475,12 +771,12 @@ fn parse_event(event: icalendar::Event) -> Result<ParsedEvent, IcsError> {
         points,
         DatePerhapsTime::DateTime(icalendar::CalendarDateTime::Floating(_))
     );
-    let Some(point) = points_to_core(&points) else {
+    let Some(point) = points_to_core(&points, custom) else {
         return Err(IcsError::MissingDtstart);
     };
     apply_date_point(&mut parsed, &point, true);
     if let Some(end) = event.get_end()
-        && let Some(point) = points_to_core(&end)
+        && let Some(point) = points_to_core(&end, custom)
     {
         apply_date_point(&mut parsed, &point, false);
     }
@@ -524,18 +820,26 @@ fn parse_event(event: icalendar::Event) -> Result<ParsedEvent, IcsError> {
                 }
                 // TZID-qualified values are converted through the zone so the
                 // stored point is an absolute instant regardless of form.
-                let tzid = prop
-                    .params()
-                    .get("TZID")
-                    .and_then(|p| p.value().parse::<Tz>().ok());
+                // A custom tzid resolves through the calendar's VTIMEZONEs;
+                // an unresolvable tzid leaves the value as a UTC instant
+                // rather than guessing — put_series rejects the unknown tzid.
+                let tz_param = prop.params().get("TZID").map(|p| p.value().to_string());
+                let zone: Option<calendar_core::recurrence::Zone> =
+                    tz_param.as_deref().and_then(|t| match custom.get(t) {
+                        Some(zone) => Some(zone.clone()),
+                        None => t
+                            .parse::<Tz>()
+                            .ok()
+                            .map(calendar_core::recurrence::Zone::Tz),
+                    });
                 let point = if value.len() == 8 && value.chars().all(|c| c.is_ascii_digit()) {
                     NaiveDate::parse_from_str(value, "%Y%m%d")
                         .ok()
                         .map(DateOrDateTime::AllDay)
-                } else if let Some(tz) = tzid {
+                } else if let Some(zone) = zone {
                     NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
                         .ok()
-                        .and_then(|naive| instant_in_zone(tz, naive))
+                        .and_then(|naive| zone.from_local(naive))
                         .map(DateOrDateTime::Timed)
                 } else {
                     parse_ics_datetime(value).map(DateOrDateTime::Timed)
@@ -738,23 +1042,25 @@ fn attendee_from_prop(prop: &icalendar::Property) -> ParsedAttendee {
     }
 }
 
-fn instant_in_zone(tz: Tz, naive: NaiveDateTime) -> Option<DateTime<Utc>> {
-    use chrono::LocalResult;
-    match tz.from_local_datetime(&naive) {
-        LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-        LocalResult::Ambiguous(earliest, _) => Some(earliest.with_timezone(&Utc)),
-        LocalResult::None => None,
-    }
-}
-
-fn points_to_core(point: &DatePerhapsTime) -> Option<DateOrDateTime> {
+fn points_to_core(
+    point: &DatePerhapsTime,
+    custom: &std::collections::HashMap<String, calendar_core::recurrence::Zone>,
+) -> Option<DateOrDateTime> {
     match point {
         DatePerhapsTime::Date(date) => Some(DateOrDateTime::AllDay(*date)),
         // Floating: the wall clock is stored as if it were UTC (events.floating).
         DatePerhapsTime::DateTime(icalendar::CalendarDateTime::Floating(naive)) => {
             Some(DateOrDateTime::Timed(naive.and_utc()))
         }
-        DatePerhapsTime::DateTime(dt) => dt.try_into_utc().map(DateOrDateTime::Timed),
+        DatePerhapsTime::DateTime(dt) => {
+            // Custom tzid: the calendar's own VTIMEZONEs supply the conversion.
+            if let icalendar::CalendarDateTime::WithTimezone { date_time, tzid } = dt
+                && let Some(zone) = custom.get(tzid.as_ref() as &str)
+            {
+                return zone.from_local(*date_time).map(DateOrDateTime::Timed);
+            }
+            dt.try_into_utc().map(DateOrDateTime::Timed)
+        }
     }
 }
 
@@ -781,6 +1087,7 @@ fn apply_date_point(parsed: &mut ParsedEvent, point: &DateOrDateTime, start: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Datelike, Timelike};
 
     const SAMPLE: &str = "BEGIN:VCALENDAR\r\n\
 PRODID:-//calendar-server//EN\r\nVERSION:2.0\r\n\
@@ -851,6 +1158,7 @@ END:VCALENDAR\r\n";
         attendee.email = None;
         attendee.telephone = Some("+13216166280".into());
         let ics = events_to_ics(&[ExportRow {
+            vtimezones: vec![],
             event: sample_event_row(),
             attendees: vec![attendee],
             alarms: vec![],
@@ -894,6 +1202,7 @@ END:VCALENDAR\r\n";
             created_at: Utc::now(),
         };
         let ics = events_to_ics(&[ExportRow {
+            vtimezones: vec![],
             event: event.clone(),
             attendees: vec![],
             alarms: vec![
@@ -936,6 +1245,7 @@ END:VCALENDAR\r\n";
     fn location_appears_in_ics() {
         let event = sample_event_row();
         let ics = events_to_ics(&[ExportRow {
+            vtimezones: vec![],
             event,
             attendees: vec![],
             alarms: vec![],
@@ -1065,6 +1375,7 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
         let event = sample_event_row();
         let attendees = vec![sample_attendee()];
         let ics = events_to_ics(&[ExportRow {
+            vtimezones: vec![],
             event,
             attendees,
             alarms: vec![],
@@ -1098,6 +1409,7 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
         );
         event.summary = "Moved".into();
         let ics = events_to_ics(&[ExportRow {
+            vtimezones: vec![],
             event,
             attendees: vec![],
             alarms: vec![],
@@ -1111,5 +1423,250 @@ BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\
                 NaiveDateTime::parse_from_str("2026-01-12T09:00:00", "%Y-%m-%dT%H:%M:%S").unwrap()
             )
         );
+    }
+    const ZONE_CALENDAR: &str = "BEGIN:VCALENDAR\r\n\
+PRODID:-//calendar-server//EN\r\nVERSION:2.0\r\n\
+BEGIN:VTIMEZONE\r\nTZID:Custom/Test\r\n\
+BEGIN:STANDARD\r\nDTSTART:19701101T020000\r\n\
+TZOFFSETFROM:-0600\r\nTZOFFSETTO:-0700\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU\r\nEND:STANDARD\r\n\
+BEGIN:DAYLIGHT\r\nDTSTART:19700308T020000\r\n\
+TZOFFSETFROM:-0700\r\nTZOFFSETTO:-0600\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU\r\nEND:DAYLIGHT\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\nUID:zone-1\r\nDTSTAMP:20260911T120000Z\r\n\
+DTSTART;TZID=Custom/Test:20260305T090000\r\n\
+DTEND;TZID=Custom/Test:20260305T100000\r\n\
+RRULE:FREQ=DAILY\r\nSUMMARY:Zone standup\r\n\
+ORGANIZER:mailto:brian@example.com\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+    #[test]
+    fn vtimezone_rules_are_extracted() {
+        let parsed = parse_calendar(ZONE_CALENDAR).unwrap();
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.timezones.len(), 1);
+        let tz = &parsed.timezones[0];
+        assert_eq!(tz.tzid, "Custom/Test");
+        assert!(tz.definition.starts_with("BEGIN:VTIMEZONE"));
+        assert!(tz.definition.contains("TZID:Custom/Test"));
+        assert_eq!(tz.rules.len(), 2);
+        let standard = tz
+            .rules
+            .iter()
+            .find(|r| r.offset_to_secs == -7 * 3600)
+            .unwrap();
+        assert_eq!(standard.offset_from_secs, -6 * 3600);
+        assert_eq!(
+            standard.rrule.as_deref(),
+            Some("FREQ=YEARLY;BYMONTH=11;BYDAY=1SU")
+        );
+        // The event keeps its custom tzid identity.
+        assert_eq!(parsed.events[0].tzid.as_deref(), Some("Custom/Test"));
+    }
+
+    #[test]
+    fn tzdb_named_vtimezone_is_not_stored() {
+        // tzdb zones keep precedence; the definition is dropped, not stored.
+        let ics = ZONE_CALENDAR
+            .replace("TZID:Custom/Test", "TZID:America/Denver")
+            .replace("TZID=Custom/Test", "TZID=America/Denver");
+        let parsed = parse_calendar(&ics).unwrap();
+        assert!(parsed.timezones.is_empty());
+        assert_eq!(parsed.events[0].tzid.as_deref(), Some("America/Denver"));
+    }
+
+    #[test]
+    fn uncompilable_vtimezone_names_the_tzid() {
+        let prefix = "BEGIN:VCALENDAR\r\nPRODID:-//x//EN\r\nVERSION:2.0\r\nBEGIN:VTIMEZONE\r\nTZID:Broken/Zone\r\n";
+        let cases = [
+            // unsupported FREQ
+            format!(
+                "{prefix}BEGIN:STANDARD\r\nDTSTART:19701101T020000\r\nTZOFFSETFROM:-0600\r\nTZOFFSETTO:-0700\r\nRRULE:FREQ=MINUTELY\r\nEND:STANDARD\r\n"
+            ),
+            // TZOFFSETTO missing
+            format!(
+                "{prefix}BEGIN:STANDARD\r\nDTSTART:19701101T020000\r\nTZOFFSETFROM:-0600\r\nEND:STANDARD\r\n"
+            ),
+            // no STANDARD/DAYLIGHT at all
+            format!("{prefix}END:VTIMEZONE\r\nEND:VCALENDAR\r\n"),
+            // unsupported sub-component
+            format!(
+                "{prefix}BEGIN:STANDARD\r\nDTSTART:19701101T020000\r\nTZOFFSETFROM:-0600\r\nTZOFFSETTO:-0700\r\nEND:STANDARD\r\nBEGIN:X-WEIRD\r\nFOO:bar\r\nEND:X-WEIRD\r\n"
+            ),
+        ];
+        for ics in &cases {
+            // The icalendar parser itself rejects a STANDARD/DAYLIGHT missing
+            // required properties; anything else must fail with the tzid.
+            let err = parse_calendar(ics).unwrap_err();
+            assert!(
+                matches!(err, IcsError::UnsupportedTimezone(ref tz, _) if tz == "Broken/Zone")
+                    || matches!(err, IcsError::Parse(_)),
+                "expected UnsupportedTimezone or parse error, got {err}"
+            );
+        }
+        // parse_ics (the VEVENT-only path used by free-busy/iMIP readers)
+        // does not reject zones it ignores.
+        assert_eq!(parse_ics(ZONE_CALENDAR).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn folded_vtimezone_unfolds_and_parses() {
+        // RFC 5545 folded lines: TZID split across a continuation line.
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTIMEZONE\r\n\
+TZID:Custom/Fo\r\n ld\r\nBEGIN:STANDARD\r\nDTSTART:19701101T020000\r\n\
+TZOFFSETFROM:-0600\r\nTZOFFSETTO:-0700\r\nEND:STANDARD\r\n\
+END:VTIMEZONE\r\nEND:VCALENDAR\r\n";
+        let parsed = parse_calendar(ics).unwrap();
+        assert_eq!(parsed.timezones.len(), 1);
+        assert_eq!(parsed.timezones[0].tzid, "Custom/Fold");
+    }
+
+    /// DB-backed tests need a live PostgreSQL via DATABASE_URL (the throwaway
+    /// instance the interop suite boots works). Without it they skip so
+    /// `cargo test` still passes on machines without infrastructure.
+    async fn test_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .ok()?;
+        calendar_db::migrate(&pool).await.ok()?;
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn vtimezone_round_trips_put_expand_and_get() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        // Calendar fixture (users/tenants/calendars), mirroring the ics_upsert tests.
+        let user = uuid::Uuid::new_v4();
+        let calendar = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, email) VALUES ($1, $2, $3)")
+            .bind(user)
+            .bind(format!("u-{}", user.simple()))
+            .bind(format!("{}@zone.test", user))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO tenants (id, slug, name, is_personal) VALUES ($1, $2, $2, true)")
+            .bind(user)
+            .bind(user.simple().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_members (tenant_id, user_id, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(user)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO calendars (id, tenant_id, slug, name, created_by) VALUES ($1, $2, $3, $3, $4)")
+            .bind(calendar)
+            .bind(user)
+            .bind(user.simple().to_string())
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // PUT through the same mapping the DAV flush() path uses.
+        let parsed = parse_calendar(ZONE_CALENDAR).unwrap();
+        let mut master = upsert_data(&parsed.events[0]);
+        if master.organizer_email.is_empty() {
+            master.organizer_email = "brian@example.com".into();
+        }
+        let zones: Vec<calendar_db::timezones::NewTimezone> = parsed
+            .timezones
+            .iter()
+            .map(|tz| calendar_db::timezones::NewTimezone {
+                tzid: tz.tzid.clone(),
+                definition: tz.definition.clone(),
+                rules: tz.rules.clone(),
+            })
+            .collect();
+        let (row, created) = calendar_db::ics_upsert::put_series(
+            &pool,
+            calendar,
+            user,
+            "zone.ics",
+            &master,
+            &[],
+            &zones,
+            &calendar_db::ics_upsert::PutPrecondition::None,
+        )
+        .await
+        .unwrap();
+        assert!(created);
+        assert_eq!(row.tzid.as_deref(), Some("Custom/Test"));
+
+        // Expansion through the loaded resolver crosses the DST transition
+        // with the wall clock intact.
+        let resolver = calendar_db::timezones::load_for_calendar(&pool, calendar)
+            .await
+            .unwrap();
+        let expanded = calendar_core::recurrence::expand_occurrences(
+            DateOrDateTime::Timed(row.starts_at.unwrap()),
+            row.tzid.as_deref(),
+            Some(&resolver),
+            row.rrule.as_deref(),
+            &[],
+            &[],
+            chrono::Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap(),
+            chrono::Utc.with_ymd_and_hms(2026, 3, 12, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+        let utc_hours: Vec<(u32, u32)> = expanded
+            .iter()
+            .map(|p| match p {
+                DateOrDateTime::Timed(at) => (at.day(), at.hour()),
+                _ => panic!("timed expected"),
+            })
+            .collect();
+        assert_eq!(
+            utc_hours,
+            vec![
+                (5, 16),
+                (6, 16),
+                (7, 16),
+                (8, 15),
+                (9, 15),
+                (10, 15),
+                (11, 15)
+            ]
+        );
+
+        // GET-render: the client's VTIMEZONE is serialized back and the
+        // DTSTART keeps its TZID-qualified wall clock.
+        let zones = calendar_db::timezones::list_for_calendar(&pool, calendar)
+            .await
+            .unwrap();
+        let (event, _) = calendar_db::get_event_by_href(&pool, calendar, "zone.ics")
+            .await
+            .unwrap();
+        let out = events_to_ics(&[ExportRow {
+            event,
+            attendees: vec![],
+            alarms: vec![],
+            location: None,
+            vtimezones: zones,
+        }]);
+        assert!(out.contains("BEGIN:VTIMEZONE"), "{out}");
+        assert!(out.contains("TZID:Custom/Test"), "{out}");
+        assert!(
+            out.contains("DTSTART;TZID=Custom/Test:20260305T090000"),
+            "{out}"
+        );
+        // The export parses again: zone + event survive the round trip.
+        let reparsed = parse_calendar(&out).unwrap();
+        assert_eq!(reparsed.timezones[0].tzid, "Custom/Test");
+        assert_eq!(reparsed.events[0].tzid.as_deref(), Some("Custom/Test"));
+        assert_eq!(reparsed.events[0].starts_at, row.starts_at);
     }
 }
