@@ -1,5 +1,12 @@
 # Deferred Work Requirements
 
+> **Status: implemented.** All nine items landed between commits `9db628d`
+> and `4b0f109` (2026-09-20), verified by the interop suite. This document
+> records the agreed requirements and the decisions made during discovery;
+> where the shipped behavior differs in detail (e.g. the RFC 6578 partial-sync
+> token is the `DAV:sync-token` element itself — the RFC defines no separate
+> next-token element), the code comments in `dav.rs` are authoritative.
+
 Requirements for the nine deferred items from the 2026-09-19 project audit.
 Each item's decision was confirmed with the owner during requirements
 discovery; this document is the agreed spec. Architecture and implementation
