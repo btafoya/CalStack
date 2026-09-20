@@ -2,6 +2,7 @@
 #![recursion_limit = "256"] // the event JSON literal in `event_json` is large
 
 mod admin_api;
+mod audit;
 mod auth;
 mod calendars_api;
 mod capture;
@@ -233,6 +234,10 @@ fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::token_scope_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit::middleware,
         ))
         .layer(security_headers())
         .with_state(state);

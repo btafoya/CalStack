@@ -167,6 +167,73 @@ pub async fn create_notification_deduped(
     Ok(n > 0)
 }
 
+/// Crash-recovery claim for dispatch: a row mid-send when the process died
+/// must not re-send until its 60-second lease expires. Single worker per DB
+/// by design — this closes the crash-between-send-and-sent_at window, not
+/// multi-instance fan-out.
+pub async fn claim_notification(pool: &PgPool, id: Uuid) -> Result<bool, DbError> {
+    let n = sqlx::query(
+        "UPDATE notifications SET claimed_until = now() + interval '60 seconds'
+         WHERE id = $1 AND (claimed_until IS NULL OR claimed_until < now())",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n > 0)
+}
+
 pub fn now() -> DateTime<Utc> {
     Utc::now()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn test_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .ok()?;
+        crate::migrate(&pool).await.ok()?;
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn claim_holds_row_until_lease_expires() {
+        let Some(pool) = test_pool().await else {
+            return; // no DATABASE_URL: skip
+        };
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO notifications (id, user_id, channel, dedupe_key)
+             VALUES ($1, NULL, 'email', $2)",
+        )
+        .bind(id)
+        .bind(Uuid::new_v4().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        // First claim wins, second (crashed worker's lease) is refused.
+        assert!(claim_notification(&pool, id).await.unwrap());
+        assert!(!claim_notification(&pool, id).await.unwrap());
+        // Releasing the claim (send failure path) makes it claimable again.
+        sqlx::query("UPDATE notifications SET claimed_until = NULL WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(claim_notification(&pool, id).await.unwrap());
+        sqlx::query("DELETE FROM notifications WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }

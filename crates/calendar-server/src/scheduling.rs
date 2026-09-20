@@ -1,6 +1,13 @@
 //! iTIP/iMIP scheduling (docs/PRD.md section 9; ADR-009): outbound REQUEST/
 //! CANCEL recording + a Postmark inbound webhook for external attendee
 //! messages. Generic SMTP stays outbound-only.
+//!
+//! Trust boundary: the From address on an inbound reply comes from
+//! Postmark's inbound pipeline, which performs SPF/DKIM/DMARC handling at
+//! receipt. The server's check (From must match an attendee) is
+//! authorization, not mail authentication — RSVP trust equals mail-pipeline
+//! trust. Deployments that do not trust their inbound pipeline must not
+//! configure the webhook.
 
 use crate::{AppError, AppState};
 use axum::{

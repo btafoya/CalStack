@@ -27,7 +27,7 @@ CalStack speaks CalDAV to real clients (Apple Calendar, Thunderbird, DAVx5, Outl
 - **Reminders** — VALARMs fire from a PostgreSQL-backed durable job queue (no external scheduler) and reach you however you want: in-app always, plus email, SMS, and Web Push. Pick channels per alarm, opt out per user, and failed sends retry with backoff before giving up with a notice in the app.
 - **Attachments** — capped, stored as `bytea` in PostgreSQL.
 - **Search** — PostgreSQL full-text, no external search service.
-- **Scheduling** — outbound iTIP invitations, inbound iMIP replies via a Postmark webhook.
+- **Scheduling** — outbound iTIP invitations and cancellations, inbound iMIP replies via a Postmark webhook. Sender identity is trusted from Postmark's inbound pipeline (SPF/DKIM/DMARC happen there); the server only checks the From against the attendee list. Do not configure the webhook if you do not trust your inbound mail pipeline.
 - **Rules** — trigger → condition → action automation (event created, RSVP changed, alarm due, …), scoped to one calendar or tenant-wide; managed from the web UI.
 - **Notifications** — Postmark, generic SMTP, Twilio SMS, and Web Push (VAPID) credentials, all configured from the web UI. Every provider is editable and has a send-test button.
 - **Attendees** — invite by email or by phone alone; `sms:` attendee URIs round-trip through iCalendar.
@@ -94,6 +94,7 @@ Configuration is environment-variable only — no config files, no CLI flags for
 | `WEBAUTHN_ORIGIN` | no* | — | Full origin browsers report, e.g. `https://calendar.example.com` |
 | `ATTACHMENT_MAX_BYTES` | no | `52428800` (50 MB) | Per-attachment size cap |
 | `RETENTION_DAYS` | no | `30` | Soft-deleted resources are purged after this many days |
+| `AUDIT_RETENTION_DAYS` | no | `90` | Audit-log rows are purged after this many days |
 | `POSTMARK_INBOUND_SECRET` | required for inbound iMIP | — | Shared secret validating Postmark's inbound iMIP webhook; the webhook endpoint refuses all traffic (403) while this is unset |
 | `APP_PUBLIC_URL` | no | — | Public base URL (e.g. `https://calendar.example.com`) for the click-through link in reminder emails and Web Push payloads. No link is added when unset. |
 | `GOOGLE_MAPS_API_KEY` | no | — | Google Places API (New) key enabling place autocomplete in the web UI event form. Key stays server-side; browsers call the `/api/places/*` proxy. Without it, the location field is free text. |

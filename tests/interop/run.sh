@@ -256,6 +256,40 @@ curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
 curl -s "$BASE/share/$TOKEN_SHARE/calendar.ics" | grep -q "Secret" && fail "PRIVATE event leaked into feed"
 echo "feed ok"
 
+step "Share-token CalDAV: read-only DAV via Basic(token, any password)"
+DAV_SHARE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars/$CAL/shares" \
+  -d '{"allows_caldav": true}')
+DTOKEN=$(echo "$DAV_SHARE" | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$DTOKEN:anything" -X PROPFIND \
+  -H 'Depth: 1' "$BASE/calendars/alice/work/")
+[ "$CODE" = 207 ] || fail "share principal PROPFIND failed, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$DTOKEN:anything" -X PUT \
+  -H 'content-type: text/calendar' --data-binary "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x1\r\nDTSTART:20261001T100000Z\r\nSUMMARY:evil\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n" \
+  "$BASE/calendars/alice/work/x1.ics")
+[ "$CODE" = "403" ] || [ "$CODE" = "404" ] || fail "share principal must not write, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$DTOKEN:anything" -X MKCALENDAR "$BASE/calendars/alice/evilcal")
+[ "$CODE" = "403" ] || fail "share principal must not create calendars, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "not-a-token:x" -X PROPFIND -H 'Depth: 1' "$BASE/calendars/alice/work/")
+[ "$CODE" = 401 ] || fail "bogus share token must 401, got $CODE"
+SHARE_ID=$(echo "$DAV_SHARE" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -X DELETE "$BASE/api/calendars/$CAL/shares/$SHARE_ID" -o /dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$DTOKEN:anything" -X PROPFIND -H 'Depth: 1' "$BASE/calendars/alice/work/")
+[ "$CODE" = 401 ] || fail "revoked share must lose DAV access, got $CODE"
+
+step "Audit log records mutations"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/calendars/$CAL" -d '{"description":"audited"}' >/dev/null
+AUDIT=$(curl -s -b "$DATA/admin.jar" "$BASE/api/audit?limit=50")
+echo "$AUDIT" | python3 -c "
+import json,sys
+rows=json.load(sys.stdin)
+actions=[r['action'] for r in rows]
+assert 'PATCH' in actions, actions
+assert 'login' in actions, actions
+" || fail "audit rows missing for mutation or login: $AUDIT"
+
 step "Search returns hit after indexing"
 curl -s -b "$DATA/alice.jar" "$BASE/api/search?q=API" | grep -q "API event" || fail "search"
 
