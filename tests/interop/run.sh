@@ -28,15 +28,23 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo "== $1"; }
 
 # ============ infrastructure ============
-/usr/lib/postgresql/16/bin/initdb -D "$DATA/pg" -U postgres --auth=trust >/dev/null
-/usr/lib/postgresql/16/bin/pg_ctl -D "$DATA/pg" \
-  -o "-p $PGPORT -k $SOCK -c listen_addresses=127.0.0.1" -l "$DATA/pg.log" start >/dev/null
-/usr/lib/postgresql/16/bin/createdb -h 127.0.0.1 -p "$PGPORT" -U postgres caltest
+# EXTERNAL_DATABASE_URL points the suite at a running Postgres with the
+# `caltest` database already created (CI service container); otherwise a
+# throwaway local PostgreSQL 16 is initialized. The URL is used verbatim.
+if [[ -n "${EXTERNAL_DATABASE_URL:-}" ]]; then
+  : # no local cluster to manage
+else
+  /usr/lib/postgresql/16/bin/initdb -D "$DATA/pg" -U postgres --auth=trust >/dev/null
+  /usr/lib/postgresql/16/bin/pg_ctl -D "$DATA/pg" \
+    -o "-p $PGPORT -k $SOCK -c listen_addresses=127.0.0.1" -l "$DATA/pg.log" start >/dev/null
+  /usr/lib/postgresql/16/bin/createdb -h 127.0.0.1 -p "$PGPORT" -U postgres caltest
+fi
+TEST_DB_URL="${EXTERNAL_DATABASE_URL:-postgres://postgres@127.0.0.1:$PGPORT/caltest}"
 
 BASE="http://127.0.0.1:$PORT"
 APPKEY="11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"
 
-DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/caltest" \
+DATABASE_URL="$TEST_DB_URL" \
 BIND_ADDR="127.0.0.1:$PORT" APP_ENCRYPTION_KEY="$APPKEY" RUST_LOG=warn \
   setsid "$BIN" serve >"$DATA/server.log" 2>&1 &
 SRV_PID=$!
@@ -169,7 +177,7 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/bob.jar" "$BASE/api/cale
 # ============ 3. CalDAV ============
 # App passwords are admin-only since 00a9e13; seed an admin, promote alice,
 # then mint her CalDAV app password.
-DATABASE_URL="postgres://postgres@127.0.0.1:$PGPORT/caltest" "$BIN" create-admin admin admin@example.com adminpass1 >/dev/null
+DATABASE_URL="$TEST_DB_URL" "$BIN" create-admin admin admin@example.com adminpass1 >/dev/null
 register admin admin@example.com adminpass1
 ADMIN_ID=$(curl -s -b "$DATA/admin.jar" "$BASE/api/auth/me" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
 ALICE_ID=$(curl -s -b "$DATA/alice.jar" "$BASE/api/auth/me" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
@@ -563,6 +571,36 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/categories")
 [ "$CODE" = 200 ] || fail "/categories page, got $CODE"
 
 # ============ 6. admin user management ============
+step "Attachment round-trip: upload, list, download, meta, delete"
+ATT_DATA=$(printf 'hello-attachment' | base64)
+ATT=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/events/$EV_ID/attachments" \
+  -d "{\"filename\":\"att.txt\",\"content_type\":\"text/plain\",\"data\":\"$ATT_DATA\"}")
+ATT_ID=$(echo "$ATT" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+[ -n "$ATT_ID" ] || fail "attachment upload failed: $ATT"
+curl -s -b "$DATA/alice.jar" "$BASE/api/attachments/$ATT_ID" | grep -q "hello-attachment" \
+  || fail "attachment download did not return the original bytes"
+curl -s -b "$DATA/alice.jar" "$BASE/api/attachments/$ATT_ID/meta" | grep -q '"att.txt"' \
+  || fail "attachment meta missing filename"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/events/$EV_ID/attachments" \
+  | grep -q "$ATT_ID" || fail "attachment not listed on its event"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -X DELETE "$BASE/api/attachments/$ATT_ID")
+[ "$CODE" = 200 ] || fail "attachment delete, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" "$BASE/api/attachments/$ATT_ID")
+[ "$CODE" = 404 ] || fail "deleted attachment should 404, got $CODE"
+
+step "Login attempt limiter locks an identity out after repeated failures"
+register gateuser gateuser@example.com password123
+for _ in $(seq 1 10); do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" \
+    -H 'content-type: application/json' -d '{"username_or_email":"gateuser","password":"wrong"}')
+done
+[ "$CODE" = 401 ] || fail "failed logins should 401 before lockout, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" \
+  -H 'content-type: application/json' -d '{"username_or_email":"gateuser","password":"password123"}')
+[ "$CODE" = 403 ] || fail "locked identity must 403 even with the correct password, got $CODE"
+
 step "create-admin CLI seeds an is_admin user"
 register admin admin@example.com adminpass1 # already promoted in section 3; login refreshes the session
 
@@ -593,5 +631,41 @@ ADMIN_ID=$(curl -s -b "$DATA/admin.jar" "$BASE/api/auth/me" | python3 -c "import
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" -H "X-CSRF-Token: $(csrf admin)" \
   -H 'content-type: application/json' -X PATCH "$BASE/api/admin/users/$ADMIN_ID" -d '{"is_admin":false}')
 [ "$CODE" = 400 ] || fail "self-demote should be rejected, got $CODE"
+
+# ============ 7. restart survival ============
+step "Reminders survive a process restart (done criterion)"
+# Event due 25s out with an in-app VALARM; the server is killed before the
+# trigger passes. After the restart, the scan's 2-minute lookback must still
+# create the notification, and the old session must still work.
+DUE=$(python3 -c "import datetime;print((datetime.datetime.utcnow()+datetime.timedelta(seconds=25)).strftime('%Y%m%dT%H%M%SZ'))")
+DTEND=$(python3 -c "import datetime;print((datetime.datetime.utcnow()+datetime.timedelta(seconds=85)).strftime('%Y%m%dT%H%M%SZ'))")
+printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//interop//EN\r\nBEGIN:VEVENT\r\nUID:restart-alarm@interop\r\nDTSTAMP:20260911T120000Z\r\nDTSTART:%s\r\nDTEND:%s\r\nSUMMARY:Restart alarm probe\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:PT0S\r\nDESCRIPTION:fire\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n' "$DUE" "$DTEND" > "$DATA/restart.ics"
+UUIDR=$(uuidgen)
+curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/work/$UUIDR.ics" -H 'content-type: text/calendar' \
+  --data-binary @"$DATA/restart.ics" -o /dev/null
+kill "$SRV_PID" 2>/dev/null
+# setsid daemonized the server: poll its port down instead of wait()ing on it.
+for _ in $(seq 1 25); do
+  curl -s -m 1 "$BASE/healthz" >/dev/null 2>&1 || break
+  sleep 0.2
+done
+DATABASE_URL="$TEST_DB_URL" \
+BIND_ADDR="127.0.0.1:$PORT" APP_ENCRYPTION_KEY="$APPKEY" RUST_LOG=warn \
+  setsid "$BIN" serve >>"$DATA/server.log" 2>&1 &
+SRV_PID=$!
+for _ in $(seq 1 50); do curl -s -m 1 "$BASE/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
+curl -s "$BASE/healthz" | grep -q ok || fail "server did not restart"
+curl -s -b "$DATA/alice.jar" "$BASE/api/auth/me" | grep -q '"username"' \
+  || fail "session did not survive the restart"
+for _ in $(seq 1 120); do
+  curl -s -b "$DATA/alice.jar" "$BASE/api/notifications" | grep -q "Restart alarm probe" && break
+  sleep 1
+done
+curl -s -b "$DATA/alice.jar" "$BASE/api/notifications" | grep -q "Restart alarm probe" \
+  || fail "in-app reminder did not fire after the restart"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/events" \
+  -d '{"summary":"post-restart event","starts_at":"2026-09-24T10:00:00Z","ends_at":"2026-09-24T11:00:00Z"}' \
+  | grep -q '"id"' || fail "job chain did not re-arm after restart"
 
 echo "ALL INTEROP CHECKS PASSED"

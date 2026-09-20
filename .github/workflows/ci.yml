@@ -29,4 +29,19 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      # DB-backed unit tests (migration upgrade, backup round-trip, If-Match
+      # race, notification claim) run against the service container.
+      - name: Create test databases
+        run: |
+          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d calendar -c "CREATE DATABASE caldbtest"
+          PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d calendar -c "CREATE DATABASE caltest"
+      - name: Workspace tests (with live PostgreSQL)
+        run: cargo test --workspace --all-features
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/caldbtest
+          CALENDAR_DB_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/caldbtest
+      # Full protocol suite against the same service container.
+      - name: Interop suite
+        run: tests/interop/run.sh
+        env:
+          EXTERNAL_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/caltest
