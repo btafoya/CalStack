@@ -14,7 +14,59 @@ use calendar_core::validate_username;
 use calendar_db::{self as db, UserRow};
 use chrono::Utc;
 use sqlx::PgPool;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
+
+// ============ login attempt limiting ============
+// No rate limiter exists elsewhere and the login/TOTP gate is brute-forceable
+// without one. In-memory per-username failure log: single-instance deployment
+// by design (see the notify dispatch claim), and a restart clearing the log
+// costs an attacker nothing — the next window re-arms.
+// ponytail: per-IP limiting needs ConnectInfo + X-Forwarded-For handling;
+// add when proxy header policy exists.
+
+const LOGIN_WINDOW_SECS: u64 = 600;
+const LOGIN_MAX_FAILURES: usize = 10;
+
+fn failure_log() -> &'static Mutex<HashMap<String, Vec<std::time::Instant>>> {
+    static LOG: OnceLock<Mutex<HashMap<String, Vec<std::time::Instant>>>> = OnceLock::new();
+    LOG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn prune(window: std::time::Duration, entries: &mut Vec<std::time::Instant>) {
+    let now = std::time::Instant::now();
+    entries.retain(|at| now.duration_since(*at) < window);
+}
+
+/// The login gate: too many recent failures for this identity locks it out
+/// until the window drains. 10 guesses / 10 min keeps a 6-digit TOTP window
+/// (3 accepted codes) safe against online brute force.
+pub(crate) fn login_gate(username: &str) -> Result<(), AppError> {
+    let key = username.to_ascii_lowercase();
+    let mut log = failure_log().lock().unwrap();
+    let entries = log.entry(key).or_default();
+    prune(std::time::Duration::from_secs(LOGIN_WINDOW_SECS), entries);
+    if entries.len() >= LOGIN_MAX_FAILURES {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}
+
+pub(crate) fn record_login_failure(username: &str) {
+    let key = username.to_ascii_lowercase();
+    let mut log = failure_log().lock().unwrap();
+    let entries = log.entry(key).or_default();
+    prune(std::time::Duration::from_secs(LOGIN_WINDOW_SECS), entries);
+    entries.push(std::time::Instant::now());
+}
+
+pub(crate) fn clear_login_failures(username: &str) {
+    failure_log()
+        .lock()
+        .unwrap()
+        .remove(&username.to_ascii_lowercase());
+}
 
 /// Authenticated request identity: a live session (cookie) or an API token
 /// (Authorization: Bearer). CalDAV app-password Basic auth joins later.
@@ -406,6 +458,7 @@ async fn login(
     }): State<AppState>,
     Json(body): Json<LoginBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    login_gate(&body.username_or_email)?;
     let user = match db::find_user_by_email(&pool, &body.username_or_email).await {
         Ok(user) => Ok(user),
         Err(db::DbError::NotFound) => db::find_user_by_username(&pool, &body.username_or_email)
@@ -414,6 +467,7 @@ async fn login(
         Err(e) => Err(e.into()),
     }?;
     if user.disabled_at.is_some() || user.password_hash.is_none() {
+        record_login_failure(&body.username_or_email);
         audit::write(
             &pool,
             "system",
@@ -429,6 +483,7 @@ async fn login(
     if calendar_auth::verify_password(&body.password, user.password_hash.as_deref().unwrap())
         .is_err()
     {
+        record_login_failure(&body.username_or_email);
         audit::write(
             &pool,
             "system",
@@ -448,7 +503,9 @@ async fn login(
         &body.recovery_code,
         crypto.as_deref(),
     )
-    .await?;
+    .await
+    .inspect_err(|_| record_login_failure(&body.username_or_email))?;
+    clear_login_failures(&body.username_or_email);
     calendar_db::delete_expired_sessions(&pool).await.ok(); // ponytail: lazy purge on login
 
     let secret = calendar_auth::generate_session_token();
@@ -712,5 +769,43 @@ mod scope_tests {
     fn unknown_scopes_grant_nothing() {
         assert!(!scope_allows(&scopes(&["admin"]), "read"));
         assert!(!scope_allows(&scopes(&["admin"]), "write"));
+    }
+}
+
+#[cfg(test)]
+mod login_gate_tests {
+    use super::*;
+
+    #[test]
+    fn gate_allows_then_locks_after_max_failures() {
+        let user = format!("gate-test-{}", Uuid::new_v4());
+        for _ in 0..LOGIN_MAX_FAILURES {
+            login_gate(&user).unwrap();
+            record_login_failure(&user);
+        }
+        login_gate(&user).unwrap_err();
+    }
+
+    #[test]
+    fn successful_login_clears_the_failure_log() {
+        let user = format!("gate-clear-{}", Uuid::new_v4());
+        for _ in 0..LOGIN_MAX_FAILURES - 1 {
+            record_login_failure(&user);
+        }
+        clear_login_failures(&user);
+        login_gate(&user).unwrap();
+        record_login_failure(&user);
+        login_gate(&user).unwrap();
+    }
+
+    #[test]
+    fn keys_are_case_insensitive() {
+        let user = format!("gate-case-{}", Uuid::new_v4());
+        record_login_failure(&user.to_uppercase());
+        record_login_failure(&user);
+        assert_eq!(
+            failure_log().lock().unwrap().get(&user).map(|v| v.len()),
+            Some(2)
+        );
     }
 }

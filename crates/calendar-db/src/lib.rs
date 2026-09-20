@@ -1295,6 +1295,10 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod migration_tests {
+    use sqlx::Connection;
+    use sqlx::migrate::Migrate;
+    use sqlx::postgres::PgPoolOptions;
+
     #[test]
     fn embedded_migrations_present() {
         // Smoke test that sqlx::migrate! actually embeds files from disk —
@@ -1302,5 +1306,117 @@ mod migration_tests {
         // every time a migration is added.
         let migrations = sqlx::migrate!("../../migrations").migrations;
         assert!(!migrations.is_empty(), "expected embedded migrations");
+    }
+
+    /// Done criterion: "migration upgrade tests pass". Applies the first
+    /// migrations by hand (SQL + history rows, exactly what the migrator
+    /// does), leaving the database at an older schema version, then lets
+    /// the real migrator upgrade to the latest and verifies the result.
+    /// Skips silently without DATABASE_URL.
+    #[tokio::test]
+    async fn upgrade_from_an_older_schema_version_completes() {
+        let Some(url) = std::env::var("DATABASE_URL").ok().filter(|u| !u.is_empty()) else {
+            return;
+        };
+        let db_name = format!("upgrade_{}", uuid::Uuid::new_v4().simple());
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::query(&format!("CREATE DATABASE {db_name}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let target = url
+            .rsplit_once('/')
+            .map(|(base, _)| format!("{base}/{db_name}"))
+            .unwrap_or_else(|| url.clone());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&target)
+            .await
+            .unwrap();
+
+        let migrator = sqlx::migrate!("../../migrations");
+        // History table first — the migrator creates it on first run.
+        sqlx::PgConnection::connect(&target)
+            .await
+            .unwrap()
+            .ensure_migrations_table()
+            .await
+            .unwrap();
+        // Partial history: apply every migration except the last three, by
+        // hand, recording them exactly as the migrator would.
+        let cutoff = migrator.migrations.len() - 4;
+        for migration in &migrator.migrations[..cutoff] {
+            let mut tx = pool.begin().await.unwrap();
+            // raw_sql, not a prepared statement: migration files hold many
+            // statements and Postgres refuses multi-command prepared text.
+            sqlx::raw_sql(&migration.sql)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time)
+                 VALUES ($1, $2, now(), true, $3, 0)",
+            )
+            .bind(migration.version)
+            .bind(migration.description.as_ref())
+            .bind(migration.checksum.as_ref())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        // The database really is mid-stream: the last four migrations have
+        // not run — no notifications.claimed_until (0014), no per-calendar
+        // timezones table (0016).
+        let claimed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_name = 'notifications' AND column_name = 'claimed_until'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(claimed, 0, "0014 should not have run yet");
+        let tz_scope: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_name = 'timezones' AND column_name = 'calendar_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            tz_scope, 0,
+            "0016 should not have run yet (no per-calendar scope)"
+        );
+        // Upgrade to the latest through the real migrator.
+        migrator.run(&pool).await.unwrap();
+        // Post-upgrade state: 0013's VEVENT-only default, 0016's zones table.
+        let default_components: String = sqlx::query_scalar(
+            "SELECT column_default FROM information_schema.columns
+             WHERE table_name = 'calendars' AND column_name = 'components'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!default_components.contains("VTODO"));
+        assert!(default_components.contains("VEVENT"));
+        let zones: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM timezones")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(zones, 0);
+        // And the upgraded schema still serves writes.
+        let user = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, username, email) VALUES ($1, $2, $3)")
+            .bind(user)
+            .bind("upgrade-test")
+            .bind("upgrade@test.local")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query(&format!("DROP DATABASE {db_name} WITH (FORCE)"))
+            .execute(&admin)
+            .await
+            .unwrap();
     }
 }

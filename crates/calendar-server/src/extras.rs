@@ -109,7 +109,14 @@ async fn get_attachment(
     Path(attachment_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
-    let event = db::attachments::event_of_attachment(&pool, attachment_id).await?;
+    let event = db::attachments::event_of_attachment(&pool, attachment_id)
+        .await
+        // A gone attachment is a 404, not the global NotFound->Unauthorized
+        // mapping (which exists to avoid leaking resource existence).
+        .map_err(|e| match e {
+            db::DbError::NotFound => AppError::NotFound,
+            other => other.into(),
+        })?;
     require_capability(
         &pool,
         event.calendar_id,
@@ -138,7 +145,14 @@ async fn get_attachment_meta(
     Path(attachment_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
-    let event = db::attachments::event_of_attachment(&pool, attachment_id).await?;
+    let event = db::attachments::event_of_attachment(&pool, attachment_id)
+        .await
+        // A gone attachment is a 404, not the global NotFound->Unauthorized
+        // mapping (which exists to avoid leaking resource existence).
+        .map_err(|e| match e {
+            db::DbError::NotFound => AppError::NotFound,
+            other => other.into(),
+        })?;
     require_capability(
         &pool,
         event.calendar_id,
@@ -160,7 +174,14 @@ async fn delete_attachment(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_csrf(&auth, &headers)?;
-    let event = db::attachments::event_of_attachment(&pool, attachment_id).await?;
+    let event = db::attachments::event_of_attachment(&pool, attachment_id)
+        .await
+        // A gone attachment is a 404, not the global NotFound->Unauthorized
+        // mapping (which exists to avoid leaking resource existence).
+        .map_err(|e| match e {
+            db::DbError::NotFound => AppError::NotFound,
+            other => other.into(),
+        })?;
     require_capability(
         &pool,
         event.calendar_id,
