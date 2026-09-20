@@ -18,6 +18,7 @@ mod push_api;
 mod rules_api;
 mod scheduling;
 mod sharing_api;
+mod webhooks_api;
 mod xml;
 
 pub(crate) use auth::{
@@ -208,6 +209,7 @@ fn build_router(state: AppState) -> Router {
         .merge(places::router())
         .merge(calendars_api::router())
         .merge(events_api::router())
+        .merge(webhooks_api::router())
         .route(
             "/api/openapi.json",
             get(|| async { axum::Json(calendar_api::openapi_document()) }),

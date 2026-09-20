@@ -36,6 +36,10 @@ pub(crate) fn itip_body(
         attendees: attendees.to_vec(),
         alarms: vec![],
         location,
+        // ponytail: iTIP bodies for custom-tzid events stay zone-less; the
+        // attendee's client falls back to the tzdb name. Thread stored
+        // zones through here when zone-accurate iMIP bodies matter.
+        vtimezones: vec![],
     }])
     .replacen(
         "BEGIN:VCALENDAR",

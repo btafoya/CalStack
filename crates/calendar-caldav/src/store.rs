@@ -87,9 +87,12 @@ fn points_to_json(points: &[calendar_core::DateOrDateTime]) -> serde_json::Value
 /// One changed resource reported by a sync-collection REPORT.
 #[derive(Debug, Clone)]
 pub struct SyncChange {
-    pub href_suffix: String, // "{resource-uuid}.ics" relative to the collection
+    pub href_suffix: String, // "{resource-uuid}.ics", or "{slug}/{uuid}.ics" for home-set sync
     pub etag: Option<String>,
     pub deleted: bool,
+    /// Rendered VCALENDAR for a `calendar-data` request; None for deletions
+    /// and when the client asked only for getetag.
+    pub calendar_data: Option<String>,
 }
 
 /// Builds the RFC 6578 multistatus response. `sync_token` is the change_log
@@ -101,7 +104,7 @@ pub fn sync_collection_xml(
 ) -> String {
     let mut out = String::from(
         r#"<?xml version="1.0" encoding="utf-8"?>
-<D:multistatus xmlns:D="DAV:">"#,
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">"#,
     );
     let base = collection_href.trim_end_matches('/');
     for change in changes {
@@ -118,6 +121,12 @@ pub fn sync_collection_xml(
             if let Some(etag) = &change.etag {
                 out.push_str(&format!("<D:getetag>{}</D:getetag>", xml_escape(etag)));
             }
+            if let Some(ics) = &change.calendar_data {
+                out.push_str(&format!(
+                    "<C:calendar-data>{}</C:calendar-data>",
+                    xml_escape(ics)
+                ));
+            }
             out.push_str("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>");
         }
         out.push_str("</D:response>");
@@ -128,11 +137,21 @@ pub fn sync_collection_xml(
     out
 }
 
+/// RFC 6578: the client's sync-token is unrecognized (expired, purged, or
+/// beyond the current sequence). A 409 with the DAV:valid-sync-token
+/// precondition makes the client fall back to an initial sync.
+pub fn invalid_sync_token_error() -> String {
+    r#"<?xml version="1.0" encoding="utf-8"?>
+<D:error xmlns:D="DAV:"><D:valid-sync-token/></D:error>"#
+        .to_string()
+}
+
 /// One URL path segment: everything but unreserved characters is %XX-encoded.
+/// Slashes pass through: home-set suffixes carry "{slug}/{file}" segments.
 fn percent_encode_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for byte in segment.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
             out.push(byte as char);
         } else {
             out.push_str(&format!("%{byte:02X}"));
@@ -159,10 +178,26 @@ mod tests {
                 href_suffix: "my task@x y.ics".into(),
                 etag: None,
                 deleted: true,
+                calendar_data: None,
             }],
             1,
         );
         assert!(xml.contains("/calendars/alice/work/my%20task%40x%20y.ics"));
+    }
+
+    #[test]
+    fn home_set_suffixes_keep_their_slug_segment() {
+        let xml = sync_collection_xml(
+            "/calendars/alice",
+            &[SyncChange {
+                href_suffix: "work/abc.ics".into(),
+                etag: Some("\"1\"".into()),
+                deleted: false,
+                calendar_data: None,
+            }],
+            7,
+        );
+        assert!(xml.contains("/calendars/alice/work/abc.ics"));
     }
 
     #[test]
@@ -174,11 +209,13 @@ mod tests {
                     href_suffix: "abc.ics".into(),
                     etag: Some("\"1\"".into()),
                     deleted: false,
+                    calendar_data: Some("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into()),
                 },
                 SyncChange {
                     href_suffix: "def.ics".into(),
                     etag: None,
                     deleted: true,
+                    calendar_data: None,
                 },
             ],
             42,
@@ -187,5 +224,9 @@ mod tests {
         assert!(xml.contains("/calendars/alice/work/abc.ics"));
         assert!(xml.contains("HTTP/1.1 404 Not Found"));
         assert!(xml.contains("<D:getetag>\"1\"</D:getetag>"));
+        assert!(xml.contains("<C:calendar-data>BEGIN:VCALENDAR"));
+        assert!(!xml.contains("404 Not Found</D:status><D:propstat><D:prop><D:getetag>\"1\""));
+        assert!(!xml[xml.find("def.ics").unwrap()..].contains("calendar-data"));
+        assert!(invalid_sync_token_error().contains("<D:valid-sync-token/>"));
     }
 }

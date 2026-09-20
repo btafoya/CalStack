@@ -113,9 +113,15 @@ fn interval(secs: Option<i64>) -> Option<PgInterval> {
 /// `href` is the filename the client PUT to. Overrides absent from the PUT
 /// are removed. A UID that is live at another filename is a Conflict.
 ///
+/// `zones` carries the VTIMEZONEs embedded in the PUT body (ADR-012); they
+/// are upserted for the calendar and events referencing a tzid that is
+/// neither tzdb nor resolvable from the calendar's zones are rejected — no
+/// silent UTC fallback.
+///
 /// `precondition` is verified after the `FOR UPDATE` row lock, inside the
 /// write transaction: a stale etag or a concurrently created resource aborts
 /// the whole write with `DbError::Conflict`.
+#[allow(clippy::too_many_arguments)]
 pub async fn put_series(
     pool: &sqlx::PgPool,
     calendar_id: Uuid,
@@ -123,6 +129,7 @@ pub async fn put_series(
     href: &str,
     master: &IcsEventUpsert,
     overrides: &[IcsEventUpsert],
+    zones: &[super::timezones::NewTimezone],
     precondition: &PutPrecondition,
 ) -> Result<(EventRow, bool), DbError> {
     let master_location = resolve_location(pool, &master.location_text).await?;
@@ -138,6 +145,27 @@ pub async fn put_series(
         .filter(|u| format!("{u}.ics") == href);
 
     let mut tx = pool.begin().await?;
+    // ADR-012 reject-at-write: every referenced tzid must be a tzdb zone or
+    // supplied by this PUT's VTIMEZONEs (or already stored for the calendar).
+    let mut known_zones: std::collections::HashSet<String> =
+        zones.iter().map(|z| z.tzid.clone()).collect();
+    let stored_zones: Vec<(String,)> =
+        sqlx::query_as("SELECT tzid FROM timezones WHERE calendar_id = $1")
+            .bind(calendar_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    known_zones.extend(stored_zones.into_iter().map(|(s,)| s));
+    for data in std::iter::once(master).chain(overrides) {
+        if let Some(tzid) = &data.tzid
+            && !calendar_core::recurrence::is_tzdb_tzid(tzid)
+            && !known_zones.contains(tzid)
+        {
+            return Err(DbError::Conflict(format!(
+                "unknown timezone {tzid}: not an IANA zone and no VTIMEZONE for it in this calendar"
+            )));
+        }
+    }
+    super::timezones::upsert_for_calendar(&mut tx, calendar_id, zones).await?;
     let at_href: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT id, etag FROM events
          WHERE calendar_id = $1 AND deleted_at IS NULL
@@ -519,6 +547,7 @@ mod tests {
             "a.ics",
             &sample(&uid),
             &[],
+            &[],
             &PutPrecondition::None,
         )
         .await
@@ -536,6 +565,7 @@ mod tests {
             "a.ics",
             &competing,
             &[],
+            &[],
             &PutPrecondition::None,
         )
         .await
@@ -551,6 +581,7 @@ mod tests {
             f.user,
             "a.ics",
             &stale,
+            &[],
             &[],
             &PutPrecondition::MatchEtag(first.etag.clone()),
         )
@@ -576,6 +607,7 @@ mod tests {
             "a.ics",
             &fresh,
             &[],
+            &[],
             &PutPrecondition::MatchEtag(second.etag.clone()),
         )
         .await
@@ -591,6 +623,7 @@ mod tests {
             f.user,
             "a.ics",
             &again,
+            &[],
             &[],
             &PutPrecondition::MatchEtag(third.etag.trim_matches('"').to_string()),
         )
@@ -612,6 +645,7 @@ mod tests {
             "b.ics",
             &sample(&uid),
             &[],
+            &[],
             &PutPrecondition::None,
         )
         .await
@@ -623,6 +657,7 @@ mod tests {
             f.user,
             "b.ics",
             &sample(&uid),
+            &[],
             &[],
             &PutPrecondition::NotExists,
         )
@@ -640,6 +675,7 @@ mod tests {
             f.user,
             "c.ics",
             &sample(&other),
+            &[],
             &[],
             &PutPrecondition::NotExists,
         )

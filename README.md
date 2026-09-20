@@ -222,6 +222,8 @@ curl -s -b cookies.txt -H "X-CSRF-Token: $CSRF" \
 
 The resulting feed (`https://your-host/share/<token>/calendar.ics`) needs no authentication and can be subscribed to from any calendar app. Revoke it any time via `DELETE /api/calendars/<calendar-id>/shares/<share-id>`.
 
+Pass `"allows_caldav": true` when creating the share and the token also works as a read-only CalDAV credential: point a DAV client at the same server, authenticate with the **token as the username** (any password). The share principal sees only that calendar, only PUBLIC events, and can never write; revocation or expiry cuts DAV access on the next request.
+
 ## Development
 
 ```bash

@@ -185,7 +185,14 @@ pub(crate) async fn run_rules(
                         },
                         None => false,
                     },
-                    _ => false, // email/webhook actions ride the notify providers later.
+                    "webhook" => {
+                        // Deliver to every tenant webhook subscribed to rule
+                        // actions; the delivery payload carries the rule and
+                        // subject, not the rule's action config.
+                        crate::webhooks_api::fire(pool, tenant_id, subject_id, "rule_action").await;
+                        true
+                    }
+                    _ => false, // email actions ride the notify providers later.
                 };
                 if !ok {
                     status = "failed";

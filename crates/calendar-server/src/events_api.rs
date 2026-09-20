@@ -273,6 +273,7 @@ async fn create_event(
             crypto.as_deref(),
         )
         .await;
+        crate::webhooks_api::fire(&pool, cal.tenant_id, event.id, "event_created").await;
     }
     let rows = db::list_attendees(&pool, event.id).await?;
     let registry = db::categories::registry_for_calendar(&pool, calendar_id).await?;
@@ -406,6 +407,7 @@ async fn patch_event(
             crypto.as_deref(),
         )
         .await;
+        crate::webhooks_api::fire(&pool, cal.tenant_id, event.id, "event_updated").await;
     }
     let rows = db::list_attendees(&pool, event.id).await?;
     let location = db::location_for_event(&pool, &event).await;
@@ -451,6 +453,7 @@ async fn delete_event(
             crypto.as_deref(),
         )
         .await;
+        crate::webhooks_api::fire(&pool, cal.tenant_id, existing.id, "event_deleted").await;
     }
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -534,6 +537,10 @@ async fn expand_occurrences_json(
         .map(|r| r.id)
         .collect();
     let exceptions = db::list_exceptions(pool, &master_ids).await?;
+    // Custom VTIMEZONEs stored for this calendar (ADR-012); tzdb wins.
+    let resolver = db::timezones::load_for_calendar(pool, calendar_id)
+        .await
+        .unwrap_or_default();
 
     let mut out: Vec<serde_json::Value> = Vec::new();
     for event in &rows {
@@ -567,6 +574,7 @@ async fn expand_occurrences_json(
         let expanded = calendar_core::recurrence::expand_occurrences(
             dtstart,
             event.tzid.as_deref(),
+            Some(&resolver),
             Some(&event.rrule.clone().unwrap_or_default()),
             &rdate,
             &exdate,
@@ -576,9 +584,11 @@ async fn expand_occurrences_json(
         .map_err(|e| AppError::bad_request(e.to_string()))?;
         for point in expanded {
             // Exceptions are keyed on the original wall-clock occurrence.
-            let tz = calendar_core::recurrence::resolve_tz(event.tzid.as_deref());
+            let zone =
+                calendar_core::recurrence::resolve_tz(event.tzid.as_deref(), Some(&resolver))
+                    .map_err(|e| AppError::bad_request(e.to_string()))?;
             let wall: chrono::NaiveDateTime = match point {
-                calendar_core::DateOrDateTime::Timed(at) => at.with_timezone(&tz).naive_local(),
+                calendar_core::DateOrDateTime::Timed(at) => zone.to_local(at),
                 calendar_core::DateOrDateTime::AllDay(date) => date.and_hms_opt(0, 0, 0).unwrap(),
             };
             let matched = exceptions

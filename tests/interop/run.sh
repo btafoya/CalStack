@@ -238,6 +238,34 @@ curl -s -u "$AUTH" -X REPORT "$BASE/calendars/alice/work/" -H 'content-type: app
   --data-binary '<?xml version="1.0"?><C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:time-range start="20260915T000000Z" end="20260916T000000Z"/></C:free-busy-query>' \
   | grep -q 'FREEBUSY:20260915T090000Z/20260915T100000Z' || fail "free-busy periods"
 
+step "PROPFIND advertises supported-report-set on the calendar collection"
+curl -s -u "$AUTH" -X PROPFIND "$BASE/calendars/alice/work/" -H 'Depth: 0' \
+  -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:supported-report-set/></D:prop></D:propfind>' \
+  | grep -q "sync-collection" || fail "supported-report-set missing sync-collection"
+
+step "calendar-query REPORT honors time-range and expands recurrence"
+UUIDQ=$(uuidgen)
+printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//interop//EN\r\nBEGIN:VEVENT\r\nUID:q-rec@interop\r\nDTSTAMP:20260911T120000Z\r\nDTSTART;TZID=America/Denver:20260901T090000\r\nDTEND;TZID=America/Denver:20260901T100000\r\nRRULE:FREQ=DAILY;COUNT=30\r\nSUMMARY:Recurring query probe\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n' > "$DATA/q.ics"
+curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/work/$UUIDQ.ics" -H 'content-type: text/calendar' \
+  --data-binary @"$DATA/q.ics" -o /dev/null
+Q=$(curl -s -u "$AUTH" -X REPORT "$BASE/calendars/alice/work/" -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:getetag/><C:calendar-data/></D:prop><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260910T000000Z" end="20260911T000000Z"/></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>')
+echo "$Q" | grep -q "Recurring query probe" || fail "calendar-query misses matching recurring master"
+echo "$Q" | grep -q "Busy" && fail "calendar-query time-range returned non-overlapping event"
+QTEXT=$(curl -s -u "$AUTH" -X REPORT "$BASE/calendars/alice/work/" -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><D:getetag/><C:calendar-data/></D:prop><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="SUMMARY"><C:text-match>probe</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>')
+echo "$QTEXT" | grep -q "Recurring query probe" || fail "calendar-query text-match misses"
+echo "$QTEXT" | grep -q "Busy" && fail "text-match returned non-matching event"
+
+step "sync-collection on the home set aggregates calendars"
+curl -s -u "$AUTH" -X REPORT "$BASE/calendars/alice/" -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><D:sync-collection xmlns:D="DAV:"><D:sync-token/><D:prop><D:getetag/></D:prop><D:limit><D:nresults>2</D:nresults></D:limit></D:sync-collection>' \
+  | grep -q "<D:sync-token>" || fail "home-set sync returned no token"
+HOMELIMIT=$(curl -s -u "$AUTH" -X REPORT "$BASE/calendars/alice/" -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><D:sync-collection xmlns:D="DAV:"><D:sync-token/><D:prop><D:getetag/></D:prop><D:limit><D:nresults>2</D:nresults></D:limit></D:sync-collection>')
+echo "$HOMELIMIT" | grep -q "work/" || fail "home-set sync href missing slug prefix"
+
 step "VTODO PUT rejected 403 with CalDAV error body"
 curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/work/$UUID2.ics" -H 'content-type: text/calendar' \
   --data-binary $'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:t1\r\nEND:VTODO\r\nEND:VCALENDAR\r\n' \
@@ -289,6 +317,39 @@ actions=[r['action'] for r in rows]
 assert 'PATCH' in actions, actions
 assert 'login' in actions, actions
 " || fail "audit rows missing for mutation or login: $AUDIT"
+
+step "Webhooks deliver signed payloads to a local receiver"
+RXPORT=18098
+cat > "$DATA/receiver.py" << 'PYEOF'
+import http.server, json, sys, hmac, hashlib
+LOG = sys.argv[1]; KEY = sys.argv[2].encode()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        sig = self.headers.get('X-CalStack-Signature', '')
+        expect = hmac.new(KEY, body, hashlib.sha256).hexdigest()
+        with open(LOG, 'a') as f:
+            f.write(json.dumps({"ok": sig == expect, "body": body.decode('utf-8', 'replace')}) + "\n")
+        self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', int(sys.argv[3])), H).serve_forever()
+PYEOF
+python3 "$DATA/receiver.py" "$DATA/hook.log" "whsec-test-123" "$RXPORT" 2>/dev/null & RXPID=$!
+WH=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/webhooks" \
+  -d "{\"url\":\"http://127.0.0.1:$RXPORT/hook\",\"name\":\"interop\",\"sign_key\":\"whsec-test-123\"}")
+WH_ID=$(echo "$WH" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+[ -n "$WH_ID" ] || fail "webhook create failed: $WH"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/events" \
+  -d '{"summary":"webhook trigger event","starts_at":"2026-09-23T10:00:00Z","ends_at":"2026-09-23T11:00:00Z"}' >/dev/null
+for _ in $(seq 1 60); do grep -q '"ok": true' "$DATA/hook.log" 2>/dev/null && break; sleep 0.25; done
+grep -q '"ok": true' "$DATA/hook.log" 2>/dev/null || fail "signed webhook delivery did not arrive or signature mismatch: $(cat "$DATA/hook.log" 2>/dev/null)"
+grep -q 'event_created' "$DATA/hook.log" || fail "delivery payload missing trigger"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -X DELETE "$BASE/api/webhooks/$WH_ID")
+[ "$CODE" = 200 ] || fail "webhook delete, got $CODE"
+kill $RXPID 2>/dev/null || true
 
 step "Search returns hit after indexing"
 curl -s -b "$DATA/alice.jar" "$BASE/api/search?q=API" | grep -q "API event" || fail "search"

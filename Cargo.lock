@@ -462,6 +462,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -505,6 +506,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
