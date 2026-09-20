@@ -42,19 +42,24 @@ pub(crate) async fn entry(
         return response;
     }
 
-    // Authenticate once; CalDAV clients expect a Basic challenge.
-    let auth = match resolve_auth(&pool, request.headers()).await {
-        Ok(auth) => auth,
-        Err(_) => return unauthorized_basic(),
+    // Authenticate once; CalDAV clients expect a Basic challenge. A share
+    // token supplied as the Basic username (password ignored) is the other
+    // accepted identity: read-only on its shared calendar.
+    let creds = match resolve_auth(&pool, request.headers()).await {
+        Ok(auth) => DavAuth {
+            user: auth.user,
+            share_calendar_id: None,
+        },
+        Err(_) => match share_principal(&pool, request.headers()).await {
+            Some(creds) => creds,
+            None => return unauthorized_basic(),
+        },
     };
 
     let (parts, body) = request.into_parts();
     let bytes = match axum::body::to_bytes(body, 256 * 1024 * 1024).await {
         Ok(bytes) => bytes,
         Err(_) => return (StatusCode::BAD_REQUEST, "bad request").into_response(),
-    };
-    let creds = DavAuth {
-        user: auth.user.clone(),
     };
 
     // A PUT may only carry components its collection allows (RFC 4791
@@ -90,27 +95,12 @@ pub(crate) async fn entry(
     if method == axum::http::Method::from_bytes(b"REPORT").unwrap() {
         let body = String::from_utf8_lossy(&bytes).to_string();
         if body.contains("sync-collection") {
-            return sync_collection(
-                &pool,
-                &DavAuth {
-                    user: auth.user.clone(),
-                },
-                &path,
-                &body,
-            )
-            .await;
+            return sync_collection(&pool, &creds, &path, &body).await;
         }
         if body.contains("free-busy-query") {
-            return free_busy_report(
-                &pool,
-                &DavAuth {
-                    user: auth.user.clone(),
-                },
-                &path,
-                &body,
-            )
-            .await
-            .unwrap_or_else(IntoResponse::into_response);
+            return free_busy_report(&pool, &creds, &path, &body)
+                .await
+                .unwrap_or_else(IntoResponse::into_response);
         }
     }
 
@@ -485,10 +475,11 @@ async fn sync_collection(
         operation: String,
         etag: Option<String>,
         deleted_at: Option<chrono::DateTime<Utc>>,
+        class: Option<String>,
         href: String,
     }
     let rows = sqlx::query_as::<_, Row>(
-        "SELECT cl.seq, cl.resource_id, cl.operation, e.etag, e.deleted_at,
+        "SELECT cl.seq, cl.resource_id, cl.operation, e.etag, e.deleted_at, e.class,
                 COALESCE(e.href, cl.resource_id::text || '.ics') AS href
          FROM change_log cl
          LEFT JOIN events e ON e.id = cl.resource_id
@@ -500,9 +491,14 @@ async fn sync_collection(
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    // Keep the newest change per resource.
+    // Keep the newest change per resource. A share principal never sees
+    // non-PUBLIC events, including their tombstones.
+    let share = creds.share_calendar_id.is_some();
     let mut latest: std::collections::HashMap<Uuid, Row> = std::collections::HashMap::new();
     for row in rows {
+        if share && row.class.as_deref() != Some("PUBLIC") {
+            continue;
+        }
         latest.insert(row.resource_id, row);
     }
     let base = path.trim_end_matches('/');
@@ -715,6 +711,46 @@ fn json_to_points(value: &serde_json::Value) -> Vec<calendar_core::DateOrDateTim
         .unwrap_or_default()
 }
 
+/// A share token supplied as the Basic username (password ignored) grants
+/// read-only DAV access to its shared calendar. Revocation, expiry, and the
+/// `allows_caldav` flag are enforced by the live-share lookup on every
+/// request; calendar-level shares only (single-event shares stay web-only).
+async fn share_principal(pool: &sqlx::PgPool, headers: &axum::http::HeaderMap) -> Option<DavAuth> {
+    use base64::Engine;
+    let basic = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let encoded = basic.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let username = std::str::from_utf8(&decoded).ok()?.split(':').next()?;
+    let token_hash = calendar_auth::sha256(username.as_bytes());
+    let share = db::sharing::find_live_share(pool, &token_hash).await.ok()?;
+    if !share.allows_caldav || share.event_id.is_some() {
+        return None;
+    }
+    let calendar = db::get_calendar(pool, share.calendar_id).await.ok()?;
+    let owner_id = match share.created_by {
+        Some(id) => id,
+        None => sqlx::query_scalar(
+            "SELECT principal_user_id FROM calendar_acl
+             WHERE calendar_id = $1 AND capability = 'owner' LIMIT 1",
+        )
+        .bind(calendar.id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?,
+    };
+    let owner = db::find_user_by_id(pool, owner_id).await.ok()?;
+    Some(DavAuth {
+        user: owner,
+        share_calendar_id: Some(calendar.id),
+    })
+}
+
 /// The calendar collection at /calendars/{user}/{slug} with the caller's
 /// capability (mirrors the adapter's namespace rule).
 async fn calendar_at(
@@ -731,6 +767,13 @@ async fn calendar_at(
         ["calendars", _user, slug] => *slug,
         _ => return None,
     };
+    if let Some(calendar_id) = creds.share_calendar_id {
+        let cal = db::get_calendar(pool, calendar_id).await.ok()?;
+        if cal.slug != slug {
+            return None;
+        }
+        return Some((cal, CalendarCapability::ReadOnly));
+    }
     db::list_calendars_for_user(pool, creds.user.id)
         .await
         .ok()?

@@ -148,6 +148,11 @@ async fn retention_purge(pool: &sqlx::PgPool, days: i64) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+    // Audit rows keep their own retention (they outlive operational data).
+    let audit_days: i64 = std::env::var("AUDIT_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90);
     // Old change_log rows expire sync tokens: clients that page in past the
     // purge point get a sync-token mismatch and must resync — RFC 6578
     // permits a 410 response for that.
@@ -157,6 +162,9 @@ async fn retention_purge(pool: &sqlx::PgPool, days: i64) -> Result<(), String> {
         ),
         format!(
             "DELETE FROM rule_executions WHERE created_at < now() - interval '{days} days'"
+        ),
+        format!(
+            "DELETE FROM audit_log WHERE created_at < now() - interval '{audit_days} days'"
         ),
         // Completed and failed job rows are run history, not work; keep a
         // week for debugging.
@@ -588,6 +596,16 @@ async fn notify_send(
     .await
     .map_err(|e| e.to_string())?;
     for row in pending {
+        // Crash-recovery claim: a row mid-send when the process died must not
+        // re-send until the lease expires. Single worker per DB by design —
+        // the lease closes the crash-between-send-and-sent_at window, not
+        // multi-instance fan-out.
+        if !alarms::claim_notification(pool, row.id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            continue; // a live claim holds the row (crashed worker lease)
+        }
         let recipient = row
             .data
             .get("recipient")
@@ -646,7 +664,8 @@ async fn notify_send(
         match result {
             Ok(()) => {
                 sqlx::query(
-                    "UPDATE notifications SET sent_at = now(), send_error = NULL WHERE id = $1",
+                    "UPDATE notifications
+                     SET sent_at = now(), send_error = NULL, claimed_until = NULL WHERE id = $1",
                 )
                 .bind(row.id)
                 .execute(pool)
@@ -656,7 +675,7 @@ async fn notify_send(
             Err(e) => {
                 let attempts: i32 = sqlx::query_scalar(
                     "UPDATE notifications
-                     SET send_attempts = send_attempts + 1, send_error = $2
+                     SET send_attempts = send_attempts + 1, send_error = $2, claimed_until = NULL
                      WHERE id = $1
                      RETURNING send_attempts",
                 )

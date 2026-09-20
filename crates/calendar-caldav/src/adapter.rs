@@ -26,12 +26,16 @@ use sqlx::PgPool;
 use std::io::SeekFrom;
 use std::sync::Arc;
 use std::time::SystemTime;
+use uuid::Uuid;
 
 /// Request credentials: the authenticated user (app password / API token /
 /// session) — authorization is enforced here at the resource boundary.
+/// A share principal (`share_calendar_id`) is a public-share token: read-only
+/// DAV on exactly that calendar, with PRIVATE/CONFIDENTIAL events hidden.
 #[derive(Debug, Clone)]
 pub struct DavAuth {
     pub user: db::UserRow,
+    pub share_calendar_id: Option<Uuid>,
 }
 
 #[derive(Clone)]
@@ -157,11 +161,21 @@ fn capability_guard(cap: CalendarCapability, required: CalendarCapability) -> Fs
 
 impl PgDavFs {
     /// (calendar, capability) for a slug in the caller's own namespace.
+    /// A share principal resolves only its shared calendar, read-only.
     async fn calendar_by_slug(
         &self,
         creds: &DavAuth,
         slug: &str,
     ) -> FsResult<(CalendarRow, CalendarCapability)> {
+        if let Some(calendar_id) = creds.share_calendar_id {
+            let cal = db::get_calendar(&self.pool, calendar_id)
+                .await
+                .map_err(fs_err)?;
+            if cal.slug != slug {
+                return Err(FsError::NotFound);
+            }
+            return Ok((cal, CalendarCapability::ReadOnly));
+        }
         db::list_calendars_for_user(&self.pool, creds.user.id)
             .await
             .map_err(fs_err)?
@@ -226,6 +240,9 @@ impl PgDavFs {
                 let (cal, cap) = self.calendar_by_slug(creds, slug).await?;
                 capability_guard(cap, CalendarCapability::ReadOnly)?;
                 let event = self.master_at(&cal, name).await?;
+                if creds.share_calendar_id.is_some() && event.class.as_deref() != Some("PUBLIC") {
+                    return Err(FsError::NotFound);
+                }
                 let ics = self.series_ics(&event).await?;
                 Ok((
                     location,
@@ -270,6 +287,11 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     if reading {
                         capability_guard(cap, CalendarCapability::ReadOnly)?;
                         let event = self.master_at(&cal, &name).await?;
+                        if creds.share_calendar_id.is_some()
+                            && event.class.as_deref() != Some("PUBLIC")
+                        {
+                            return Err(FsError::NotFound);
+                        }
                         let ics = self.series_ics(&event).await?;
                         let modified: SystemTime = event.updated_at.into();
                         let meta = Meta {
@@ -347,10 +369,20 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
             let entries: Vec<Entry> = match &location {
                 Location::Root | Location::User => {
                     // One dirent per accessible calendar, named "{user}/{slug}"
-                    // so the home-set listing shows calendar collections.
-                    db::list_calendars_for_user(&self.pool, creds.user.id)
-                        .await
-                        .map_err(fs_err)?
+                    // so the home-set listing shows calendar collections. A
+                    // share principal sees exactly its shared calendar.
+                    let calendars: Vec<(CalendarRow, CalendarCapability)> =
+                        if let Some(calendar_id) = creds.share_calendar_id {
+                            db::get_calendar(&self.pool, calendar_id)
+                                .await
+                                .map(|cal| vec![(cal, CalendarCapability::ReadOnly)])
+                                .map_err(fs_err)?
+                        } else {
+                            db::list_calendars_for_user(&self.pool, creds.user.id)
+                                .await
+                                .map_err(fs_err)?
+                        };
+                    calendars
                         .into_iter()
                         .map(|(cal, _cap)| Entry {
                             name: format!(
@@ -393,6 +425,12 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                         if event.deleted_at.is_some() || event.master_event_id.is_some() {
                             continue;
                         }
+                        // A share principal sees PUBLIC events only.
+                        if creds.share_calendar_id.is_some()
+                            && event.class.as_deref() != Some("PUBLIC")
+                        {
+                            continue;
+                        }
                         let ics = self.series_ics(&event).await?;
                         entries.push(Entry {
                             name: event.resource_name().into_bytes(),
@@ -420,6 +458,10 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
 
     fn create_dir<'a>(&'a self, path: &'a DavPath, creds: &'a DavAuth) -> FsFuture<'a, ()> {
         Box::pin(async move {
+            // A share principal cannot create calendars in the owner's tenant.
+            if creds.share_calendar_id.is_some() {
+                return Err(FsError::Forbidden);
+            }
             let slug = match parse_location(path).ok_or(FsError::NotFound)? {
                 Location::Calendar(slug) => slug,
                 Location::User => return Err(FsError::Exists),
@@ -451,6 +493,9 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
 
     fn remove_dir<'a>(&'a self, path: &'a DavPath, creds: &'a DavAuth) -> FsFuture<'a, ()> {
         Box::pin(async move {
+            if creds.share_calendar_id.is_some() {
+                return Err(FsError::Forbidden);
+            }
             match parse_location(path).ok_or(FsError::NotFound)? {
                 Location::Calendar(slug) => {
                     let (cal, cap) = self.calendar_by_slug(creds, &slug).await?;
@@ -478,6 +523,8 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     db::delete_event(&self.pool, event.id, None)
                         .await
                         .map_err(fs_err)?;
+                    // Same as the JSON delete: attendees get METHOD:CANCEL.
+                    db::scheduling::schedule_cancels(&self.pool, event.id).await;
                     Ok(())
                 }
                 _ => Err(FsError::Forbidden),

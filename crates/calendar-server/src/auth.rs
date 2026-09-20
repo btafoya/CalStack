@@ -1,6 +1,6 @@
 //! Authentication plumbing: sessions, API tokens, app passwords, CSRF, scopes.
 
-use crate::{AppError, AppState};
+use crate::{AppError, AppState, audit};
 use axum::{
     Json,
     extract::{Path, Request, State},
@@ -384,6 +384,16 @@ async fn register(
         db::DbError::Conflict(msg) => AppError::bad_request(msg),
         other => other.into(),
     })?;
+    audit::write(
+        &pool,
+        "system",
+        Some(user.id),
+        "register",
+        "user",
+        Some(user.id),
+        None,
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(user_view(&user))))
 }
 
@@ -404,11 +414,31 @@ async fn login(
         Err(e) => Err(e.into()),
     }?;
     if user.disabled_at.is_some() || user.password_hash.is_none() {
+        audit::write(
+            &pool,
+            "system",
+            None,
+            "login_failed",
+            "user",
+            Some(user.id),
+            None,
+        )
+        .await;
         return Err(AppError::unauthorized());
     }
     if calendar_auth::verify_password(&body.password, user.password_hash.as_deref().unwrap())
         .is_err()
     {
+        audit::write(
+            &pool,
+            "system",
+            None,
+            "login_failed",
+            "user",
+            Some(user.id),
+            None,
+        )
+        .await;
         return Err(AppError::unauthorized());
     }
     verify_totp_gate(
@@ -431,6 +461,16 @@ async fn login(
         session_ttl,
     )
     .await?;
+    audit::write(
+        &pool,
+        "session",
+        Some(user.id),
+        "login",
+        "user",
+        Some(user.id),
+        None,
+    )
+    .await;
     let mut response = Json(serde_json::json!({
         "csrf_token": csrf,
         "user": user_view(&user),

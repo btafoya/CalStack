@@ -305,6 +305,16 @@ async fn passkey_login_finish(
         session_ttl,
     )
     .await?;
+    crate::audit::write(
+        &pool,
+        "session",
+        Some(user.id),
+        "passkey_login",
+        "user",
+        Some(user.id),
+        None,
+    )
+    .await;
     let mut response =
         Json(json!({"csrf_token": csrf, "user": user_view_json(&user)})).into_response();
     set_session_cookie(&mut response, &secret);
