@@ -7,7 +7,7 @@
 
 use calendar_core::DateOrDateTime;
 use calendar_db::{self as db, alarms};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -139,8 +139,8 @@ async fn execute(
     }
 }
 
-/// Soft-deleted resources, expired auth rows and stale journal entries go
-/// once retention passes (docs/PRD.md section 21).
+/// Soft-deleted resources, expired auth rows, stale journal entries and
+/// finished job history go once retention passes (docs/PRD.md section 21).
 async fn retention_purge(pool: &sqlx::PgPool, days: i64) -> Result<(), String> {
     sqlx::query(&format!(
         "DELETE FROM events WHERE deleted_at < now() - interval '{days} days'"
@@ -148,11 +148,27 @@ async fn retention_purge(pool: &sqlx::PgPool, days: i64) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+    // Old change_log rows expire sync tokens: clients that page in past the
+    // purge point get a sync-token mismatch and must resync — RFC 6578
+    // permits a 410 response for that.
     for query in [
-        "DELETE FROM sessions WHERE expires_at < now() - interval '7 days'",
-        "DELETE FROM notifications WHERE read_at IS NOT NULL AND created_at < now() - interval '30 days'",
+        format!(
+            "DELETE FROM change_log WHERE changed_at < now() - interval '{days} days'"
+        ),
+        format!(
+            "DELETE FROM rule_executions WHERE created_at < now() - interval '{days} days'"
+        ),
+        // Completed and failed job rows are run history, not work; keep a
+        // week for debugging.
+        "DELETE FROM durable_jobs
+         WHERE (completed_at IS NOT NULL OR failed_at IS NOT NULL)
+           AND COALESCE(completed_at, failed_at) < now() - interval '7 days'"
+            .to_string(),
+        "DELETE FROM sessions WHERE expires_at < now() - interval '7 days'".to_string(),
+        "DELETE FROM notifications WHERE read_at IS NOT NULL AND created_at < now() - interval '30 days'"
+            .to_string(),
     ] {
-        sqlx::query(query)
+        sqlx::query(&query)
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -169,7 +185,9 @@ async fn schedule_alarm_scan(
 
 /// Finds alarms whose trigger falls in the window, creates deduped
 /// notifications for the calendar's principals (DISPLAY) — EMAIL dispatch
-/// joins when notification providers are configured (stage 16).
+/// joins when notification providers are configured (stage 16). Also prunes
+/// pending reminder rows whose event no longer matches a live alarm
+/// occurrence (deleted or edited).
 async fn alarm_scan(
     pool: &sqlx::PgPool,
     crypto: Option<&calendar_auth::Crypto>,
@@ -180,6 +198,7 @@ async fn alarm_scan(
     let rows = alarms::list_scannable_alarms(pool)
         .await
         .map_err(|e| e.to_string())?;
+    prune_stale_pending(pool, &rows, now, horizon).await?;
 
     // Group alarm rows by event so a recurring master expands once.
     let mut by_event: std::collections::HashMap<Uuid, Vec<&alarms::AlarmScanRow>> =
@@ -198,43 +217,7 @@ async fn alarm_scan(
 
     for (event_id, group) in &by_event {
         for scan in group {
-            let triggers: Vec<DateTime<Utc>> = match scan.alarm.trigger_at {
-                Some(at) => vec![at],
-                None => {
-                    let Some(offset) = scan.alarm.offset_secs() else {
-                        continue;
-                    };
-                    let base_at = match scan.alarm.related.as_deref() {
-                        Some("END") => scan.event.ends_at,
-                        _ => scan.event.starts_at,
-                    };
-                    let Some(base_at) = base_at else { continue };
-                    if scan.event.rrule.is_some() {
-                        let expanded = calendar_core::recurrence::expand_occurrences(
-                            DateOrDateTime::Timed(base_at),
-                            scan.event.tzid.as_deref(),
-                            Some(scan.event.rrule.as_deref().unwrap_or_default()),
-                            &parse_points(&scan.event.rdate),
-                            &parse_points(&scan.event.exdate),
-                            lookback,
-                            horizon,
-                        )
-                        .unwrap_or_default();
-                        expanded
-                            .into_iter()
-                            .filter_map(|p| match p {
-                                DateOrDateTime::Timed(at) => Some(at),
-                                DateOrDateTime::AllDay(_) => None,
-                            })
-                            .map(|at| at + Duration::seconds(offset))
-                            .collect()
-                    } else {
-                        vec![base_at + Duration::seconds(offset)]
-                    }
-                }
-            };
-
-            for trigger in triggers {
+            for trigger in alarm_triggers(scan, lookback, horizon) {
                 if trigger < lookback || trigger > horizon {
                     continue;
                 }
@@ -371,6 +354,8 @@ async fn alarm_scan(
                             Some(&text),
                             Some(serde_json::json!({
                                 "event_id": event_id,
+                                "alarm_id": scan.alarm.id,
+                                "trigger_at": trigger,
                                 "tenant_id": tenant_id,
                                 "recipient": email,
                             })),
@@ -395,6 +380,8 @@ async fn alarm_scan(
                             Some(&text),
                             Some(serde_json::json!({
                                 "event_id": event_id,
+                                "alarm_id": scan.alarm.id,
+                                "trigger_at": trigger,
                                 "tenant_id": tenant_id,
                                 "recipient": phone,
                             })),
@@ -416,6 +403,8 @@ async fn alarm_scan(
                             Some(&body),
                             Some(serde_json::json!({
                                 "event_id": event_id,
+                                "alarm_id": scan.alarm.id,
+                                "trigger_at": trigger,
                                 "tenant_id": tenant_id,
                             })),
                             &format!("{dedupe}:push:{}", user.id),
@@ -426,6 +415,147 @@ async fn alarm_scan(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Alarm trigger instants for one scan row. Absolute triggers pass through;
+/// relative triggers anchor on the event's own start/end — exception
+/// overrides use their own times, all-day events start at midnight in the
+/// event's timezone — and recurring events expand within
+/// [lookback, horizon).
+fn alarm_triggers(
+    scan: &alarms::AlarmScanRow,
+    lookback: DateTime<Utc>,
+    horizon: DateTime<Utc>,
+) -> Vec<DateTime<Utc>> {
+    if let Some(at) = scan.alarm.trigger_at {
+        return vec![at];
+    }
+    let Some(offset) = scan.alarm.offset_secs() else {
+        return vec![];
+    };
+    let related_end = scan.alarm.related.as_deref() == Some("END");
+    let Some(base) = base_point(&scan.event, related_end) else {
+        return vec![];
+    };
+    if scan.event.rrule.is_some() {
+        calendar_core::recurrence::expand_occurrences(
+            base,
+            scan.event.tzid.as_deref(),
+            scan.event.rrule.as_deref(),
+            &parse_points(&scan.event.rdate),
+            &parse_points(&scan.event.exdate),
+            lookback,
+            horizon,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| match p {
+            DateOrDateTime::Timed(at) => Some(at),
+            DateOrDateTime::AllDay(date) => day_start_instant(date, scan.event.tzid.as_deref()),
+        })
+        .map(|at| at + Duration::seconds(offset))
+        .collect()
+    } else {
+        match base {
+            DateOrDateTime::Timed(at) => Some(at),
+            DateOrDateTime::AllDay(date) => day_start_instant(date, scan.event.tzid.as_deref()),
+        }
+        .map(|at| at + Duration::seconds(offset))
+        .into_iter()
+        .collect()
+    }
+}
+
+/// The alarm's anchor occurrence: the event's own start/end (exceptions carry
+/// the override's times; all-day events anchor on their date, which the
+/// recurrence engine resolves in wall-clock space).
+fn base_point(event: &db::EventRow, related_end: bool) -> Option<DateOrDateTime> {
+    let (at, date) = if related_end {
+        (event.ends_at, event.end_date)
+    } else {
+        (event.starts_at, event.start_date)
+    };
+    match (at, date) {
+        (Some(at), _) => Some(DateOrDateTime::Timed(at)),
+        (None, Some(date)) => Some(DateOrDateTime::AllDay(date)),
+        _ => None,
+    }
+}
+
+/// Midnight of an all-day occurrence as an instant: wall clock in the event's
+/// timezone; floating events (no tzid) store wall clock as if UTC.
+fn day_start_instant(date: NaiveDate, tzid: Option<&str>) -> Option<DateTime<Utc>> {
+    let naive = date.and_hms_opt(0, 0, 0)?;
+    calendar_core::recurrence::resolve_tz(tzid)
+        .from_local_datetime(&naive)
+        .earliest()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Deletes pending (not yet dispatched) reminder rows whose alarm or trigger
+/// no longer matches a live alarm occurrence: the event was deleted, or was
+/// edited (ics_upsert regenerates alarm ids on edit; an API time edit moves
+/// the trigger) — rows the next scan re-creates under the new dedupe key are
+/// unaffected. Rows that already dispatched are history, not pending, and
+/// stay.
+async fn prune_stale_pending(
+    pool: &sqlx::PgPool,
+    live: &[alarms::AlarmScanRow],
+    now: DateTime<Utc>,
+    horizon: DateTime<Utc>,
+) -> Result<(), String> {
+    #[derive(sqlx::FromRow)]
+    struct Pending {
+        id: Uuid,
+        alarm_id: Option<Uuid>,
+        trigger_at: Option<DateTime<Utc>>,
+    }
+    let pending: Vec<Pending> = sqlx::query_as(
+        "SELECT id, (data->>'alarm_id')::uuid AS alarm_id,
+                (data->>'trigger_at')::timestamptz AS trigger_at
+         FROM notifications
+         WHERE sent_at IS NULL AND channel IN ('email', 'sms', 'push')
+           AND dedupe_key LIKE 'alarm:%'
+           AND created_at > now() - interval '7 days'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let live_by_id: std::collections::HashMap<Uuid, &alarms::AlarmScanRow> =
+        live.iter().map(|r| (r.alarm.id, r)).collect();
+    // ponytail: 24h-wide comparison window; rows older than that have aged
+    // out of the send backoff long before, so widening further buys nothing.
+    let lookback = now - Duration::hours(24);
+    let mut stale: Vec<Uuid> = Vec::new();
+    for row in pending {
+        let stale_row = match row.alarm_id.as_ref().and_then(|id| live_by_id.get(id)) {
+            // No live alarm with this id: deleted event, or edited so the
+            // alarm set was regenerated.
+            None => true,
+            Some(scan) => match row.trigger_at {
+                // Trigger moved (e.g. an API edit of the start time keeps the
+                // alarm rows): drop rows whose old trigger no longer matches.
+                Some(at) => !alarm_triggers(scan, lookback, horizon).contains(&at),
+                // Rows written before trigger_at existed age out via send
+                // backoff; only the alarm-identity check applies.
+                None => false,
+            },
+        };
+        if stale_row {
+            stale.push(row.id);
+        }
+    }
+    for id in stale {
+        sqlx::query("DELETE FROM notifications WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -472,31 +602,33 @@ async fn notify_send(
             .unwrap_or(Uuid::nil());
         let result = match row.channel.as_str() {
             "email" => {
-                let Some(provider) =
-                    crate::scheduling::load_email_provider(pool, Some(tenant_id), crypto).await
-                else {
-                    mark_unsent(pool, &row.id, "no email provider").await;
-                    continue;
-                };
-                provider
-                    .send(
-                        &recipient,
-                        row.title.as_deref().unwrap_or("Reminder"),
-                        row.body.as_deref().unwrap_or_default(),
-                    )
-                    .await
+                // A missing provider is an error like any other: it counts
+                // against the retry budget instead of retrying forever.
+                match crate::scheduling::load_email_provider(pool, Some(tenant_id), crypto).await {
+                    Some(provider) => {
+                        provider
+                            .send(
+                                &recipient,
+                                row.title.as_deref().unwrap_or("Reminder"),
+                                row.body.as_deref().unwrap_or_default(),
+                            )
+                            .await
+                    }
+                    None => Err(calendar_notify::NotifyError::Config(
+                        "no email provider".into(),
+                    )),
+                }
             }
-            "sms" => {
-                let Some(provider) =
-                    crate::rules_api::load_sms_provider(pool, tenant_id, crypto).await
-                else {
-                    mark_unsent(pool, &row.id, "no sms provider").await;
-                    continue;
-                };
-                provider
-                    .send(&recipient, row.body.as_deref().unwrap_or_default())
-                    .await
-            }
+            "sms" => match crate::rules_api::load_sms_provider(pool, tenant_id, crypto).await {
+                Some(provider) => {
+                    provider
+                        .send(&recipient, row.body.as_deref().unwrap_or_default())
+                        .await
+                }
+                None => Err(calendar_notify::NotifyError::Config(
+                    "no sms provider".into(),
+                )),
+            },
             "push" => {
                 send_push(
                     pool,
@@ -556,15 +688,6 @@ async fn notify_send(
         }
     }
     Ok(())
-}
-
-async fn mark_unsent(pool: &sqlx::PgPool, id: &Uuid, error: &str) {
-    sqlx::query("UPDATE notifications SET send_error = $2 WHERE id = $1")
-        .bind(id)
-        .bind(error)
-        .execute(pool)
-        .await
-        .ok();
 }
 
 /// Sends a push row to the user's subscriptions; drops endpoints the push
@@ -745,4 +868,210 @@ fn parse_points(value: &serde_json::Value) -> Vec<DateOrDateTime> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use calendar_db::EventRow;
+
+    fn timed(at: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(at)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn event(
+        starts_at: Option<DateTime<Utc>>,
+        start_date: Option<NaiveDate>,
+        tzid: Option<&str>,
+        rrule: Option<&str>,
+        master_event_id: Option<Uuid>,
+    ) -> EventRow {
+        EventRow {
+            id: Uuid::nil(),
+            calendar_id: Uuid::nil(),
+            uid: String::new(),
+            href: None,
+            master_event_id,
+            recurrence_id: None,
+            recurrence_id_date: None,
+            is_exception: master_event_id.is_some(),
+            starts_at,
+            ends_at: None,
+            start_date,
+            end_date: None,
+            duration: None,
+            tzid: tzid.map(str::to_string),
+            all_day: start_date.is_some(),
+            floating: tzid.is_none(),
+            rrule: rrule.map(str::to_string),
+            rdate: serde_json::Value::Null,
+            exdate: serde_json::Value::Null,
+            summary: String::new(),
+            description_html: None,
+            description_text: None,
+            url: None,
+            status: None,
+            priority: None,
+            class: None,
+            transp: None,
+            categories: Vec::new(),
+            location_id: None,
+            organizer_user_id: None,
+            created_by: None,
+            organizer_email: String::new(),
+            organizer_name: None,
+            sequence: 0,
+            etag: String::new(),
+            deleted_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn scan_row(event: EventRow, offset_secs: i64) -> alarms::AlarmScanRow {
+        alarms::AlarmScanRow {
+            calendar_id: Uuid::nil(),
+            event,
+            alarm: alarms::AlarmRow {
+                id: Uuid::nil(),
+                event_id: Uuid::nil(),
+                action: "DISPLAY".to_string(),
+                related: Some("START".to_string()),
+                offset_interval: Some(sqlx::postgres::types::PgInterval {
+                    months: 0,
+                    days: 0,
+                    microseconds: offset_secs * 1_000_000,
+                }),
+                trigger_at: None,
+                description: None,
+                summary: None,
+                recipient_emails: Vec::new(),
+                notify_channels: Vec::new(),
+                created_at: Utc::now(),
+            },
+        }
+    }
+
+    fn window() -> (DateTime<Utc>, DateTime<Utc>) {
+        (timed("2026-01-01T00:00:00Z"), timed("2026-03-01T00:00:00Z"))
+    }
+
+    #[test]
+    fn exception_alarm_fires_at_the_override_time() {
+        // A moved occurrence's exception row carries its own starts_at; the
+        // master's original time must not be used.
+        let scan = scan_row(
+            event(
+                Some(timed("2026-01-20T15:00:00Z")),
+                None,
+                None,
+                None,
+                Some(Uuid::nil()),
+            ),
+            -900,
+        );
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, lookback, horizon),
+            vec![timed("2026-01-20T14:45:00Z")]
+        );
+    }
+
+    #[test]
+    fn all_day_alarm_anchors_at_local_midnight() {
+        // 2026-01-15 midnight in New York (EST) is 05:00 UTC.
+        let scan = scan_row(
+            event(
+                None,
+                Some(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()),
+                Some("America/New_York"),
+                None,
+                None,
+            ),
+            -900,
+        );
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, lookback, horizon),
+            vec![timed("2026-01-15T04:45:00Z")]
+        );
+    }
+
+    #[test]
+    fn all_day_floating_alarm_anchors_at_utc_midnight() {
+        // Floating wall clock is stored as if UTC.
+        let scan = scan_row(
+            event(
+                None,
+                Some(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()),
+                None,
+                None,
+                None,
+            ),
+            0,
+        );
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, lookback, horizon),
+            vec![timed("2026-01-15T00:00:00Z")]
+        );
+    }
+
+    #[test]
+    fn all_day_recurring_alarm_expands_to_midnights() {
+        let scan = scan_row(
+            event(
+                None,
+                Some(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()),
+                None,
+                Some("FREQ=DAILY;COUNT=3"),
+                None,
+            ),
+            0,
+        );
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, lookback, horizon),
+            vec![
+                timed("2026-01-15T00:00:00Z"),
+                timed("2026-01-16T00:00:00Z"),
+                timed("2026-01-17T00:00:00Z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn master_recurring_alarm_still_expands_instant_occurrences() {
+        let scan = scan_row(
+            event(
+                Some(timed("2026-01-15T10:00:00Z")),
+                None,
+                None,
+                Some("FREQ=DAILY;COUNT=2"),
+                None,
+            ),
+            -900,
+        );
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, lookback, horizon),
+            vec![timed("2026-01-15T09:45:00Z"), timed("2026-01-16T09:45:00Z"),]
+        );
+    }
+
+    #[test]
+    fn absolute_trigger_passes_through() {
+        let mut scan = scan_row(
+            event(Some(timed("2026-01-15T10:00:00Z")), None, None, None, None),
+            0,
+        );
+        scan.alarm.trigger_at = Some(timed("2026-02-01T08:00:00Z"));
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, lookback, horizon),
+            vec![timed("2026-02-01T08:00:00Z")]
+        );
+    }
 }

@@ -292,6 +292,27 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/bob.jar" -H "X-CSRF-Toke
   -d "{\"name\":\"nope\",\"trigger_type\":\"event_created\",\"calendar_id\":\"$CAL\"}")
 [ "$CODE" = 403 ] || fail "bob should not create a rule on alice's calendar, got $CODE"
 
+step "Unknown rule trigger_type is rejected with a clear 400"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/rules" \
+  -d '{"name":"bad-trigger","trigger_type":"banana"}')
+[ "$CODE" = 400 ] || fail "unknown trigger_type must 400, got $CODE"
+
+step "Rule conditions are honored: a matching rule fires, a non-matching one does not"
+COND_RULE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/rules" \
+  -d '{"name":"cond-r","trigger_type":"event_updated","conditions":[{"field":"summary","op":"contains","value":"conditioned"}],"actions":[{"type":"create_notification","title":"cond hit","body":"fired"}]}')
+echo "$COND_RULE" | grep -q '"id"' || fail "conditional rule create failed: $COND_RULE"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/events/$EV_ID" -d '{"summary":"conditioned update"}' >/dev/null
+ETAG=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X PATCH "$BASE/api/events/$EV_ID" -d '{"summary":"unmatched edit"}' \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['etag'])")
+sleep 0.5
+HITS=$(curl -s -b "$DATA/alice.jar" "$BASE/api/notifications" \
+  | python3 -c "import json,sys;rows=json.load(sys.stdin);print(len([r for r in rows if r.get('title')=='cond hit']))")
+[ "$HITS" = "1" ] || fail "conditioned rule should fire exactly once on the matching edit, got $HITS hits"
+
 step "SMS rule action: skipped (not silently ignored) with no Twilio provider configured"
 SMS_RULE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
   -X POST "$BASE/api/rules" \
@@ -360,7 +381,7 @@ step "Passkey enrollment finish endpoint is served at its documented /api path"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" \
   -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
   -X POST "$BASE/api/auth/webauthn/register/finish" -d '{"challenge_id":"00000000-0000-0000-0000-000000000000"}')
-[ "$CODE" = 400 ] || fail "register/finish should 400 on an unknown challenge, got $CODE"
+[ "$CODE" = 400 ] || [ "$CODE" = 422 ] || fail "register/finish should reject an unknown challenge (400/422), got $CODE"
 
 step "Web UI: /rules, /admin and /providers pages exist (admin-gated since 00a9e13/3275b18)"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/rules")

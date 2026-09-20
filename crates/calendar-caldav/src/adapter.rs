@@ -288,7 +288,8 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     }
                     if options.write {
                         capability_guard(cap, CalendarCapability::ReadWrite)?;
-                        let exists = match db::get_event_by_href(&self.pool, cal.id, &name).await {
+                        let existing = db::get_event_by_href(&self.pool, cal.id, &name).await;
+                        let exists = match &existing {
                             Ok(_) => true,
                             Err(db::DbError::NotFound) => false,
                             Err(_) => return Err(FsError::GeneralFailure),
@@ -299,6 +300,24 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                         if !exists && !options.create {
                             return Err(FsError::NotFound); // PUT update of a gone resource
                         }
+                        // Capture the etag here — the same metadata dav-server's
+                        // If-Match check was evaluated against at request start —
+                        // so flush() re-verifies it inside the write transaction
+                        // (lost-update race). dav-server does not forward the
+                        // If-Match header, so a bare PUT is indistinguishable
+                        // from a specific-etag If-Match and gets the same
+                        // within-request consistency check.
+                        let precondition = if options.create_new {
+                            db::ics_upsert::PutPrecondition::NotExists
+                        } else {
+                            match existing {
+                                Ok((event, _)) => db::ics_upsert::PutPrecondition::MatchEtag(
+                                    event.etag.trim_matches('"').to_string(),
+                                ),
+                                Err(db::DbError::NotFound) => db::ics_upsert::PutPrecondition::None,
+                                Err(_) => return Err(FsError::GeneralFailure),
+                            }
+                        };
                         return Ok(Box::new(WriteFile {
                             pool: self.pool.clone(),
                             calendar: cal,
@@ -306,6 +325,7 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                             name,
                             buffer: Vec::new(),
                             new_meta: None,
+                            precondition,
                         }) as Box<dyn DavFile>);
                     }
                     Err(FsError::NotImplemented)
@@ -648,6 +668,9 @@ struct WriteFile {
     name: String,
     buffer: Vec<u8>,
     new_meta: Option<Meta>,
+    /// Captured at open(): the etag the resource carried when dav-server's
+    /// If-Match check passed, or create-only for If-None-Match: *.
+    precondition: db::ics_upsert::PutPrecondition,
 }
 
 impl DavFile for WriteFile {
@@ -718,12 +741,18 @@ impl DavFile for WriteFile {
                 &self.name,
                 &master,
                 &overrides,
+                &self.precondition,
             )
             .await;
             let (event, _) = result.map_err(|e| {
                 tracing::warn!(error = %e, "CalDAV PUT failed to store event");
                 match e {
                     db::DbError::NotFound => FsError::NotFound,
+                    // A failed etag/create-only precondition aborts the write
+                    // transaction. FsError has no 412-mapping variant (dav-server's
+                    // FsError -> status table lacks PreconditionFailed), so 403
+                    // Forbidden is the closest existing error: the client sees the
+                    // write refused and must refetch and retry.
                     db::DbError::Conflict(_) => FsError::Forbidden,
                     _ => FsError::GeneralFailure,
                 }

@@ -354,7 +354,7 @@ async fn get_event(
 }
 
 async fn patch_event(
-    State(AppState { pool, .. }): State<AppState>,
+    State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
     Path(event_id): Path<Uuid>,
     if_match: IfMatch,
@@ -394,6 +394,19 @@ async fn patch_event(
         attendees: body.attendees,
     };
     let (event, etag) = db::update_event(&pool, event_id, if_match.0.as_deref(), &patch).await?;
+    // Fire-and-forget: rules must never break the mutation (same as create).
+    if let Ok(cal) = db::get_calendar(&pool, existing.calendar_id).await {
+        crate::rules_api::run_rules(
+            &pool,
+            cal.tenant_id,
+            cal.id,
+            "event_updated",
+            event.id,
+            serde_json::json!({"summary": event.summary, "starts_at": event.starts_at}),
+            crypto.as_deref(),
+        )
+        .await;
+    }
     let rows = db::list_attendees(&pool, event.id).await?;
     let location = db::location_for_event(&pool, &event).await;
     let registry = db::categories::registry_for_calendar(&pool, event.calendar_id).await?;
@@ -407,7 +420,7 @@ async fn patch_event(
 }
 
 async fn delete_event(
-    State(AppState { pool, .. }): State<AppState>,
+    State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
     Path(event_id): Path<Uuid>,
     if_match: IfMatch,
@@ -423,6 +436,22 @@ async fn delete_event(
     )
     .await?;
     db::delete_event(&pool, event_id, if_match.0.as_deref()).await?;
+    // Cancelled meeting: queue METHOD:CANCEL iMIP messages for every attendee.
+    db::scheduling::schedule_cancels(&pool, existing.id).await;
+    // Fire-and-forget with the pre-change event as context; the row is gone
+    // by now, so "existing" is all the delete rule ever sees.
+    if let Ok(cal) = db::get_calendar(&pool, existing.calendar_id).await {
+        crate::rules_api::run_rules(
+            &pool,
+            cal.tenant_id,
+            cal.id,
+            "event_deleted",
+            existing.id,
+            serde_json::json!({"summary": existing.summary, "starts_at": existing.starts_at}),
+            crypto.as_deref(),
+        )
+        .await;
+    }
     Ok(Json(serde_json::json!({"ok": true})))
 }
 

@@ -9,6 +9,22 @@ use uuid::Uuid;
 
 use super::{DbError, EventRow, NewLocation};
 
+/// Optimistic-concurrency guard for a CalDAV PUT, re-verified inside the same
+/// transaction as the write. dav-server checks `If-Match`/`If-None-Match` once
+/// against request-start metadata, before the body is streamed; without this
+/// re-check a concurrent PUT that commits in between is silently overwritten
+/// (lost-update race). Mirrors the JSON API's in-transaction If-Match check in
+/// `update_event`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PutPrecondition {
+    /// No precondition header on the request.
+    None,
+    /// If-Match: the live resource at `href` must still carry this etag.
+    MatchEtag(String),
+    /// If-None-Match: * — the resource at `href` must not exist.
+    NotExists,
+}
+
 /// Normalized event fields for the upsert path. Mirrors the events table; the
 /// mapping from RFC 5545 properties lives in calendar-caldav.
 #[derive(Debug, Default)]
@@ -96,6 +112,10 @@ fn interval(secs: Option<i64>) -> Option<PgInterval> {
 ///
 /// `href` is the filename the client PUT to. Overrides absent from the PUT
 /// are removed. A UID that is live at another filename is a Conflict.
+///
+/// `precondition` is verified after the `FOR UPDATE` row lock, inside the
+/// write transaction: a stale etag or a concurrently created resource aborts
+/// the whole write with `DbError::Conflict`.
 pub async fn put_series(
     pool: &sqlx::PgPool,
     calendar_id: Uuid,
@@ -103,6 +123,7 @@ pub async fn put_series(
     href: &str,
     master: &IcsEventUpsert,
     overrides: &[IcsEventUpsert],
+    precondition: &PutPrecondition,
 ) -> Result<(EventRow, bool), DbError> {
     let master_location = resolve_location(pool, &master.location_text).await?;
     let mut override_locations = Vec::with_capacity(overrides.len());
@@ -117,8 +138,8 @@ pub async fn put_series(
         .filter(|u| format!("{u}.ics") == href);
 
     let mut tx = pool.begin().await?;
-    let at_href: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM events
+    let at_href: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, etag FROM events
          WHERE calendar_id = $1 AND deleted_at IS NULL
            AND master_event_id IS NULL AND recurrence_id IS NULL AND recurrence_id_date IS NULL
            AND COALESCE(href, id::text || '.ics') = $2
@@ -128,6 +149,28 @@ pub async fn put_series(
     .bind(href)
     .fetch_optional(&mut *tx)
     .await?;
+    // Precondition re-check while holding the row lock: a failed one aborts
+    // the transaction so a concurrent write that won the race is preserved.
+    match precondition {
+        PutPrecondition::MatchEtag(expected) => match &at_href {
+            Some((_, current))
+                if super::constant_time_eq_str(
+                    expected.trim_matches('"'),
+                    current.trim_matches('"'),
+                ) => {}
+            _ => {
+                return Err(DbError::Conflict(
+                    "etag precondition failed: resource changed concurrently".into(),
+                ));
+            }
+        },
+        PutPrecondition::NotExists if at_href.is_some() => {
+            return Err(DbError::Conflict(
+                "resource was created concurrently".into(),
+            ));
+        }
+        PutPrecondition::None | PutPrecondition::NotExists => {}
+    }
     let by_uid: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
         "SELECT id, deleted_at FROM events
          WHERE calendar_id = $1 AND uid = $2
@@ -138,8 +181,8 @@ pub async fn put_series(
     .bind(&master.uid)
     .fetch_optional(&mut *tx)
     .await?;
-    let (existing, resurrect) = match (at_href, by_uid) {
-        (Some(id), _) => (Some(id), false),
+    let (existing, resurrect) = match (&at_href, by_uid) {
+        (Some((id, _)), _) => (Some(*id), false),
         (None, Some((_, None))) => {
             return Err(DbError::Conflict(
                 "event uid already exists at another resource".into(),
@@ -377,4 +420,232 @@ async fn write_attendees(
         .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    /// DB-backed tests need a live PostgreSQL via DATABASE_URL (the throwaway
+    /// instance the interop suite boots works). Without it they skip so
+    /// `cargo test` still passes on machines without infrastructure.
+    async fn test_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .ok()?;
+        crate::migrate(&pool).await.ok()?;
+        Some(pool)
+    }
+
+    struct Fixture {
+        user: Uuid,
+        calendar: Uuid,
+    }
+
+    async fn fixture(pool: &sqlx::PgPool) -> Fixture {
+        let f = Fixture {
+            user: Uuid::new_v4(),
+            calendar: Uuid::new_v4(),
+        };
+        sqlx::query("INSERT INTO users (id, username, email) VALUES ($1, $2, $3)")
+            .bind(f.user)
+            .bind(format!("u-{}", f.user.simple()))
+            .bind(format!("{}@putseries.test", f.user))
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO tenants (id, slug, name, is_personal) VALUES ($1, $2, $2, true)")
+            .bind(f.user)
+            .bind(f.user.simple().to_string())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_members (tenant_id, user_id, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(f.user)
+        .bind(f.user)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO calendars (id, tenant_id, slug, name, created_by) VALUES ($1, $2, $3, $3, $4)")
+            .bind(f.calendar)
+            .bind(f.user)
+            .bind(f.user.simple().to_string())
+            .bind(f.user)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO calendar_acl (calendar_id, principal_user_id, capability, can_manage_acl)
+             VALUES ($1, $2, 'owner', true)",
+        )
+        .bind(f.calendar)
+        .bind(f.user)
+        .execute(pool)
+        .await
+        .unwrap();
+        f
+    }
+
+    fn sample(uid: &str) -> IcsEventUpsert {
+        IcsEventUpsert {
+            uid: uid.to_string(),
+            starts_at: Some(Utc::now()),
+            ends_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            summary: Some("before".into()),
+            organizer_email: "writer@putseries.test".into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_etag_put_aborts_and_matching_etag_put_succeeds() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let f = fixture(&pool).await;
+        let uid = Uuid::new_v4().to_string();
+        let (first, created) = put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            "a.ics",
+            &sample(&uid),
+            &[],
+            &PutPrecondition::None,
+        )
+        .await
+        .unwrap();
+        assert!(created);
+
+        // A competing unconditional PUT commits, as a concurrent client would
+        // between dav-server's header check and our flush().
+        let mut competing = sample(&uid);
+        competing.summary = Some("concurrent".into());
+        let (second, _) = put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            "a.ics",
+            &competing,
+            &[],
+            &PutPrecondition::None,
+        )
+        .await
+        .unwrap();
+
+        // A PUT still preconditioned on the first etag is stale: it must fail
+        // and abort, leaving the competing write intact.
+        let mut stale = sample(&uid);
+        stale.summary = Some("stale".into());
+        let err = put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            "a.ics",
+            &stale,
+            &[],
+            &PutPrecondition::MatchEtag(first.etag.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(_)),
+            "expected Conflict, got {err:?}"
+        );
+        let after = crate::get_event_by_href(&pool, f.calendar, "a.ics")
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(after.summary, "concurrent");
+
+        // A PUT preconditioned on the current etag succeeds and refreshes it.
+        let mut fresh = sample(&uid);
+        fresh.summary = Some("fresh".into());
+        let (third, _) = put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            "a.ics",
+            &fresh,
+            &[],
+            &PutPrecondition::MatchEtag(second.etag.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(third.summary, "fresh");
+        assert_ne!(third.etag, second.etag);
+        // The unquoted form dav-server sends on the wire matches too.
+        let mut again = sample(&uid);
+        again.summary = Some("again".into());
+        put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            "a.ics",
+            &again,
+            &[],
+            &PutPrecondition::MatchEtag(third.etag.trim_matches('"').to_string()),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_only_put_rejects_existing_resource() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let f = fixture(&pool).await;
+        let uid = Uuid::new_v4().to_string();
+        put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            "b.ics",
+            &sample(&uid),
+            &[],
+            &PutPrecondition::None,
+        )
+        .await
+        .unwrap();
+        // If-None-Match: * against a resource that now exists fails.
+        let err = put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            "b.ics",
+            &sample(&uid),
+            &[],
+            &PutPrecondition::NotExists,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(_)),
+            "expected Conflict, got {err:?}"
+        );
+        // Against an absent resource it creates.
+        let other = Uuid::new_v4().to_string();
+        let (row, created) = put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            "c.ics",
+            &sample(&other),
+            &[],
+            &PutPrecondition::NotExists,
+        )
+        .await
+        .unwrap();
+        assert!(created);
+        assert_eq!(row.uid, other);
+    }
 }
