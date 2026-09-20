@@ -354,6 +354,44 @@ pub fn openapi_document() -> serde_json::Value {
         }}),
     );
     put(
+        "/api/subscriptions/{id}/occurrences",
+        json!({"get": {"summary": "Expanded occurrences of a subscribed calendar (PUBLIC events only)",
+            "parameters": [param("id", true),
+                {"name": "from", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}},
+                {"name": "to", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}],
+            "responses": {"200": {"description": "expanded occurrences with exception overlay"}}}}),
+    );
+    put(
+        "/api/auth/notify-prefs",
+        json!({"post": {"summary": "Set per-user reminder opt-outs (email/SMS/push)",
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object",
+                "required": ["notify_email", "notify_sms", "notify_push"],
+                "properties": {"notify_email": {"type": "boolean"}, "notify_sms": {"type": "boolean"},
+                    "notify_push": {"type": "boolean"}}}}}},
+            "responses": {"200": {"description": "saved"}}}}),
+    );
+    put(
+        "/api/push/subscriptions",
+        json!({
+            "post": {"summary": "Register a Web Push subscription for the signed-in user",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object",
+                    "required": ["endpoint", "keys"],
+                    "properties": {"endpoint": {"type": "string", "format": "uri"},
+                        "keys": {"type": "object", "required": ["p256dh", "auth"],
+                            "properties": {"p256dh": {"type": "string"}, "auth": {"type": "string"}}}}}}}},
+                "responses": {"201": {"description": "registered"}}},
+            "delete": {"summary": "Remove a Web Push subscription",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object",
+                    "required": ["endpoint"], "properties": {"endpoint": {"type": "string"}}}}}},
+                "responses": {"200": {"description": "removed"}}},
+        }),
+    );
+    put(
+        "/api/push/public-key",
+        json!({"get": {"summary": "VAPID public key for the tenant's Web Push provider",
+            "responses": {"200": {"description": "public key"}, "404": {"description": "no webpush provider"}}}}),
+    );
+    put(
         "/api/rules",
         json!({
             "post": {"summary": "Create a rule (trigger -> optional conditions -> actions), scoped to one calendar or tenant-wide",
@@ -495,9 +533,24 @@ pub fn openapi_document() -> serde_json::Value {
     );
     put(
         "/api/notification-providers/{id}",
-        json!({"delete": {
-            "summary": "Remove a provider", "responses": {"200": {"description": "removed"}}
-        }}),
+        json!({
+            "get": {"summary": "Provider details with decrypted config (admin, browser session only)",
+                "parameters": [param("id", true)],
+                "responses": {"200": {"description": "config"}, "403": {"description": "bearer tokens are refused"}}},
+            "patch": {"summary": "Update a provider (admin only)", "parameters": [param("id", true)],
+                "requestBody": {"content": {"application/json": {"schema": {"type": "object",
+                    "properties": {"name": {"type": "string"}, "enabled": {"type": "boolean"},
+                        "config": {"type": "object"}}}}}},
+                "responses": {"200": {"description": "updated"}}},
+            "delete": {"summary": "Remove a provider", "parameters": [param("id", true)],
+                "responses": {"200": {"description": "removed"}}},
+        }),
+    );
+    put(
+        "/api/notification-providers/{id}/test",
+        json!({"post": {"summary": "Send a real message through the provider (admin only)",
+            "parameters": [param("id", true)],
+            "responses": {"200": {"description": "ok/error outcome"}}}}),
     );
     put(
         "/api/webhooks",
@@ -718,6 +771,24 @@ mod tests {
         assert!(doc["paths"]["/api/calendars/{id}/events"]["post"].is_object());
         assert!(doc["paths"]["/api/addressbooks"]["post"].is_object());
         assert!(doc["paths"]["/api/contacts/autocomplete"]["get"].is_object());
+        // Routes that drifted out of the document once already stay pinned:
+        for (path, method) in [
+            ("/api/auth/notify-prefs", "post"),
+            ("/api/notification-providers/{id}", "get"),
+            ("/api/notification-providers/{id}", "patch"),
+            ("/api/notification-providers/{id}/test", "post"),
+            ("/api/push/public-key", "get"),
+            ("/api/push/subscriptions", "post"),
+            ("/api/push/subscriptions", "delete"),
+            ("/api/subscriptions/{id}/occurrences", "get"),
+            ("/api/webhooks", "post"),
+            ("/api/webhooks/{id}/deliveries", "get"),
+        ] {
+            assert!(
+                doc["paths"][path][method].is_object(),
+                "{method} {path} missing from the OpenAPI document"
+            );
+        }
         assert!(doc["components"]["schemas"]["Contact"].is_object());
         assert!(doc["components"]["schemas"]["Contact"]["properties"]["members"].is_object());
         assert!(
