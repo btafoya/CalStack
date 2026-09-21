@@ -14,18 +14,24 @@ use calendar_db::{self as db};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct PushBody {
     endpoint: String,
     keys: PushKeys,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct PushKeys {
     p256dh: String,
     auth: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/push/subscriptions",
+    request_body = PushBody,
+    responses((status = 200, description = "registered (upsert per endpoint)", body = crate::OkView))
+)]
 async fn subscribe(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -54,6 +60,12 @@ async fn subscribe(
     Ok(Json(json!({"ok": true})))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/push/subscriptions",
+    request_body = PushBody,
+    responses((status = 200, description = "removed", body = crate::OkView))
+)]
 async fn unsubscribe(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -71,6 +83,13 @@ async fn unsubscribe(
 }
 
 /// The tenant webpush provider's VAPID public key (subscribe applicationServerKey).
+#[utoipa::path(
+    get,
+    path = "/api/push/public-key",
+    responses(
+        (status = 200, description = "VAPID public key, or null when no webpush provider is configured", body = Option<String>),
+    )
+)]
 async fn public_key(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -112,3 +131,11 @@ pub fn router() -> axum::Router<crate::AppState> {
         )
         .route("/api/push/public-key", get(public_key))
 }
+
+/// OpenAPI for the push module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(subscribe, unsubscribe, public_key),
+    components(schemas(PushBody, PushKeys, crate::OkView))
+)]
+pub(crate) struct PushApi;

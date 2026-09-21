@@ -20,12 +20,40 @@ use uuid::Uuid;
 
 // ============ share management ============
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct ShareBody {
     allows_caldav: Option<bool>,
     expires_at: Option<DateTime<Utc>>,
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ShareCreatedView {
+    id: Uuid,
+    /// Shown exactly once; only its sha256 is stored.
+    token: String,
+    allows_caldav: bool,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ShareView {
+    id: Uuid,
+    allows_caldav: bool,
+    expires_at: Option<DateTime<Utc>>,
+    created_at: chrono::DateTime<Utc>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/calendars/{id}/shares",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    request_body = ShareBody,
+    responses(
+        (status = 201, description = "created; token shown once", body = ShareCreatedView),
+        (status = 403, description = "not owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn create_share(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -48,15 +76,24 @@ async fn create_share(
     .await?;
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(json!({
-            "id": share.id,
-            "token": token, // shown exactly once; only its sha256 is stored
-            "allows_caldav": share.allows_caldav,
-            "expires_at": share.expires_at,
-        })),
+        Json(ShareCreatedView {
+            id: share.id,
+            token, // shown exactly once; only its sha256 is stored
+            allows_caldav: share.allows_caldav,
+            expires_at: share.expires_at,
+        }),
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/calendars/{id}/shares",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    responses(
+        (status = 200, description = "shares (no tokens)", body = Vec<ShareView>),
+        (status = 403, description = "not owner"),
+    )
+)]
 async fn list_shares(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -65,16 +102,30 @@ async fn list_shares(
     let auth = resolve_auth(&pool, &headers).await?;
     require_capability(&pool, calendar_id, auth.user.id, CalendarCapability::Owner).await?;
     let rows = db::sharing::list_shares_for_calendar(&pool, calendar_id).await?;
-    Ok(Json(json!(
+    Ok(Json(
         rows.iter()
-            .map(|s| json!({
-                "id": s.id, "allows_caldav": s.allows_caldav,
-                "expires_at": s.expires_at, "created_at": s.created_at,
-            }))
-            .collect::<Vec<_>>()
-    )))
+            .map(|s| ShareView {
+                id: s.id,
+                allows_caldav: s.allows_caldav,
+                expires_at: s.expires_at,
+                created_at: s.created_at,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/calendars/{id}/shares/{share_id}",
+    params(
+        ("id" = Uuid, Path, description = "calendar id"),
+        ("share_id" = Uuid, Path, description = "share id"),
+    ),
+    responses(
+        (status = 200, description = "revoked", body = crate::OkView),
+        (status = 403, description = "not owner"),
+    )
+)]
 async fn revoke_share(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -89,12 +140,38 @@ async fn revoke_share(
 
 // ============ subscriptions ============
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct SubscribeBody {
     share_token: String,
     color: Option<String>,
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct SubscribedView {
+    id: Uuid,
+    share_id: Uuid,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct SubscriptionView {
+    id: Uuid,
+    calendar_name: String,
+    calendar_slug: String,
+    color: Option<String>,
+    allows_caldav: bool,
+    /// false once the share or calendar is revoked/expired.
+    live: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/subscriptions",
+    request_body = SubscribeBody,
+    responses(
+        (status = 201, description = "subscribed", body = SubscribedView),
+        (status = 404, description = "unknown or dead share token"),
+    )
+)]
 async fn subscribe(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -109,31 +186,47 @@ async fn subscribe(
     let row = db::sharing::create_subscription(&pool, auth.user.id, share.id, body.color).await?;
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(json!({"id": row.id, "share_id": share.id})),
+        Json(SubscribedView {
+            id: row.id,
+            share_id: share.id,
+        }),
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/subscriptions",
+    responses(
+        (status = 200, description = "the caller's subscriptions", body = Vec<SubscriptionView>),
+    )
+)]
 async fn list_subscriptions(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     let views = db::sharing::list_subscriptions(&pool, auth.user.id).await?;
-    Ok(Json(json!(
+    Ok(Json(
         views
             .iter()
-            .map(|v| json!({
-                "id": v.id,
-                "calendar_name": v.calendar_name,
-                "calendar_slug": v.calendar_slug,
-                "color": v.color,
-                "allows_caldav": v.allows_caldav,
-                "live": v.live,
-            }))
-            .collect::<Vec<_>>()
-    )))
+            .map(|v| SubscriptionView {
+                id: v.id,
+                calendar_name: v.calendar_name.clone(),
+                calendar_slug: v.calendar_slug.clone(),
+                color: v.color.clone(),
+                allows_caldav: v.allows_caldav,
+                live: v.live,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/subscriptions/{id}",
+    params(("id" = Uuid, Path, description = "subscription id")),
+    responses((status = 200, description = "removed", body = crate::OkView))
+)]
 async fn unsubscribe(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -348,6 +441,31 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/subscriptions/{id}", delete(unsubscribe))
         .route("/share/{token}/calendar.ics", get(public_feed))
 }
+
+/// OpenAPI for the sharing module; merged into the served document in `main.rs`.
+/// The anonymous `/share/{token}/calendar.ics` feed is a CalDAV-adjacent
+/// protocol route, not part of the JSON API document.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        create_share,
+        list_shares,
+        revoke_share,
+        subscribe,
+        list_subscriptions,
+        unsubscribe
+    ),
+    components(schemas(
+        ShareBody,
+        ShareCreatedView,
+        ShareView,
+        SubscribeBody,
+        SubscribedView,
+        SubscriptionView,
+        crate::OkView,
+    ))
+)]
+pub(crate) struct SharingApi;
 
 #[cfg(test)]
 mod feed_tests {

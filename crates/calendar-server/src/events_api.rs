@@ -14,7 +14,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
-struct LocationBody {
+pub(crate) struct LocationBody {
     provider: Option<String>,
     provider_place_id: Option<String>,
     display_name: Option<String>,

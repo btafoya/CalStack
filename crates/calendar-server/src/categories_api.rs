@@ -43,7 +43,7 @@ async fn require_row_manager(
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct CategoryBody {
     /// Calendar this category applies to; omit/null for tenant-wide (admin only).
     calendar_id: Option<Uuid>,
@@ -53,6 +53,28 @@ struct CategoryBody {
     sort_order: Option<i32>,
 }
 
+/// Mirrors calendar-db's CategoryRow (its serde shape is the list response).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct CategoryView {
+    id: Uuid,
+    tenant_id: Uuid,
+    calendar_id: Option<Uuid>,
+    slug: String,
+    name: String,
+    color: String,
+    sort_order: i32,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/categories",
+    request_body = CategoryBody,
+    responses(
+        (status = 201, description = "created", body = CategoryView),
+        (status = 400, description = "validation error"),
+        (status = 403, description = "not the calendar owner (or not admin for tenant-wide)"),
+    )
+)]
 async fn create_category(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -82,18 +104,29 @@ async fn create_category(
     .await?;
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(json!({
-            "id": row.id, "tenant_id": row.tenant_id, "calendar_id": row.calendar_id,
-            "slug": row.slug, "name": row.name, "color": row.color, "sort_order": row.sort_order,
-        })),
+        Json(CategoryView {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            calendar_id: row.calendar_id,
+            slug: row.slug,
+            name: row.name,
+            color: row.color,
+            sort_order: row.sort_order,
+        }),
     ))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct CategoriesQuery {
     calendar_id: Option<Uuid>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/categories",
+    params(("calendar_id" = Option<Uuid>, Query, description = "restrict to one calendar (calendar-scoped plus tenant-wide rows)")),
+    responses((status = 200, description = "visible categories", body = Vec<CategoryView>))
+)]
 async fn list_categories(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -103,10 +136,22 @@ async fn list_categories(
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     let rows =
         db::categories::list_visible(&pool, tenant_id, auth.user.id, query.calendar_id).await?;
-    Ok(Json(json!(rows)))
+    Ok(Json(
+        rows.iter()
+            .map(|r| CategoryView {
+                id: r.id,
+                tenant_id: r.tenant_id,
+                calendar_id: r.calendar_id,
+                slug: r.slug.clone(),
+                name: r.name.clone(),
+                color: r.color.clone(),
+                sort_order: r.sort_order,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct CategoryPatchBody {
     slug: Option<String>,
     name: Option<String>,
@@ -114,6 +159,17 @@ struct CategoryPatchBody {
     sort_order: Option<i32>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/categories/{id}",
+    params(("id" = Uuid, Path, description = "category id")),
+    request_body = CategoryPatchBody,
+    responses(
+        (status = 200, description = "updated", body = CategoryView),
+        (status = 400, description = "validation error"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn patch_category(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -144,9 +200,23 @@ async fn patch_category(
         },
     )
     .await?;
-    Ok(Json(json!(row)))
+    Ok(Json(CategoryView {
+        id: row.id,
+        tenant_id: row.tenant_id,
+        calendar_id: row.calendar_id,
+        slug: row.slug,
+        name: row.name,
+        color: row.color,
+        sort_order: row.sort_order,
+    }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/categories/{id}",
+    params(("id" = Uuid, Path, description = "category id")),
+    responses((status = 200, description = "deleted (event strings untouched)", body = crate::OkView))
+)]
 async fn delete_category(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -173,3 +243,17 @@ pub fn router() -> axum::Router<crate::AppState> {
             patch(patch_category).delete(delete_category),
         )
 }
+
+/// OpenAPI for the categories module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(create_category, list_categories, patch_category, delete_category),
+    components(schemas(
+        CategoryBody,
+        CategoriesQuery,
+        CategoryPatchBody,
+        CategoryView,
+        crate::OkView
+    ))
+)]
+pub(crate) struct CategoriesApi;
