@@ -34,7 +34,7 @@
 **Goal**: Largest group converted first, to prove the annotation pattern on session/CSRF/TOTP/passkey routes including their untyped ceremony bodies.
 **Success Criteria**: All `/api/auth/*` paths generated from annotations; legacy auth paths removed from the fragment; response views (`me`, login session, token list, TOTP status, passkey list) are typed structs passing the compatibility fixture test.
 **Tests**: compatibility fixture test for each converted view; completeness test pinning the auth path inventory.
-**Status**: Not Started
+**Status**: Complete (auth + mfa annotated; legacy fragment's `/api/auth/*` entries deleted; also fixed the legacy doc's broken `json_response`/`ok["200"]` responses, which were invalid JSON Schema. Docker compose smoke test skipped by user; interop verified against `calstack-test-pg` after recreating `caltest` — the suite assumes a fresh DB, it does not reset one)
 
 ## Stage 3: Calendaring core (calendars, ACL, events, occurrences, tasks, journals)
 

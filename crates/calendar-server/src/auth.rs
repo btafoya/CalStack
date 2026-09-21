@@ -304,7 +304,7 @@ pub(crate) fn set_session_cookie(response: &mut axum::response::Response, token:
     );
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct RegisterBody {
     username: String,
     email: String,
@@ -312,7 +312,7 @@ struct RegisterBody {
     display_name: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct LoginBody {
     username_or_email: String,
     password: String,
@@ -356,14 +356,14 @@ async fn verify_totp_gate(
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct TokenBody {
     name: String,
     scopes: Option<Vec<String>>,
     expires_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 struct UserView {
     id: Uuid,
     username: String,
@@ -373,6 +373,13 @@ struct UserView {
     notify_email: bool,
     notify_sms: bool,
     notify_push: bool,
+}
+
+/// Session-establishing responses: fresh CSRF token plus the caller's user.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct LoginSessionView {
+    csrf_token: String,
+    user: UserView,
 }
 
 fn user_view(user: &UserRow) -> UserView {
@@ -389,13 +396,66 @@ fn user_view(user: &UserRow) -> UserView {
 }
 
 /// Per-user reminder opt-outs (in-app is never optional).
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct NotifyPrefsBody {
     notify_email: bool,
     notify_sms: bool,
     notify_push: bool,
 }
 
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct ChangePasswordBody {
+    current_password: String,
+    new_password: String,
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct AppPasswordBody {
+    name: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct TokenCreateView {
+    id: Uuid,
+    name: String,
+    /// Shown exactly once; only the hash is stored.
+    secret: String,
+    scopes: Vec<String>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct TokenView {
+    id: Uuid,
+    name: String,
+    scopes: Vec<String>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    created_at: chrono::DateTime<Utc>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AppPasswordCreateView {
+    id: Uuid,
+    name: String,
+    /// Shown exactly once; only the hash is stored.
+    password: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AppPasswordView {
+    id: Uuid,
+    name: String,
+    created_at: chrono::DateTime<Utc>,
+    last_used_at: Option<chrono::DateTime<Utc>>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/notify-prefs",
+    request_body = NotifyPrefsBody,
+    responses((status = 200, description = "saved", body = crate::OkView))
+)]
 async fn set_notify_prefs(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -417,6 +477,15 @@ async fn set_notify_prefs(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/register",
+    request_body = RegisterBody,
+    responses(
+        (status = 201, description = "created", body = UserView),
+        (status = 400, description = "validation error"),
+    )
+)]
 async fn register(
     State(AppState { pool, .. }): State<AppState>,
     Json(body): Json<RegisterBody>,
@@ -455,6 +524,15 @@ async fn register(
     Ok((StatusCode::CREATED, Json(user_view(&user))))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    request_body = LoginBody,
+    responses(
+        (status = 200, description = "session established (cookie set)", body = LoginSessionView),
+        (status = 401, description = "unauthorized"),
+    )
+)]
 async fn login(
     State(AppState {
         pool,
@@ -534,21 +612,25 @@ async fn login(
         None,
     )
     .await;
-    let mut response = Json(serde_json::json!({
-        "csrf_token": csrf,
-        "user": user_view(&user),
-    }))
+    let mut response = Json(LoginSessionView {
+        csrf_token: csrf,
+        user: user_view(&user),
+    })
     .into_response();
     set_session_cookie(&mut response, &secret);
     Ok(response)
 }
 
-#[derive(serde::Deserialize)]
-struct ChangePasswordBody {
-    current_password: String,
-    new_password: String,
-}
-
+#[utoipa::path(
+    post,
+    path = "/api/auth/password",
+    request_body = ChangePasswordBody,
+    responses(
+        (status = 200, description = "changed (other sessions revoked)", body = crate::OkView),
+        (status = 400, description = "validation error"),
+        (status = 401, description = "unauthorized"),
+    )
+)]
 async fn change_password(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -578,6 +660,11 @@ async fn change_password(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    responses((status = 200, description = "revoked", body = crate::OkView))
+)]
 async fn logout(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -596,6 +683,11 @@ async fn logout(
     Ok(response)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/me",
+    responses((status = 200, description = "current user", body = UserView))
+)]
 async fn me(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -604,6 +696,14 @@ async fn me(
     Ok(Json(user_view(&auth.user)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/tokens",
+    request_body = TokenBody,
+    responses(
+        (status = 201, description = "created; secret shown once", body = TokenCreateView),
+    )
+)]
 async fn create_token(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -634,13 +734,23 @@ async fn create_token(
     // The secret is returned exactly once; only its hash is stored.
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": token.id, "name": token.name, "secret": secret,
-            "scopes": token.scopes, "expires_at": token.expires_at,
-        })),
+        Json(TokenCreateView {
+            id: token.id,
+            name: token.name,
+            secret,
+            scopes: token.scopes,
+            expires_at: token.expires_at,
+        }),
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/tokens",
+    responses(
+        (status = 200, description = "list", body = Vec<TokenView>),
+    )
+)]
 async fn list_tokens(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -648,12 +758,26 @@ async fn list_tokens(
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
     let tokens = db::list_api_tokens(&pool, auth.user.id).await?;
-    Ok(Json(serde_json::json!(tokens
-        .iter()
-        .map(|t| serde_json::json!({"id": t.id, "name": t.name, "scopes": t.scopes, "expires_at": t.expires_at, "created_at": t.created_at}))
-        .collect::<Vec<_>>())))
+    Ok(Json(
+        tokens
+            .iter()
+            .map(|t| TokenView {
+                id: t.id,
+                name: t.name.clone(),
+                scopes: t.scopes.clone(),
+                expires_at: t.expires_at,
+                created_at: t.created_at,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/auth/tokens/{id}",
+    params(("id" = Uuid, Path, description = "token id")),
+    responses((status = 200, description = "revoked", body = crate::OkView))
+)]
 async fn revoke_token(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -666,11 +790,14 @@ async fn revoke_token(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
-#[derive(serde::Deserialize)]
-struct AppPasswordBody {
-    name: String,
-}
-
+#[utoipa::path(
+    post,
+    path = "/api/auth/app-passwords",
+    request_body = AppPasswordBody,
+    responses(
+        (status = 201, description = "created; password shown once", body = AppPasswordCreateView),
+    )
+)]
 async fn create_app_password(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -693,10 +820,21 @@ async fn create_app_password(
     // The password is returned exactly once; only its hash is stored.
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({"id": row.id, "name": row.name, "password": password})),
+        Json(AppPasswordCreateView {
+            id: row.id,
+            name: row.name,
+            password,
+        }),
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/app-passwords",
+    responses(
+        (status = 200, description = "list", body = Vec<AppPasswordView>),
+    )
+)]
 async fn list_app_passwords(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -704,12 +842,25 @@ async fn list_app_passwords(
     let auth = resolve_auth(&pool, &headers).await?;
     require_admin(&auth)?;
     let rows = db::list_app_passwords(&pool, auth.user.id).await?;
-    Ok(Json(serde_json::json!(rows
-        .iter()
-        .map(|r| serde_json::json!({"id": r.id, "name": r.name, "created_at": r.created_at, "last_used_at": r.last_used_at, "expires_at": r.expires_at}))
-        .collect::<Vec<_>>())))
+    Ok(Json(
+        rows.iter()
+            .map(|r| AppPasswordView {
+                id: r.id,
+                name: r.name.clone(),
+                created_at: r.created_at,
+                last_used_at: r.last_used_at,
+                expires_at: r.expires_at,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/auth/app-passwords/{id}",
+    params(("id" = Uuid, Path, description = "app-password id")),
+    responses((status = 200, description = "revoked", body = crate::OkView))
+)]
 async fn revoke_app_password(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -738,6 +889,41 @@ pub fn router() -> axum::Router<crate::AppState> {
         )
         .route("/api/auth/app-passwords/{id}", delete(revoke_app_password))
 }
+
+/// OpenAPI for the auth module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        register,
+        login,
+        logout,
+        me,
+        change_password,
+        set_notify_prefs,
+        create_token,
+        list_tokens,
+        revoke_token,
+        create_app_password,
+        list_app_passwords,
+        revoke_app_password,
+    ),
+    components(schemas(
+        RegisterBody,
+        LoginBody,
+        ChangePasswordBody,
+        TokenBody,
+        AppPasswordBody,
+        NotifyPrefsBody,
+        UserView,
+        LoginSessionView,
+        TokenCreateView,
+        TokenView,
+        AppPasswordCreateView,
+        AppPasswordView,
+        crate::OkView,
+    ))
+)]
+pub(crate) struct AuthApi;
 
 #[cfg(test)]
 mod scope_tests {
@@ -812,6 +998,105 @@ mod login_gate_tests {
         assert_eq!(
             failure_log().lock().unwrap().get(&user).map(|v| v.len()),
             Some(2)
+        );
+    }
+}
+
+#[cfg(test)]
+mod view_shape_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    /// Binding constraint (IMPLEMENTATION_PLAN.md): view structs that replaced
+    /// json! views must serialize to the identical field set — same names,
+    /// nullability, casing. Fixture values, no database.
+    #[test]
+    fn converted_views_keep_their_legacy_shapes() {
+        let at = Utc.with_ymd_and_hms(2026, 9, 21, 12, 0, 0).unwrap();
+        let user = |display_name: Option<String>| UserView {
+            id: Uuid::nil(),
+            username: "u".into(),
+            email: "e@x.test".into(),
+            display_name,
+            is_admin: false,
+            notify_email: true,
+            notify_sms: false,
+            notify_push: true,
+        };
+        let expected_user = |display_name| {
+            serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000000", "username": "u", "email": "e@x.test",
+                "display_name": display_name, "is_admin": false,
+                "notify_email": true, "notify_sms": false, "notify_push": true,
+            })
+        };
+        assert_eq!(
+            serde_json::to_value(user(None)).unwrap(),
+            expected_user(serde_json::Value::Null)
+        );
+        assert_eq!(
+            serde_json::to_value(user(Some("n".into()))).unwrap(),
+            expected_user("n".into())
+        );
+        assert_eq!(
+            serde_json::to_value(LoginSessionView {
+                csrf_token: "c".into(),
+                user: user(None),
+            })
+            .unwrap(),
+            serde_json::json!({"csrf_token": "c", "user": expected_user(serde_json::Value::Null)})
+        );
+        assert_eq!(
+            serde_json::to_value(TokenCreateView {
+                id: Uuid::nil(),
+                name: "t".into(),
+                secret: "s".into(),
+                scopes: vec!["read".into()],
+                expires_at: Some(at),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000000", "name": "t", "secret": "s",
+                "scopes": ["read"], "expires_at": "2026-09-21T12:00:00Z",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TokenView {
+                id: Uuid::nil(),
+                name: "t".into(),
+                scopes: vec![],
+                expires_at: None,
+                created_at: at,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000000", "name": "t", "scopes": [],
+                "expires_at": null, "created_at": "2026-09-21T12:00:00Z",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(AppPasswordCreateView {
+                id: Uuid::nil(),
+                name: "a".into(),
+                password: "p".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"id": "00000000-0000-0000-0000-000000000000", "name": "a", "password": "p"})
+        );
+        assert_eq!(
+            serde_json::to_value(AppPasswordView {
+                id: Uuid::nil(),
+                name: "a".into(),
+                created_at: at,
+                last_used_at: None,
+                expires_at: Some(at),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000000", "name": "a",
+                "created_at": "2026-09-21T12:00:00Z",
+                "last_used_at": null, "expires_at": "2026-09-21T12:00:00Z",
+            })
         );
     }
 }

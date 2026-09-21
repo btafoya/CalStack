@@ -24,7 +24,6 @@ fn json_response(description: &str, schema: serde_json::Value) -> serde_json::Va
 
 /// Builds the complete OpenAPI document.
 pub fn openapi_document() -> serde_json::Value {
-    let user = || serde_json::json!({"$ref": "#/components/schemas/User"});
     let calendar = || serde_json::json!({"$ref": "#/components/schemas/Calendar"});
     let category = || serde_json::json!({"$ref": "#/components/schemas/Category"});
     let contact = || serde_json::json!({"$ref": "#/components/schemas/Contact"});
@@ -36,149 +35,6 @@ pub fn openapi_document() -> serde_json::Value {
     let mut put = |route: &str, methods: serde_json::Value| {
         paths.insert(route.into(), methods);
     };
-
-    put(
-        "/api/auth/register",
-        json!({"post": {
-            "summary": "Register a local account",
-            "requestBody": {"required": true, "content": {"application/json": {"schema": {
-                "type": "object", "required": ["username", "email", "password"],
-                "properties": {"username": {"type": "string"}, "email": {"type": "string", "format": "email"},
-                    "password": {"type": "string", "minLength": 8}, "display_name": {"type": ["string", "null"]}}}}}},
-            "responses": {"201": {"description": "created"}, "400": {"description": "validation error"}},
-        }}),
-    );
-    let login_responses = {
-        let ok = json_response(
-            "session established",
-            json!({
-            "type": "object",
-            "properties": {"csrf_token": {"type": "string"}, "user": user()}}),
-        );
-        json!({"200": ok["200"], "401": {"description": "unauthorized"}})
-    };
-    put(
-        "/api/auth/login",
-        json!({"post": {
-            "summary": "Log in (session cookie + CSRF; TOTP code required when 2FA is enabled)",
-            "requestBody": {"content": {"application/json": {"schema": {
-                "type": "object", "required": ["username_or_email", "password"],
-                "properties": {"username_or_email": {"type": "string"}, "password": {"type": "string"},
-                    "totp_code": {"type": ["string", "null"]}, "recovery_code": {"type": ["string", "null"]}}}}}},
-            "responses": login_responses,
-        }}),
-    );
-    put(
-        "/api/auth/logout",
-        json!({"post": {
-            "summary": "Revoke the current session", "responses": {"200": {"description": "revoked"}}
-        }}),
-    );
-    put(
-        "/api/auth/me",
-        json!({"get": {
-            "summary": "Current user", "responses": json_response("current user", user())
-        }}),
-    );
-    put(
-        "/api/auth/password",
-        json!({"post": {
-            "summary": "Change the current user's password; revokes every other session",
-            "requestBody": {"required": true, "content": {"application/json": {"schema": {
-                "type": "object", "required": ["current_password", "new_password"],
-                "properties": {"current_password": {"type": "string"},
-                    "new_password": {"type": "string", "minLength": 8}}}}}},
-            "responses": {"200": {"description": "changed"}, "400": {"description": "validation error"},
-                "401": {"description": "unauthorized"}},
-        }}),
-    );
-
-    for (route, summary, secret) in [
-        ("/api/auth/tokens", "Scoped API bearer tokens", "secret"),
-        (
-            "/api/auth/app-passwords",
-            "CalDAV Basic-auth app passwords",
-            "password",
-        ),
-    ] {
-        let secret_responses = json_response(
-            "created; secret shown once",
-            json!({
-            "type": "object",
-            "properties": {"id": {"type": "string", "format": "uuid"}, "secret": {"type": "string"}}}),
-        );
-        put(
-            route,
-            json!({
-                "post": {"summary": format!("Create {summary}"),
-                    "requestBody": {"content": {"application/json": {"schema": {
-                        "type": "object", "required": ["name"],
-                        "properties": {"name": {"type": "string"}, "scopes": {"type": "array", "items": {"type": "string",
-                            "enum": ["read", "write", "full"]},
-                            "description": "empty = full access; write implies read; read grants GET only"},
-                            "expires_at": {"type": ["string", "null"], "format": "date-time"}}}}}},
-                    "responses": secret_responses},
-                "get": {"summary": format!("List {summary}"), "responses": {"200": {"description": "list"}}},
-            }),
-        );
-        put(
-            &format!("{route}/{{id}}"),
-            json!({
-                "delete": {"summary": format!("Revoke {secret} credential"),
-                    "parameters": [param("id", true)], "responses": {"200": {"description": "revoked"}}}
-            }),
-        );
-    }
-
-    put(
-        "/api/auth/totp/setup",
-        json!({"post": {
-            "summary": "Begin TOTP enrollment",
-            "responses": {"201": {"description": "unconfirmed secret + otpauth URL"}}
-        }}),
-    );
-    put(
-        "/api/auth/totp/verify",
-        json!({"post": {
-            "summary": "Confirm TOTP with a first code; returns one-time recovery codes",
-            "responses": {"200": {"description": "recovery codes"}, "401": {"description": "bad code"}}
-        }}),
-    );
-    put(
-        "/api/auth/totp",
-        json!({
-            "get": {"summary": "TOTP status", "responses": {"200": {"description": "status"}}},
-            "delete": {"summary": "Disable TOTP", "responses": {"200": {"description": "disabled"}}},
-        }),
-    );
-
-    for route in [
-        "/api/auth/webauthn/register/start",
-        "/api/auth/webauthn/register/finish",
-        "/api/auth/webauthn/login/start",
-        "/api/auth/webauthn/login/finish",
-    ] {
-        put(
-            route,
-            json!({"post": {
-                "summary": format!("Passkey ceremony step: {route}"),
-                "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
-                "responses": {"200": {"description": "ceremony step"}, "201": {"description": "ceremony step"}}
-            }}),
-        );
-    }
-    put(
-        "/api/auth/webauthn",
-        json!({"get": {
-            "summary": "List passkeys", "responses": {"200": {"description": "list"}}
-        }}),
-    );
-    put(
-        "/api/auth/webauthn/{id}",
-        json!({"delete": {
-            "summary": "Remove a passkey", "responses": {"200": {"description": "removed"}}
-        }}),
-    );
 
     put(
         "/api/calendars",
@@ -479,15 +335,6 @@ pub fn openapi_document() -> serde_json::Value {
                 {"name": "from", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}},
                 {"name": "to", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}],
             "responses": {"200": {"description": "expanded occurrences with exception overlay"}}}}),
-    );
-    put(
-        "/api/auth/notify-prefs",
-        json!({"post": {"summary": "Set per-user reminder opt-outs (email/SMS/push)",
-            "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object",
-                "required": ["notify_email", "notify_sms", "notify_push"],
-                "properties": {"notify_email": {"type": "boolean"}, "notify_sms": {"type": "boolean"},
-                    "notify_push": {"type": "boolean"}}}}}},
-            "responses": {"200": {"description": "saved"}}}}),
     );
     put(
         "/api/push/subscriptions",
@@ -976,8 +823,9 @@ mod tests {
         assert!(doc["paths"]["/api/addressbooks"]["post"].is_object());
         assert!(doc["paths"]["/api/contacts/autocomplete"]["get"].is_object());
         // Routes that drifted out of the document once already stay pinned:
+        // Auth routes (/api/auth/*) are now generated by utoipa annotations in
+        // calendar-server (see IMPLEMENTATION_PLAN.md) and pinned there.
         for (path, method) in [
-            ("/api/auth/notify-prefs", "post"),
             ("/api/notification-providers/{id}", "get"),
             ("/api/notification-providers/{id}", "patch"),
             ("/api/notification-providers/{id}/test", "post"),
