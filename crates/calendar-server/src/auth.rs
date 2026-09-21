@@ -481,6 +481,7 @@ async fn set_notify_prefs(
     post,
     path = "/api/auth/register",
     request_body = RegisterBody,
+    security(()),
     responses(
         (status = 201, description = "created", body = UserView),
         (status = 400, description = "validation error"),
@@ -528,6 +529,7 @@ async fn register(
     post,
     path = "/api/auth/login",
     request_body = LoginBody,
+    security(()),
     responses(
         (status = 200, description = "session established (cookie set)", body = LoginSessionView),
         (status = 401, description = "unauthorized"),
