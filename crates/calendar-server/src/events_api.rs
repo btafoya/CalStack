@@ -46,6 +46,8 @@ struct EventBody {
     tzid: Option<String>,
     all_day: Option<bool>,
     rrule: Option<String>,
+    /// Array of date or date-time strings; non-array JSON is tolerated but
+    /// ignored by recurrence expansion.
     #[schema(value_type = Object)]
     rdate: Option<serde_json::Value>,
     #[schema(value_type = Object)]
@@ -155,9 +157,10 @@ struct EventView {
     tzid: Option<String>,
     all_day: bool,
     rrule: Option<String>,
-    #[schema(value_type = Object)]
+    /// Array of date or date-time strings (RFC 5545 RDATE/EXDATE).
+    #[schema(value_type = Vec<String>)]
     rdate: serde_json::Value,
-    #[schema(value_type = Object)]
+    #[schema(value_type = Vec<String>)]
     exdate: serde_json::Value,
     status: Option<String>,
     priority: Option<i16>,

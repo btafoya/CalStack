@@ -728,4 +728,34 @@ curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: 
   -d '{"summary":"post-restart event","starts_at":"2026-09-24T10:00:00Z","ends_at":"2026-09-24T11:00:00Z"}' \
   | grep -q '"id"' || fail "job chain did not re-arm after restart"
 
+# ============ 8. response schemas vs live responses ============
+step "Live responses validate against the generated OpenAPI schemas"
+curl -s "$BASE/api/openapi.json" > "$DATA/openapi.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/auth/me" > "$DATA/r-me.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars" > "$DATA/r-calendars.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/events" > "$DATA/r-events.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/occurrences" > "$DATA/r-occurrences.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$TASKCAL/tasks" > "$DATA/r-tasks.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/tasks/$TASK_ID" > "$DATA/r-task.json"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/journals" \
+  -d '{"summary":"schema-validation journal","status":"FINAL"}' > "$DATA/r-journal.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/changes" > "$DATA/r-changes.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/notifications" > "$DATA/r-notifications.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/search?q=event" > "$DATA/r-search.json"
+curl -s -b "$DATA/alice.jar" "$BASE/api/categories" > "$DATA/r-categories.json"
+python3 "$ROOT/tests/interop/validate_responses.py" "$DATA/openapi.json" \
+  "/api/auth/me" get 200 "$DATA/r-me.json" \
+  "/api/calendars" get 200 "$DATA/r-calendars.json" \
+  "/api/calendars/{id}/events" get 200 "$DATA/r-events.json" \
+  "/api/calendars/{id}/occurrences" get 200 "$DATA/r-occurrences.json" \
+  "/api/calendars/{id}/tasks" get 200 "$DATA/r-tasks.json" \
+  "/api/tasks/{id}" get 200 "$DATA/r-task.json" \
+  "/api/calendars/{id}/journals" post 201 "$DATA/r-journal.json" \
+  "/api/changes" get 200 "$DATA/r-changes.json" \
+  "/api/notifications" get 200 "$DATA/r-notifications.json" \
+  "/api/search" get 200 "$DATA/r-search.json" \
+  "/api/categories" get 200 "$DATA/r-categories.json" \
+  || fail "response schema validation"
+
 echo "ALL INTEROP CHECKS PASSED"

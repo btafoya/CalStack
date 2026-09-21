@@ -38,10 +38,42 @@ use clap::{Parser, Subcommand};
 use utoipa::OpenApi;
 use uuid::Uuid;
 
-/// utoipa-generated OpenAPI: handlers gain `#[utoipa::path]` annotations
-/// stage by stage (see IMPLEMENTATION_PLAN.md) and register here.
+/// Session cookie + bearer token, the API's two authentication schemes
+/// (alternatives; every /api path accepts either unless the handler refines).
+struct SecuritySchemes;
+
+impl utoipa::Modify for SecuritySchemes {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, SecurityScheme};
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "sessionCookie",
+                SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description(
+                    "session",
+                    "session cookie set by POST /api/auth/login or the passkey ceremony",
+                ))),
+            );
+            components.add_security_scheme(
+                "bearerToken",
+                SecurityScheme::Http(
+                    utoipa::openapi::security::HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .description(Some("scoped API token from POST /api/auth/tokens"))
+                        .build(),
+                ),
+            );
+        }
+    }
+}
+
+/// The single served OpenAPI document, assembled from the per-module
+/// `#[derive(OpenApi)]` structs next to each router.
 #[derive(OpenApi)]
-#[openapi(info(title = "CalStack API"))]
+#[openapi(
+    info(title = "CalStack API"),
+    security(("sessionCookie" = []), ("bearerToken" = [])),
+    modifiers(&SecuritySchemes)
+)]
 struct ApiDoc;
 
 /// The `{"ok": true}` acknowledgement shared by several endpoints.
@@ -65,9 +97,8 @@ pub(crate) struct AttendeeView {
     pub(crate) user_id: Option<Uuid>,
 }
 
-/// The served document: generated paths win, the legacy hand-built fragment
-/// (`calendar_api::openapi_document`) fills only the gaps. The fragment is
-/// deleted once the last module is annotated.
+/// The served document: utoipa-generated from handler annotations, merged
+/// per module in `openapi_json()`.
 fn openapi_json() -> serde_json::Value {
     let mut doc = ApiDoc::openapi();
     doc.merge(auth::AuthApi::openapi());
@@ -85,32 +116,7 @@ fn openapi_json() -> serde_json::Value {
     doc.merge(admin_api::AdminApi::openapi());
     doc.merge(extras::ExtrasApi::openapi());
     doc.merge(places::PlacesApi::openapi());
-    let mut doc = serde_json::to_value(doc).expect("generated OpenAPI serializes");
-    let legacy = calendar_api::openapi_document();
-
-    if doc.get("paths").is_none_or(|p| !p.is_object()) {
-        doc["paths"] = serde_json::json!({});
-    }
-    if doc.get("components").is_none_or(|c| !c.is_object()) {
-        doc["components"] = serde_json::json!({});
-    }
-    for (route, methods) in legacy["paths"].as_object().expect("legacy paths") {
-        let paths = doc["paths"].as_object_mut().unwrap();
-        paths.entry(route.clone()).or_insert(methods.clone());
-    }
-    for key in ["schemas", "securitySchemes"] {
-        if doc["components"].get(key).is_none_or(|c| !c.is_object()) {
-            doc["components"][key] = serde_json::json!({});
-        }
-        for (name, schema) in legacy["components"][key].as_object().into_iter().flatten() {
-            let slot = doc["components"][key].as_object_mut().unwrap();
-            slot.entry(name.clone()).or_insert(schema.clone());
-        }
-    }
-    if doc.get("security").is_none() {
-        doc["security"] = legacy["security"].clone();
-    }
-    doc
+    serde_json::to_value(doc).expect("generated OpenAPI serializes")
 }
 
 #[derive(Parser, Debug)]
@@ -478,27 +484,17 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Stage-1 gate (IMPLEMENTATION_PLAN.md): the served document is 3.1.0
-    /// and covers every path of the legacy fragment.
+    /// The served document is 3.1.0 with the full /api inventory pinned (the
+    /// pin lists below ARE the completeness check — dropping an annotation or
+    /// its registration fails here, not in a codegen consumer).
     #[test]
-    fn openapi_is_31_and_covers_legacy_paths() {
+    fn openapi_is_31_and_covers_the_api_inventory() {
         let doc = openapi_json();
         assert_eq!(doc["openapi"], "3.1.0");
-        let legacy = calendar_api::openapi_document();
-        for (route, methods) in legacy["paths"].as_object().unwrap() {
-            for method in methods.as_object().unwrap().keys() {
-                assert!(
-                    doc["paths"][route][method].is_object(),
-                    "{method} {route} missing from the served document"
-                );
-            }
-        }
         assert!(doc["components"]["securitySchemes"]["sessionCookie"].is_object());
         assert!(doc["components"]["securitySchemes"]["bearerToken"].is_object());
         assert!(doc["security"].is_array());
-        // Auth routes are utoipa-generated since stage 2; the legacy fragment
-        // no longer lists them. Pin them so losing the annotation
-        // registration fails here, not in a codegen consumer.
+        // Auth surface (stage 2):
         for (path, method) in [
             ("/api/auth/register", "post"),
             ("/api/auth/login", "post"),

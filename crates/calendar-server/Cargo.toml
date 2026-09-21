@@ -18,7 +18,6 @@ tracing-subscriber.workspace = true
 tower-http.workspace = true
 calendar-core = { path = "../calendar-core" }
 calendar-db = { path = "../calendar-db" }
-calendar-api = { path = "../calendar-api" }
 calendar-caldav = { path = "../calendar-caldav" }
 calendar-carddav = { path = "../calendar-carddav" }
 calendar-auth = { path = "../calendar-auth" }

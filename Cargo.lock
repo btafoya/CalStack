@@ -414,17 +414,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "calendar-api"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "uuid",
-]
-
-[[package]]
 name = "calendar-auth"
 version = "0.1.0"
 dependencies = [
@@ -549,7 +538,6 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
- "calendar-api",
  "calendar-auth",
  "calendar-caldav",
  "calendar-carddav",
