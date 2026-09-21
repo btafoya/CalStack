@@ -19,6 +19,8 @@ struct CalendarBody {
     description: Option<String>,
     color: Option<String>,
     timezone: Option<String>,
+    /// Component set for this calendar (ADR-015); omit for VEVENT-only default.
+    components: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -28,6 +30,7 @@ struct CalendarPatchBody {
     color: Option<String>,
     timezone: Option<String>,
     order_index: Option<i32>,
+    components: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -54,6 +57,7 @@ fn calendar_view(
         "color": calendar.color,
         "timezone": calendar.timezone,
         "order_index": calendar.order_index,
+        "components": calendar.components,
         "created_at": calendar.created_at,
         "updated_at": calendar.updated_at,
         "my_capability": capability.as_db_str(),
@@ -112,12 +116,33 @@ async fn create_calendar(
     require_csrf(&auth, &headers)?;
     calendar_core::validate_slug(&body.slug).map_err(|e| AppError::bad_request(e.to_string()))?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
+    let mut components = None;
+    if let Some(want) = &body.components {
+        const ALL: [&str; 3] = ["VEVENT", "VTODO", "VJOURNAL"];
+        let unique = want
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == want.len();
+        if !unique
+            || want.is_empty()
+            || want.len() > 3
+            || want.iter().any(|c| !ALL.contains(&c.as_str()))
+        {
+            return Err(AppError::bad_request(
+                "components must be 1-3 distinct values from VEVENT, VTODO, VJOURNAL",
+            ));
+        }
+        components = Some(want.clone());
+    }
     let new_calendar = db::NewCalendar {
         slug: body.slug,
         name: body.name,
         description: body.description,
         color: body.color,
         timezone: body.timezone,
+        components,
     };
     let calendar = db::create_calendar(
         &pool,
@@ -180,20 +205,67 @@ async fn patch_calendar(
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     require_csrf(&auth, &headers)?;
-    require_capability(
+    let calendar = require_capability(
         &pool,
         calendar_id,
         auth.user.id,
         calendar_core::CalendarCapability::ReadWrite,
     )
     .await?;
+    // Component removal is refused while live items of a removed kind exist
+    // (design section 3, decision 9): 409 with per-type counts.
+    let mut components = None;
+    if let Some(want) = &body.components {
+        const ALL: [&str; 3] = ["VEVENT", "VTODO", "VJOURNAL"];
+        let unique = want
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == want.len();
+        if !unique
+            || want.is_empty()
+            || want.len() > 3
+            || want.iter().any(|c| !ALL.contains(&c.as_str()))
+        {
+            return Err(AppError::bad_request(
+                "components must be 1-3 distinct values from VEVENT, VTODO, VJOURNAL",
+            ));
+        }
+        let removed: Vec<&str> = calendar
+            .components
+            .iter()
+            .map(String::as_str)
+            .filter(|c| !want.iter().any(|w| w == c))
+            .collect();
+        if !removed.is_empty() {
+            let counts = db::tasks::count_live_components(&pool, calendar_id).await?;
+            let blocked: Vec<String> = removed
+                .iter()
+                .filter_map(|kind| {
+                    counts
+                        .iter()
+                        .find(|c| c.kind == *kind)
+                        .filter(|c| c.live > 0)
+                        .map(|c| format!("{}={}", c.kind, c.live))
+                })
+                .collect();
+            if !blocked.is_empty() {
+                return Err(AppError::Conflict(format!(
+                    "cannot remove components with live items: {}",
+                    blocked.join(", ")
+                )));
+            }
+        }
+        components = Some(want.clone());
+    }
     let changes = db::CalendarUpdate {
         name: body.name,
         description: body.description,
         color: body.color,
         timezone: body.timezone,
         order_index: body.order_index,
-        components: None, // ponytail: API editing of components lands with the tasks API (Stage 5)
+        components,
     };
     let calendar = db::update_calendar(&pool, calendar_id, &changes).await?;
     let cap = db::calendar_capability(&pool, calendar_id, auth.user.id)

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{DbError, EventRow};
+use super::{DbError, EventRow, journals, tasks};
 
 // ============ public shares ============
 
@@ -225,6 +225,39 @@ pub async fn list_public_events(
 ) -> Result<Vec<EventRow>, DbError> {
     sqlx::query_as::<_, EventRow>(
         "SELECT * FROM events
+         WHERE calendar_id = $1 AND deleted_at IS NULL
+           AND (class IS NULL OR class = 'PUBLIC')",
+    )
+    .bind(calendar_id)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Tasks visible in a public feed: same class rule, series masters only
+/// (overrides render inside their master's resource, like calendar_objects).
+pub async fn list_public_tasks(
+    pool: &PgPool,
+    calendar_id: Uuid,
+) -> Result<Vec<tasks::TaskRow>, DbError> {
+    sqlx::query_as::<_, tasks::TaskRow>(
+        "SELECT * FROM tasks
+         WHERE calendar_id = $1 AND deleted_at IS NULL AND master_task_id IS NULL
+           AND (class IS NULL OR class = 'PUBLIC')",
+    )
+    .bind(calendar_id)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Journals visible in a public feed: same class rule.
+pub async fn list_public_journals(
+    pool: &PgPool,
+    calendar_id: Uuid,
+) -> Result<Vec<journals::JournalRow>, DbError> {
+    sqlx::query_as::<_, journals::JournalRow>(
+        "SELECT * FROM journals
          WHERE calendar_id = $1 AND deleted_at IS NULL
            AND (class IS NULL OR class = 'PUBLIC')",
     )

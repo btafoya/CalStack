@@ -273,6 +273,7 @@ pub async fn put_series(
         calendar_id,
         row.id,
         if created { "created" } else { "updated" },
+        "event",
     )
     .await?;
     tx.commit().await?;

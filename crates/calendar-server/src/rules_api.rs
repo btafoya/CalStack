@@ -23,7 +23,19 @@ use uuid::Uuid;
 // ============ rules CRUD ============
 
 /// Only the triggers the engine actually fires on event mutations.
-const TRIGGER_TYPES: [&str; 3] = ["event_created", "event_updated", "event_deleted"];
+const TRIGGER_TYPES: [&str; 11] = [
+    "event_created",
+    "event_updated",
+    "event_deleted",
+    "task_created",
+    "task_updated",
+    "task_deleted",
+    "task_completed",
+    "task_due",
+    "journal_created",
+    "journal_updated",
+    "journal_deleted",
+];
 
 fn validate_trigger_type(trigger_type: &str) -> Result<(), AppError> {
     if TRIGGER_TYPES.contains(&trigger_type) {
@@ -199,13 +211,21 @@ pub(crate) async fn run_rules(
                 }
             }
         }
+        let subject_type = if trigger_type.starts_with("task") {
+            "task"
+        } else if trigger_type.starts_with("journal") {
+            "journal"
+        } else {
+            "event"
+        };
         let _ = sqlx::query(
             "INSERT INTO rule_executions (id, rule_id, subject_type, subject_id, status)
-             VALUES ($1, $2, 'event', $3, $4)",
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(Uuid::new_v4())
         .bind(rule.id)
         .bind(subject_id)
+        .bind(subject_type)
         .bind(status)
         .execute(pool)
         .await;

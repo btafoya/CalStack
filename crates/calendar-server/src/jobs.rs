@@ -354,6 +354,9 @@ async fn retention_purge(pool: &sqlx::PgPool, days: i64) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+    calendar_db::tasks::purge_deleted_tasks_journals(pool, days)
+        .await
+        .map_err(|e| e.to_string())?;
     // Audit rows keep their own retention (they outlive operational data).
     let audit_days: i64 = std::env::var("AUDIT_RETENTION_DAYS")
         .ok()
@@ -400,7 +403,7 @@ async fn schedule_alarm_scan(
 /// Finds alarms whose trigger falls in the window, creates deduped
 /// notifications for the calendar's principals (DISPLAY) — EMAIL dispatch
 /// joins when notification providers are configured (stage 16). Also prunes
-/// pending reminder rows whose event no longer matches a live alarm
+/// pending reminder rows whose alarm no longer matches a live alarm
 /// occurrence (deleted or edited).
 async fn alarm_scan(
     pool: &sqlx::PgPool,
@@ -414,11 +417,14 @@ async fn alarm_scan(
         .map_err(|e| e.to_string())?;
     prune_stale_pending(pool, &rows, now, horizon).await?;
 
-    // Group alarm rows by event so a recurring master expands once.
-    let mut by_event: std::collections::HashMap<Uuid, Vec<&alarms::AlarmScanRow>> =
+    // Group alarm rows by subject so a recurring master expands once.
+    let mut by_subject: std::collections::HashMap<(alarms::ScanKind, Uuid), Vec<&alarms::ScanRow>> =
         std::collections::HashMap::new();
     for row in &rows {
-        by_event.entry(row.event.id).or_default().push(row);
+        by_subject
+            .entry((row.kind, row.subject_id))
+            .or_default()
+            .push(row);
     }
 
     // Calendar principals for notification addressing.
@@ -432,7 +438,7 @@ async fn alarm_scan(
     let mut resolvers: std::collections::HashMap<Uuid, calendar_core::recurrence::TzResolver> =
         std::collections::HashMap::new();
 
-    for (event_id, group) in &by_event {
+    for ((kind, subject_id), group) in &by_subject {
         for scan in group {
             let resolver = match resolvers.get(&scan.calendar_id) {
                 Some(resolver) => resolver.clone(),
@@ -465,17 +471,45 @@ async fn alarm_scan(
                         users
                     }
                 };
+                // task_due rules + webhooks fire exactly once per (task,
+                // due instant): the deduped marker row is the tombstone.
+                if scan.kind == alarms::ScanKind::Task {
+                    let marker = format!("task_due:{}:{}", scan.subject_id, trigger.to_rfc3339());
+                    let first = alarms::create_notification_deduped(
+                        pool, None, "in_app", None, None, None, &marker,
+                    )
+                    .await
+                    .unwrap_or(false);
+                    if first && let Ok(cal) = db::get_calendar(pool, scan.calendar_id).await {
+                        crate::rules_api::run_rules(
+                            pool,
+                            cal.tenant_id,
+                            cal.id,
+                            "task_due",
+                            scan.subject_id,
+                            serde_json::json!({
+                                "summary": scan.summary,
+                                "due": trigger.to_rfc3339(),
+                                "kind": "task",
+                            }),
+                            crypto,
+                        )
+                        .await;
+                        crate::webhooks_api::fire(pool, cal.tenant_id, scan.subject_id, "task_due")
+                            .await;
+                    }
+                }
                 let dedupe = format!("alarm:{}:{}", scan.alarm.id, trigger.to_rfc3339());
                 let title = scan
                     .alarm
                     .summary
                     .clone()
-                    .unwrap_or_else(|| scan.event.summary.clone());
+                    .unwrap_or_else(|| scan.summary.clone());
                 let body = scan
                     .alarm
                     .description
                     .clone()
-                    .unwrap_or_else(|| format!("Reminder: {}", scan.event.summary));
+                    .unwrap_or_else(|| format!("Reminder: {}", scan.summary));
                 let channels = &scan.alarm.notify_channels;
                 let want_email = channels.iter().any(|c| c == "email");
                 let want_sms = channels.iter().any(|c| c == "sms");
@@ -491,12 +525,7 @@ async fn alarm_scan(
                         "in_app",
                         Some(&title),
                         Some(&body),
-                        Some(serde_json::json!({
-                            "event_id": event_id,
-                            "alarm_id": scan.alarm.id,
-                            "trigger_at": trigger,
-                            "action": scan.alarm.action,
-                        })),
+                        Some(subject_data(scan, trigger)),
                         &format!("{dedupe}:{}", user.id),
                     )
                     .await
@@ -537,7 +566,7 @@ async fn alarm_scan(
                         .await
                         .is_some();
                 }
-                let time_text = format_event_time(&scan.event);
+                let time_text = format_scan_time(scan);
                 let url = std::env::var("APP_PUBLIC_URL")
                     .ok()
                     .filter(|u| !u.is_empty());
@@ -551,7 +580,7 @@ async fn alarm_scan(
                             emails.push((Some(user.id), user.email.clone()));
                         }
                     }
-                    for email in attendee_emails(pool, *event_id).await {
+                    for email in attendee_emails(pool, *kind, *subject_id).await {
                         emails.push((None, email));
                     }
                     for email in &scan.alarm.recipient_emails {
@@ -573,19 +602,16 @@ async fn alarm_scan(
                             text.push('\n');
                             text.push_str(u);
                         }
+                        let mut data = subject_data(scan, trigger);
+                        data["tenant_id"] = serde_json::json!(tenant_id);
+                        data["recipient"] = serde_json::json!(email);
                         alarms::create_notification_deduped(
                             pool,
                             user_id,
                             "email",
                             Some(&title),
                             Some(&text),
-                            Some(serde_json::json!({
-                                "event_id": event_id,
-                                "alarm_id": scan.alarm.id,
-                                "trigger_at": trigger,
-                                "tenant_id": tenant_id,
-                                "recipient": email,
-                            })),
+                            Some(data),
                             &format!("{dedupe}:email:{key}"),
                         )
                         .await
@@ -593,25 +619,22 @@ async fn alarm_scan(
                     }
                 }
 
-                // SMS: this event's attendees whose linked contact has a
+                // SMS: this subject's attendees whose linked contact has a
                 // mobile number, plus SMS-only attendees.
                 if want_sms && p.sms {
-                    for phone in sms_recipients(pool, *event_id).await {
+                    for phone in sms_recipients(pool, *kind, *subject_id).await {
                         let text =
                             format!("{} - {}", title, time_text.as_deref().unwrap_or_default());
+                        let mut data = subject_data(scan, trigger);
+                        data["tenant_id"] = serde_json::json!(tenant_id);
+                        data["recipient"] = serde_json::json!(phone);
                         alarms::create_notification_deduped(
                             pool,
                             None,
                             "sms",
                             Some(&title),
                             Some(&text),
-                            Some(serde_json::json!({
-                                "event_id": event_id,
-                                "alarm_id": scan.alarm.id,
-                                "trigger_at": trigger,
-                                "tenant_id": tenant_id,
-                                "recipient": phone,
-                            })),
+                            Some(data),
                             &format!("{dedupe}:sms:{phone}"),
                         )
                         .await
@@ -622,18 +645,15 @@ async fn alarm_scan(
                 // Push: principals with active subscriptions (opt-out respected).
                 if want_push && p.webpush {
                     for user in users.iter().filter(|u| u.notify_push) {
+                        let mut data = subject_data(scan, trigger);
+                        data["tenant_id"] = serde_json::json!(tenant_id);
                         alarms::create_notification_deduped(
                             pool,
                             Some(user.id),
                             "push",
                             Some(&title),
                             Some(&body),
-                            Some(serde_json::json!({
-                                "event_id": event_id,
-                                "alarm_id": scan.alarm.id,
-                                "trigger_at": trigger,
-                                "tenant_id": tenant_id,
-                            })),
+                            Some(data),
                             &format!("{dedupe}:push:{}", user.id),
                         )
                         .await
@@ -647,13 +667,14 @@ async fn alarm_scan(
 }
 
 /// Alarm trigger instants for one scan row. Absolute triggers pass through;
-/// relative triggers anchor on the event's own start/end — exception
-/// overrides use their own times, all-day events start at midnight in the
-/// event's timezone — and recurring events expand within
-/// [lookback, horizon). `resolver` carries the calendar's stored VTIMEZONEs
-/// (ADR-012); tzdb ids resolve without it.
+/// relative triggers anchor on the subject's own start/end — exception/task
+/// overrides use their own times, all-day subjects start at midnight in their
+/// timezone, floating ones as if UTC — and recurring subjects expand within
+/// [lookback, horizon), skipping completed occurrences of recurring tasks.
+/// `resolver` carries the calendar's stored VTIMEZONEs (ADR-012); tzdb ids
+/// resolve without it.
 fn alarm_triggers(
-    scan: &alarms::AlarmScanRow,
+    scan: &alarms::ScanRow,
     resolver: &calendar_core::recurrence::TzResolver,
     lookback: DateTime<Utc>,
     horizon: DateTime<Utc>,
@@ -665,57 +686,76 @@ fn alarm_triggers(
         return vec![];
     };
     let related_end = scan.alarm.related.as_deref() == Some("END");
-    let Some(base) = base_point(&scan.event, related_end) else {
+    let base = if related_end { scan.end } else { scan.start };
+    let Some(base) = base else {
+        // Relative alarms on subjects with no anchor (a task without
+        // DTSTART/DUE) cannot fire; absolute ones already returned above.
         return vec![];
     };
-    if scan.event.rrule.is_some() {
+    let expanded = if scan.rrule.is_some() {
         calendar_core::recurrence::expand_occurrences(
             base,
-            scan.event.tzid.as_deref(),
+            scan.tzid.as_deref(),
             Some(resolver),
-            scan.event.rrule.as_deref(),
-            &parse_points(&scan.event.rdate),
-            &parse_points(&scan.event.exdate),
+            scan.rrule.as_deref(),
+            &parse_points(&scan.rdate),
+            &parse_points(&scan.exdate),
             lookback,
             horizon,
         )
         .unwrap_or_default()
+    } else {
+        vec![base]
+    };
+    expanded
         .into_iter()
+        .filter(|p| !is_completed_occurrence(scan, *p, resolver))
         .filter_map(|p| match p {
             DateOrDateTime::Timed(at) => Some(at),
-            DateOrDateTime::AllDay(date) => {
-                day_start_instant(date, scan.event.tzid.as_deref(), resolver)
-            }
+            DateOrDateTime::AllDay(date) => day_start_instant(date, scan.tzid.as_deref(), resolver),
         })
         .map(|at| at + Duration::seconds(offset))
         .collect()
-    } else {
-        match base {
-            DateOrDateTime::Timed(at) => Some(at),
-            DateOrDateTime::AllDay(date) => {
-                day_start_instant(date, scan.event.tzid.as_deref(), resolver)
-            }
-        }
-        .map(|at| at + Duration::seconds(offset))
-        .into_iter()
-        .collect()
-    }
 }
 
-/// The alarm's anchor occurrence: the event's own start/end (exceptions carry
-/// the override's times; all-day events anchor on their date, which the
-/// recurrence engine resolves in wall-clock space).
-fn base_point(event: &db::EventRow, related_end: bool) -> Option<DateOrDateTime> {
-    let (at, date) = if related_end {
-        (event.ends_at, event.end_date)
-    } else {
-        (event.starts_at, event.start_date)
-    };
-    match (at, date) {
-        (Some(at), _) => Some(DateOrDateTime::Timed(at)),
-        (None, Some(date)) => Some(DateOrDateTime::AllDay(date)),
-        _ => None,
+/// True when `point` is a completed occurrence of a recurring task (design
+/// §6). Compared in wall-clock space, like `next_open`: overrides store the
+/// local time or the date.
+fn is_completed_occurrence(
+    scan: &alarms::ScanRow,
+    point: DateOrDateTime,
+    resolver: &calendar_core::recurrence::TzResolver,
+) -> bool {
+    if scan.completed_occurrences.is_empty() {
+        return false;
     }
+    let key = match point {
+        DateOrDateTime::Timed(at) => {
+            let Ok(zone) =
+                calendar_core::recurrence::resolve_tz(scan.tzid.as_deref(), Some(resolver))
+            else {
+                return false;
+            };
+            db::tasks::Occurrence::Timed(zone.to_local(at))
+        }
+        DateOrDateTime::AllDay(date) => db::tasks::Occurrence::AllDay(date),
+    };
+    scan.completed_occurrences.contains(&key)
+}
+
+/// The notification `data` envelope: the subject id under the key the
+/// dispatch path expects (`event_id` or `task_id`), plus the shared fields.
+fn subject_data(scan: &alarms::ScanRow, trigger: DateTime<Utc>) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "alarm_id": scan.alarm.id,
+        "trigger_at": trigger,
+        "action": scan.alarm.action,
+    });
+    match scan.kind {
+        alarms::ScanKind::Event => data["event_id"] = serde_json::json!(scan.subject_id),
+        alarms::ScanKind::Task => data["task_id"] = serde_json::json!(scan.subject_id),
+    }
+    data
 }
 
 /// Midnight of an all-day occurrence as an instant: wall clock in the event's
@@ -739,7 +779,7 @@ fn day_start_instant(
 /// stay.
 async fn prune_stale_pending(
     pool: &sqlx::PgPool,
-    live: &[alarms::AlarmScanRow],
+    live: &[alarms::ScanRow],
     now: DateTime<Utc>,
     horizon: DateTime<Utc>,
 ) -> Result<(), String> {
@@ -763,7 +803,7 @@ async fn prune_stale_pending(
     if pending.is_empty() {
         return Ok(());
     }
-    let live_by_id: std::collections::HashMap<Uuid, &alarms::AlarmScanRow> =
+    let live_by_id: std::collections::HashMap<Uuid, &alarms::ScanRow> =
         live.iter().map(|r| (r.alarm.id, r)).collect();
     // ponytail: 24h-wide comparison window; rows older than that have aged
     // out of the send backoff long before, so widening further buys nothing.
@@ -1034,11 +1074,15 @@ struct TenantProviders {
     webpush: bool,
 }
 
-/// Event start in its own timezone, for message bodies.
-fn format_event_time(event: &db::EventRow) -> Option<String> {
-    let at = event.starts_at?;
+/// Subject start in its own timezone, for message bodies. Tasks fall back to
+/// their due time when they carry no DTSTART.
+fn format_scan_time(scan: &alarms::ScanRow) -> Option<String> {
+    let at = match scan.start {
+        Some(DateOrDateTime::Timed(at)) => at,
+        _ => return None,
+    };
     Some(
-        match event
+        match scan
             .tzid
             .as_deref()
             .and_then(|t| t.parse::<chrono_tz::Tz>().ok())
@@ -1052,29 +1096,51 @@ fn format_event_time(event: &db::EventRow) -> Option<String> {
     )
 }
 
-/// Distinct attendee emails for one event.
-async fn attendee_emails(pool: &sqlx::PgPool, event_id: Uuid) -> Vec<String> {
-    sqlx::query_scalar(
-        "SELECT DISTINCT email::text FROM event_attendees
-         WHERE event_id = $1 AND email IS NOT NULL",
-    )
-    .bind(event_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default()
+/// Distinct attendee emails for one event or task.
+async fn attendee_emails(
+    pool: &sqlx::PgPool,
+    kind: alarms::ScanKind,
+    subject_id: Uuid,
+) -> Vec<String> {
+    match kind {
+        alarms::ScanKind::Event => sqlx::query_scalar(
+            "SELECT DISTINCT email::text FROM event_attendees
+                 WHERE event_id = $1 AND email IS NOT NULL",
+        )
+        .bind(subject_id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default(),
+        alarms::ScanKind::Task => sqlx::query_scalar(
+            "SELECT DISTINCT email::text FROM task_attendees
+                 WHERE task_id = $1 AND email IS NOT NULL",
+        )
+        .bind(subject_id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default(),
+    }
 }
 
 /// SMS recipients: attendees whose linked contact has a mobile tel, plus
 /// SMS-only attendees (telephone set).
-async fn sms_recipients(pool: &sqlx::PgPool, event_id: Uuid) -> Vec<String> {
-    sqlx::query_scalar(
-        "SELECT DISTINCT COALESCE(ct.number, ea.telephone::text)
-         FROM event_attendees ea
-         LEFT JOIN contacts c ON c.id = ea.contact_id AND c.deleted_at IS NULL
+async fn sms_recipients(
+    pool: &sqlx::PgPool,
+    kind: alarms::ScanKind,
+    subject_id: Uuid,
+) -> Vec<String> {
+    let (table, column) = match kind {
+        alarms::ScanKind::Event => ("event_attendees", "event_id"),
+        alarms::ScanKind::Task => ("task_attendees", "task_id"),
+    };
+    sqlx::query_scalar(&format!(
+        "SELECT DISTINCT COALESCE(ct.number, a.telephone::text)
+         FROM {table} a
+         LEFT JOIN contacts c ON c.id = a.contact_id AND c.deleted_at IS NULL
          LEFT JOIN contact_tels ct ON ct.contact_id = c.id AND ct.is_mobile
-         WHERE ea.event_id = $1 AND (ct.number IS NOT NULL OR ea.telephone IS NOT NULL)",
-    )
-    .bind(event_id)
+         WHERE a.{column} = $1 AND (ct.number IS NOT NULL OR a.telephone IS NOT NULL)"
+    ))
+    .bind(subject_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default()
@@ -1187,13 +1253,19 @@ mod tests {
         }
     }
 
-    fn scan_row(event: EventRow, offset_secs: i64) -> alarms::AlarmScanRow {
-        alarms::AlarmScanRow {
+    fn scan_row(event: EventRow, offset_secs: i64) -> alarms::ScanRow {
+        let start = match (event.starts_at, event.start_date) {
+            (Some(at), _) => Some(DateOrDateTime::Timed(at)),
+            (None, Some(date)) => Some(DateOrDateTime::AllDay(date)),
+            _ => None,
+        };
+        alarms::ScanRow {
+            kind: alarms::ScanKind::Event,
+            subject_id: event.id,
             calendar_id: Uuid::nil(),
-            event,
-            alarm: alarms::AlarmRow {
+            summary: event.summary.clone(),
+            alarm: alarms::ScanAlarm {
                 id: Uuid::nil(),
-                event_id: Uuid::nil(),
                 action: "DISPLAY".to_string(),
                 related: Some("START".to_string()),
                 offset_interval: Some(sqlx::postgres::types::PgInterval {
@@ -1208,6 +1280,56 @@ mod tests {
                 notify_channels: Vec::new(),
                 created_at: Utc::now(),
             },
+            start,
+            end: None,
+            rrule: event.rrule,
+            rdate: event.rdate,
+            exdate: event.exdate,
+            tzid: event.tzid,
+            floating: event.floating,
+            completed_occurrences: Vec::new(),
+        }
+    }
+
+    /// A task scan row; `start`/`end` come pre-anchored the way the union
+    /// builds them (start = DTSTART-else-DUE, end = DUE).
+    fn task_scan_row(
+        start: Option<DateOrDateTime>,
+        end: Option<DateOrDateTime>,
+        related: &str,
+        tzid: Option<&str>,
+        rrule: Option<&str>,
+        offset_secs: i64,
+    ) -> alarms::ScanRow {
+        alarms::ScanRow {
+            kind: alarms::ScanKind::Task,
+            subject_id: Uuid::nil(),
+            calendar_id: Uuid::nil(),
+            summary: "task".to_string(),
+            alarm: alarms::ScanAlarm {
+                id: Uuid::nil(),
+                action: "DISPLAY".to_string(),
+                related: Some(related.to_string()),
+                offset_interval: Some(sqlx::postgres::types::PgInterval {
+                    months: 0,
+                    days: 0,
+                    microseconds: offset_secs * 1_000_000,
+                }),
+                trigger_at: None,
+                description: None,
+                summary: None,
+                recipient_emails: Vec::new(),
+                notify_channels: Vec::new(),
+                created_at: Utc::now(),
+            },
+            start,
+            end,
+            rrule: rrule.map(str::to_string),
+            rdate: serde_json::Value::Null,
+            exdate: serde_json::Value::Null,
+            tzid: tzid.map(str::to_string),
+            floating: tzid.is_none(),
+            completed_occurrences: Vec::new(),
         }
     }
 
@@ -1329,6 +1451,100 @@ mod tests {
         assert_eq!(
             alarm_triggers(&scan, &resolver(), lookback, horizon),
             vec![timed("2026-02-01T08:00:00Z")]
+        );
+    }
+
+    #[test]
+    fn task_related_end_alarm_anchors_on_due() {
+        let scan = task_scan_row(
+            None,
+            Some(DateOrDateTime::Timed(timed("2026-01-20T17:00:00Z"))),
+            "END",
+            None,
+            None,
+            -600,
+        );
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
+            vec![timed("2026-01-20T16:50:00Z")]
+        );
+    }
+
+    #[test]
+    fn task_with_no_anchor_skips_relative_alarm() {
+        let scan = task_scan_row(None, None, "END", None, None, -600);
+        let (lookback, horizon) = window();
+        assert!(alarm_triggers(&scan, &resolver(), lookback, horizon).is_empty());
+    }
+
+    #[test]
+    fn task_absolute_trigger_fires_without_anchor() {
+        let mut scan = task_scan_row(None, None, "END", None, None, -600);
+        scan.alarm.trigger_at = Some(timed("2026-02-01T08:00:00Z"));
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
+            vec![timed("2026-02-01T08:00:00Z")]
+        );
+    }
+
+    #[test]
+    fn all_day_task_due_anchors_at_local_midnight() {
+        // 2026-01-15 midnight in New York (EST) is 05:00 UTC.
+        let scan = task_scan_row(
+            None,
+            Some(DateOrDateTime::AllDay(
+                NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            )),
+            "END",
+            Some("America/New_York"),
+            None,
+            0,
+        );
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
+            vec![timed("2026-01-15T05:00:00Z")]
+        );
+    }
+
+    #[test]
+    fn floating_task_due_anchors_at_utc_midnight() {
+        let scan = task_scan_row(
+            None,
+            Some(DateOrDateTime::AllDay(
+                NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            )),
+            "END",
+            None,
+            None,
+            0,
+        );
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
+            vec![timed("2026-01-15T00:00:00Z")]
+        );
+    }
+
+    #[test]
+    fn recurring_task_alarm_skips_completed_occurrences() {
+        let mut scan = task_scan_row(
+            Some(DateOrDateTime::Timed(timed("2026-01-15T10:00:00Z"))),
+            None,
+            "START",
+            None,
+            Some("FREQ=DAILY;COUNT=3"),
+            -900,
+        );
+        scan.completed_occurrences = vec![db::tasks::Occurrence::Timed(
+            timed("2026-01-16T10:00:00Z").naive_utc(),
+        )];
+        let (lookback, horizon) = window();
+        assert_eq!(
+            alarm_triggers(&scan, &resolver(), lookback, horizon),
+            vec![timed("2026-01-15T09:45:00Z"), timed("2026-01-17T09:45:00Z"),]
         );
     }
 }

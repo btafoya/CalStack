@@ -700,6 +700,14 @@ const RULES_PAGE: &str = concat!(
           <option value="event_created">event_created</option>
           <option value="event_updated">event_updated</option>
           <option value="event_deleted">event_deleted</option>
+          <option value="task_created">task_created</option>
+          <option value="task_updated">task_updated</option>
+          <option value="task_deleted">task_deleted</option>
+          <option value="task_completed">task_completed</option>
+          <option value="task_due">task_due</option>
+          <option value="journal_created">journal_created</option>
+          <option value="journal_updated">journal_updated</option>
+          <option value="journal_deleted">journal_deleted</option>
         </select></div>
       <div class="col-auto form-check mb-2">
         <input class="form-check-input" type="checkbox" id="rule-enabled" checked>
@@ -1130,6 +1138,42 @@ const CREDENTIALS_PAGE: &str = concat!(
   <table class="table table-sm bg-body">
     <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
     <tbody id="ap-rows"></tbody>
+  </table>
+
+  <h1 class="h4 mb-3 mt-4">Two-factor authentication</h1>
+  <p id="totp-status" class="text-body-secondary small">Loading…</p>
+  <div class="d-flex gap-2">
+    <button id="totp-setup-btn" class="btn btn-outline-primary btn-sm" type="button" hidden>Set up 2FA</button>
+    <button id="totp-disable-btn" class="btn btn-outline-danger btn-sm" type="button" hidden>Disable 2FA</button>
+  </div>
+  <div id="totp-setup-panel" class="card p-3 mt-2 d-none">
+    <p class="small text-body-secondary">Add this secret to your authenticator app (it is what the
+      QR code would encode), then enter a code from it to confirm.</p>
+    <div class="mb-2"><label class="form-label" for="totp-secret">Secret</label>
+      <input class="form-control font-monospace" id="totp-secret" readonly></div>
+    <div class="mb-2"><label class="form-label" for="totp-url">otpauth URL</label>
+      <input class="form-control font-monospace" id="totp-url" readonly></div>
+    <div class="row g-2 align-items-end">
+      <div class="col-auto"><label class="form-label" for="totp-code">Authenticator code</label>
+        <input class="form-control" id="totp-code" inputmode="numeric" autocomplete="one-time-code"></div>
+      <div class="col-auto"><button id="totp-verify-btn" class="btn btn-primary" type="button">Verify &amp; enable</button></div>
+    </div>
+  </div>
+  <div id="totp-recovery-panel" class="alert alert-warning mt-2 d-none" role="alert">
+    <div class="fw-bold mb-1">Save these recovery codes now — they are shown only once.</div>
+    <textarea id="totp-recovery-codes" class="form-control font-monospace" rows="8" readonly></textarea>
+  </div>
+
+  <h1 class="h4 mb-3 mt-4">Passkeys</h1>
+  <p id="pk-note" class="text-body-secondary small d-none"></p>
+  <form id="passkey-form" class="row g-2 align-items-end mb-2">
+    <div class="col"><label class="form-label" for="pk-name">Name</label>
+      <input class="form-control" id="pk-name" required></div>
+    <div class="col-auto"><button class="btn btn-primary" type="submit">Add passkey</button></div>
+  </form>
+  <table class="table table-sm bg-body">
+    <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+    <tbody id="pk-rows"></tbody>
   </table>
 </div>
 <script src="/assets/js/jquery.min.js"></script>

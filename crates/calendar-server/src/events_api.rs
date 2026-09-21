@@ -293,6 +293,9 @@ async fn create_event(
 struct RangeQuery {
     from: Option<chrono::DateTime<Utc>>,
     to: Option<chrono::DateTime<Utc>>,
+    /// Occurrences only: comma-separated extras, e.g. `tasks,journals` —
+    /// dated markers for tasks/journals appended to the event entries.
+    include: Option<String>,
     // ponytail: no pagination yet; per-calendar windows stay small.
 }
 
@@ -497,8 +500,125 @@ async fn list_occurrences(
     let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let rows = db::list_events_in_range(&pool, calendar_id, from, to).await?;
-    let out = expand_occurrences_json(&pool, calendar_id, rows, from, to).await?;
+    let mut out = expand_occurrences_json(&pool, calendar_id, rows, from, to).await?;
+    // Additive ?include=tasks,journals: dated markers for the calendar view;
+    // the event entries above keep their shape untouched.
+    let include: Vec<&str> = query
+        .include
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if include.contains(&"tasks") {
+        out.extend(include_task_markers(&pool, calendar_id, from, to).await?);
+    }
+    if include.contains(&"journals") {
+        out.extend(include_journal_markers(&pool, calendar_id, from, to).await?);
+    }
     Ok(Json(serde_json::json!(out)))
+}
+
+/// Dated task markers: masters whose start or due (timed or all-day) falls in
+/// the window. Undated and subtask rows never appear (design section 8).
+async fn include_task_markers(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    let rows = db::tasks::list_tasks(pool, calendar_id, &db::tasks::TaskFilter::default()).await?;
+    let uids: Vec<String> = rows.iter().map(|t| t.uid.clone()).collect();
+    let counts: std::collections::HashMap<String, i64> = if uids.is_empty() {
+        Default::default()
+    } else {
+        sqlx::query_as::<_, (Option<String>, i64)>(
+            "SELECT parent_uid, COUNT(*)::bigint FROM tasks
+             WHERE calendar_id = $1 AND parent_uid = ANY($2)
+               AND deleted_at IS NULL AND master_task_id IS NULL
+             GROUP BY parent_uid",
+        )
+        .bind(calendar_id)
+        .bind(&uids)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .into_iter()
+        .filter_map(|(uid, n)| uid.map(|u| (u, n)))
+        .collect()
+    };
+    let mut out = Vec::new();
+    for t in &rows {
+        let candidates = [
+            t.starts_at,
+            t.due_at,
+            t.start_date
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|n| n.and_utc()),
+            t.due_date
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|n| n.and_utc()),
+        ];
+        if !candidates
+            .iter()
+            .flatten()
+            .any(|at| *at >= from && *at < to)
+        {
+            continue;
+        }
+        let next_open = if t.rrule.is_some() {
+            db::tasks::next_open(pool, t.id, 90).await.unwrap_or(None)
+        } else {
+            None
+        };
+        out.push(serde_json::json!({
+            "type": "task",
+            "id": t.id,
+            "summary": t.summary,
+            "due": t.due_at.map(|d| serde_json::json!(d))
+                .or_else(|| t.due_date.map(|d| serde_json::json!(d.to_string()))),
+            "status": t.status,
+            "percent": t.percent_complete,
+            "completed": t.completed_at,
+            "next_open": next_open,
+            "subtasks_count": counts.get(&t.uid).copied().unwrap_or(0),
+        }));
+    }
+    Ok(out)
+}
+
+/// Dated journal markers: journals whose DTSTART falls in the window.
+/// Undated notes never appear.
+async fn include_journal_markers(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    let rows = db::journals::list_journals(
+        pool,
+        calendar_id,
+        &db::journals::JournalFilter {
+            from: Some(from),
+            to: Some(to),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|j| {
+            serde_json::json!({
+                "type": "journal",
+                "id": j.id,
+                "summary": j.summary,
+                "start": j.starts_at.map(|d| serde_json::json!(d))
+                    .or_else(|| j.start_date.map(|d| serde_json::json!(d.to_string()))),
+                "status": j.status,
+            })
+        })
+        .collect())
 }
 
 /// GET /api/subscriptions/{id}/occurrences — same expansion as

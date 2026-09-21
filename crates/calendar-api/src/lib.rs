@@ -2,6 +2,7 @@
 //! application API as an OpenAPI 3.1 document, served at /api/openapi.json
 //! and validated in a unit test. The schema is the API contract; it stays
 //! hand-maintained next to the handlers it describes.
+#![recursion_limit = "512"] // the OpenAPI json! literal is large
 
 use serde_json::json;
 
@@ -28,6 +29,8 @@ pub fn openapi_document() -> serde_json::Value {
     let category = || serde_json::json!({"$ref": "#/components/schemas/Category"});
     let contact = || serde_json::json!({"$ref": "#/components/schemas/Contact"});
     let event = || serde_json::json!({"$ref": "#/components/schemas/Event"});
+    let task = || serde_json::json!({"$ref": "#/components/schemas/Task"});
+    let journal = || serde_json::json!({"$ref": "#/components/schemas/Journal"});
 
     let mut paths = serde_json::Map::new();
     let mut put = |route: &str, methods: serde_json::Value| {
@@ -201,7 +204,10 @@ pub fn openapi_document() -> serde_json::Value {
                 "requestBody": {"content": {"application/json": {"schema": {
                     "type": "object", "properties": {"name": {"type": ["string", "null"]},
                         "description": {"type": ["string", "null"]}, "color": {"type": ["string", "null"]},
-                        "timezone": {"type": ["string", "null"]}, "order_index": {"type": ["integer", "null"]}}}}}},
+                        "timezone": {"type": ["string", "null"]}, "order_index": {"type": ["integer", "null"]},
+                        "components": {"type": "array", "items": {"type": "string",
+                            "enum": ["VEVENT", "VTODO", "VJOURNAL"]},
+                            "description": "1-3 distinct kinds; removal is refused with 409 plus per-type counts while live items of a removed kind exist"}}}}}},
                 "responses": json_response("updated", calendar())},
             "delete": {"summary": "Soft-delete a calendar (retention before purge)",
                 "responses": {"200": {"description": "deleted"}}},
@@ -233,7 +239,103 @@ pub fn openapi_document() -> serde_json::Value {
         "/api/calendars/{id}/occurrences",
         json!({"get": {
             "summary": "Expanded occurrences with exception overlay",
+            "parameters": [param("id", true),
+                {"name": "from", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                {"name": "to", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                {"name": "include", "in": "query", "schema": {"type": "string"},
+                    "description": "comma-separated extras: tasks,journals append dated markers (type: task/journal) to the event entries"}],
             "responses": {"200": {"description": "occurrences"}}}
+        }),
+    );
+    put(
+        "/api/calendars/{id}/tasks",
+        json!({
+            "post": {"summary": "Create a task (VTODO master)",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TaskWrite"}}}},
+                "responses": json_response("created", task())},
+            "get": {"summary": "List task masters (undated included)",
+                "parameters": [param("id", true),
+                    {"name": "status", "in": "query", "schema": {"type": "string"}},
+                    {"name": "due_before", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                    {"name": "due_after", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                    {"name": "category", "in": "query", "schema": {"type": "string"}},
+                    {"name": "parent_id", "in": "query", "schema": {"type": "string"},
+                        "description": "the parent task's uid (subtasks chain by parent_uid)"},
+                    {"name": "q", "in": "query", "schema": {"type": "string"},
+                        "description": "case-insensitive substring over the summary"}],
+                "responses": json_response("tasks", json!({"type": "array", "items": task()}))},
+        }),
+    );
+    put(
+        "/api/tasks/{id}",
+        json!({
+            "get": {"summary": "Get a task with its ETag", "parameters": [param("id", true)],
+                "responses": {"200": {"description": "task", "content": {"application/json": {"schema": task()}}},
+                    "404": {"description": "absent"}}},
+            "patch": {"summary": "Update a task with If-Match optimistic concurrency",
+                "parameters": [param("id", true)],
+                "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/TaskWrite"}}}},
+                "responses": json_response("updated", task())},
+            "delete": {"summary": "Soft delete; subtasks cascade (deleted count returned)",
+                "parameters": [param("id", true)],
+                "responses": {"200": {"description": "deleted"}}},
+        }),
+    );
+    put(
+        "/api/tasks/{id}/complete",
+        json!({"post": {
+            "summary": "Complete a task; a recurring task needs the occurrence (writes a RECURRENCE-ID override)",
+            "parameters": [param("id", true)],
+            "requestBody": {"content": {"application/json": {"schema": {
+                "type": "object", "properties": {"occurrence": {
+                    "oneOf": [{"type": "object", "properties": {"timed": {"type": "string", "format": "date-time"}}, "required": ["timed"]},
+                              {"type": "object", "properties": {"all_day": {"type": "string", "format": "date"}}, "required": ["all_day"]}]}}}}}},
+            "responses": json_response("completed", task())},
+        }),
+    );
+    put(
+        "/api/tasks/{id}/reopen",
+        json!({"post": {
+            "summary": "Clear a completion (resets the override for recurring occurrences)",
+            "parameters": [param("id", true)],
+            "requestBody": {"content": {"application/json": {"schema": {
+                "type": "object", "properties": {"occurrence": {
+                    "oneOf": [{"type": "object", "properties": {"timed": {"type": "string", "format": "date-time"}}, "required": ["timed"]},
+                              {"type": "object", "properties": {"all_day": {"type": "string", "format": "date"}}, "required": ["all_day"]}]}}}}}},
+            "responses": json_response("reopened", task())},
+        }),
+    );
+    put(
+        "/api/calendars/{id}/journals",
+        json!({
+            "post": {"summary": "Create a journal (VJOURNAL); an undated one is a note",
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JournalWrite"}}}},
+                "responses": json_response("created", journal())},
+            "get": {"summary": "List journals, newest first",
+                "parameters": [param("id", true),
+                    {"name": "from", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                    {"name": "to", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                    {"name": "undated", "in": "query", "schema": {"type": "boolean"},
+                        "description": "true = only journals without a DTSTART (notes)"},
+                    {"name": "category", "in": "query", "schema": {"type": "string"}},
+                    {"name": "q", "in": "query", "schema": {"type": "string"},
+                        "description": "case-insensitive substring over the summary"}],
+                "responses": json_response("journals", json!({"type": "array", "items": journal()}))},
+        }),
+    );
+    put(
+        "/api/journals/{id}",
+        json!({
+            "get": {"summary": "Get a journal with its ETag", "parameters": [param("id", true)],
+                "responses": {"200": {"description": "journal", "content": {"application/json": {"schema": journal()}}},
+                    "404": {"description": "absent"}}},
+            "patch": {"summary": "Update a journal with If-Match optimistic concurrency",
+                "parameters": [param("id", true)],
+                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JournalWrite"}}}},
+                "responses": json_response("updated", journal())},
+            "delete": {"summary": "Soft delete (sync-visible tombstone)",
+                "parameters": [param("id", true)],
+                "responses": {"200": {"description": "deleted"}}},
         }),
     );
     put(
@@ -323,6 +425,14 @@ pub fn openapi_document() -> serde_json::Value {
             "summary": "Change stream since a sequence (transport adapters: SSE/WebSocket)",
             "parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}],
             "responses": {"200": {"description": "changes"}}
+        }}),
+    );
+    put(
+        "/api/changes/stream",
+        json!({"get": {
+            "summary": "SSE transport adapter for the change stream (sync/change/done frames, ~15s comment pings, 30-minute cap)",
+            "parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}],
+            "responses": {"200": {"description": "text/event-stream"}}
         }}),
     );
     put(
@@ -747,6 +857,91 @@ pub fn openapi_document() -> serde_json::Value {
                     "id": {"type": "string", "format": "uuid"}, "slug": {"type": "string"},
                     "name": {"type": "string"}, "my_capability": {"type": "string",
                         "enum": ["owner", "read_write", "read_only", "free_busy"]},
+                    "components": {"type": "array", "items": {"type": "string",
+                        "enum": ["VEVENT", "VTODO", "VJOURNAL"]}},
+                }},
+                "Task": {"type": "object", "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "calendar_id": {"type": "string", "format": "uuid"}, "uid": {"type": "string"},
+                    "summary": {"type": "string"}, "etag": {"type": "string"},
+                    "sequence": {"type": "integer"},
+                    "starts_at": {"type": ["string", "null"], "format": "date-time"},
+                    "start_date": {"type": ["string", "null"], "format": "date"},
+                    "due_at": {"type": ["string", "null"], "format": "date-time"},
+                    "due_date": {"type": ["string", "null"], "format": "date"},
+                    "duration_secs": {"type": ["integer", "null"]},
+                    "tzid": {"type": ["string", "null"]},
+                    "floating": {"type": "boolean"},
+                    "completed_at": {"type": ["string", "null"], "format": "date-time"},
+                    "rrule": {"type": ["string", "null"]},
+                    "status": {"type": ["string", "null"],
+                        "enum": ["NEEDS-ACTION", "IN-PROCESS", "COMPLETED", "CANCELLED"]},
+                    "percent_complete": {"type": ["integer", "null"]},
+                    "priority": {"type": ["integer", "null"]},
+                    "class": {"type": ["string", "null"], "enum": ["PUBLIC", "PRIVATE", "CONFIDENTIAL"]},
+                    "categories": {"type": "array", "items": {"type": "string"}},
+                    "parent_uid": {"type": ["string", "null"],
+                        "description": "RELATED-TO;RELTYPE=PARENT — the parent task's uid"},
+                    "sort_order": {"type": ["integer", "null"]},
+                    "subtasks_count": {"type": "integer"},
+                    "next_open": {"type": ["string", "null"], "format": "date-time",
+                        "description": "earliest open occurrence of a recurring task"},
+                    "is_overdue": {"type": "boolean"},
+                    "attendees": {"type": "array", "items": {"type": "object"}},
+                    "alarms": {"type": "array", "items": {"type": "object"}},
+                }},
+                "TaskWrite": {"type": "object", "required": ["summary"], "properties": {
+                    "uid": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "description_html": {"type": ["string", "null"]},
+                    "description_text": {"type": ["string", "null"]},
+                    "url": {"type": ["string", "null"]}, "location": {"type": ["string", "null"]},
+                    "starts_at": {"type": ["string", "null"], "format": "date-time"},
+                    "start_date": {"type": ["string", "null"], "format": "date"},
+                    "due_at": {"type": ["string", "null"], "format": "date-time"},
+                    "due_date": {"type": ["string", "null"], "format": "date"},
+                    "duration_secs": {"type": ["integer", "null"],
+                        "description": "alternative to due; mutually exclusive with it"},
+                    "tzid": {"type": ["string", "null"]},
+                    "rrule": {"type": ["string", "null"]},
+                    "rdate": {"type": ["array", "null"]}, "exdate": {"type": ["array", "null"]},
+                    "status": {"type": ["string", "null"]},
+                    "percent_complete": {"type": ["integer", "null"]},
+                    "priority": {"type": ["integer", "null"]},
+                    "class": {"type": ["string", "null"]},
+                    "categories": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "parent_uid": {"type": ["string", "null"]},
+                    "sort_order": {"type": ["integer", "null"]},
+                    "attendees": {"type": ["array", "null"], "items": {"type": "object"},
+                        "description": "replaces the whole set when present"},
+                    "alarms": {"type": ["array", "null"], "items": {"type": "object"},
+                        "description": "replaces the whole set when present"},
+                }},
+                "Journal": {"type": "object", "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "calendar_id": {"type": "string", "format": "uuid"}, "uid": {"type": "string"},
+                    "summary": {"type": "string"}, "etag": {"type": "string"},
+                    "sequence": {"type": "integer"},
+                    "starts_at": {"type": ["string", "null"], "format": "date-time"},
+                    "start_date": {"type": ["string", "null"], "format": "date"},
+                    "tzid": {"type": ["string", "null"]},
+                    "floating": {"type": "boolean"},
+                    "status": {"type": ["string", "null"], "enum": ["DRAFT", "FINAL", "CANCELLED"]},
+                    "class": {"type": ["string", "null"], "enum": ["PUBLIC", "PRIVATE", "CONFIDENTIAL"]},
+                    "categories": {"type": "array", "items": {"type": "string"}},
+                }},
+                "JournalWrite": {"type": "object", "required": ["summary"], "properties": {
+                    "uid": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "description_html": {"type": ["string", "null"]},
+                    "description_text": {"type": ["string", "null"]},
+                    "url": {"type": ["string", "null"]},
+                    "starts_at": {"type": ["string", "null"], "format": "date-time"},
+                    "start_date": {"type": ["string", "null"], "format": "date"},
+                    "tzid": {"type": ["string", "null"]},
+                    "status": {"type": ["string", "null"]},
+                    "class": {"type": ["string", "null"]},
+                    "categories": {"type": ["array", "null"], "items": {"type": "string"}},
                 }},
             },
             "securitySchemes": {
@@ -795,5 +990,33 @@ mod tests {
             doc["components"]["schemas"]["ContactWrite"]["properties"]["member_contact_ids"]
                 .is_object()
         );
+        // Tasks and journals (ADR-015): routes, schemas and calendar components.
+        for (path, method) in [
+            ("/api/calendars/{id}/tasks", "post"),
+            ("/api/calendars/{id}/tasks", "get"),
+            ("/api/tasks/{id}", "get"),
+            ("/api/tasks/{id}", "patch"),
+            ("/api/tasks/{id}", "delete"),
+            ("/api/tasks/{id}/complete", "post"),
+            ("/api/tasks/{id}/reopen", "post"),
+            ("/api/calendars/{id}/journals", "post"),
+            ("/api/calendars/{id}/journals", "get"),
+            ("/api/journals/{id}", "get"),
+            ("/api/journals/{id}", "patch"),
+            ("/api/journals/{id}", "delete"),
+            ("/api/calendars/{id}/occurrences", "get"),
+        ] {
+            assert!(
+                doc["paths"][path][method].is_object(),
+                "{method} {path} missing from the OpenAPI document"
+            );
+        }
+        for schema in ["Task", "TaskWrite", "Journal", "JournalWrite"] {
+            assert!(
+                doc["components"]["schemas"][schema].is_object(),
+                "{schema} missing"
+            );
+        }
+        assert!(doc["components"]["schemas"]["Calendar"]["properties"]["components"].is_object());
     }
 }

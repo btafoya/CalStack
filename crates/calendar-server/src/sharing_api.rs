@@ -147,8 +147,127 @@ async fn unsubscribe(
 
 // ============ anonymous feed (no auth; share token is the capability) ============
 
+/// RFC 5545 3.1 line folding: max 75 octets per line, continuations after a
+/// single space. Char-boundary safe (never splits a UTF-8 sequence).
+fn fold_ics_line(line: &str) -> String {
+    if line.len() <= 75 {
+        return format!("{line}\r\n");
+    }
+    let mut out = String::with_capacity(line.len() + 16);
+    let mut width = 0usize;
+    for ch in line.chars() {
+        if width + ch.len_utf8() > 75 {
+            out.push_str("\r\n ");
+            width = 1;
+        }
+        out.push(ch);
+        width += ch.len_utf8();
+    }
+    out.push_str("\r\n");
+    out
+}
+
+/// RFC 5545 3.3.11 TEXT escaping.
+fn escape_ics_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            ';' => out.push_str("\\;"),
+            ',' => out.push_str("\\,"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn ics_prop(name: &str, value: &str) -> String {
+    fold_ics_line(&format!("{name}:{}", escape_ics_text(value)))
+}
+
+/// DTSTART/DUE as a UTC instant (or bare wall clock when floating — the wall
+/// time is stored as if UTC), or a VALUE=DATE form. The stored TZID is not
+/// emitted: a UTC rendering is a correct instant for any zone.
+fn moment_prop(
+    name: &str,
+    at: Option<DateTime<Utc>>,
+    date: Option<chrono::NaiveDate>,
+    floating: bool,
+) -> String {
+    if let Some(at) = at {
+        let value = if floating {
+            at.format("%Y%m%dT%H%M%S")
+        } else {
+            at.format("%Y%m%dT%H%M%SZ")
+        };
+        fold_ics_line(&format!("{name}:{value}"))
+    } else if let Some(date) = date {
+        fold_ics_line(&format!("{name};VALUE=DATE:{}", date.format("%Y%m%d")))
+    } else {
+        String::new()
+    }
+}
+
+/// Minimal public-feed VTODO (docs/TASKS_JOURNALS_DESIGN.md section 6):
+/// no extra_props, attendees or alarms — extras can carry private data.
+/// TODO: swap to the shared calendar_caldav renderer (todos_to_ics) when it
+/// lands; this inline version only covers the public-feed property set.
+fn vtodo_text(task: &db::tasks::TaskRow) -> String {
+    let mut out = String::from("BEGIN:VTODO\r\n");
+    out.push_str(&ics_prop("UID", &task.uid));
+    out.push_str(&format!(
+        "DTSTAMP:{}\r\n",
+        task.updated_at.format("%Y%m%dT%H%M%SZ")
+    ));
+    out.push_str(&ics_prop("SUMMARY", &task.summary));
+    if let Some(status) = &task.status {
+        out.push_str(&ics_prop("STATUS", status));
+    }
+    out.push_str(&moment_prop(
+        "DTSTART",
+        task.starts_at,
+        task.start_date,
+        task.floating,
+    ));
+    out.push_str(&moment_prop(
+        "DUE",
+        task.due_at,
+        task.due_date,
+        task.floating,
+    ));
+    out.push_str("END:VTODO\r\n");
+    out
+}
+
+/// Minimal public-feed VJOURNAL: same privacy rule, undated journals ride
+/// along with no DTSTART at all.
+fn vjournal_text(journal: &db::journals::JournalRow) -> String {
+    let mut out = String::from("BEGIN:VJOURNAL\r\n");
+    out.push_str(&ics_prop("UID", &journal.uid));
+    out.push_str(&format!(
+        "DTSTAMP:{}\r\n",
+        journal.updated_at.format("%Y%m%dT%H%M%SZ")
+    ));
+    out.push_str(&ics_prop("SUMMARY", &journal.summary));
+    if let Some(status) = &journal.status {
+        out.push_str(&ics_prop("STATUS", status));
+    }
+    out.push_str(&moment_prop(
+        "DTSTART",
+        journal.starts_at,
+        journal.start_date,
+        journal.floating,
+    ));
+    out.push_str("END:VJOURNAL\r\n");
+    out
+}
+
 /// GET /share/{token}/calendar.ics — public read-only feed. Attendee contact
-/// data and PRIVATE/CONFIDENTIAL events are withheld (privacy rules).
+/// data and PRIVATE/CONFIDENTIAL events are withheld (privacy rules); PUBLIC
+/// (or unclassified) tasks and journals are appended as minimal VTODO /
+/// VJOURNAL components without extra_props, attendees or alarms.
 pub(crate) async fn public_feed(
     State(AppState { pool, .. }): State<AppState>,
     Path(token): Path<String>,
@@ -159,8 +278,14 @@ pub(crate) async fn public_feed(
     else {
         return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
     };
-    let Ok(rows) = db::sharing::list_public_events(&pool, share.calendar_id).await else {
-        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "feed failed").into_response();
+    let (rows, tasks, journals) = (
+        db::sharing::list_public_events(&pool, share.calendar_id).await,
+        db::sharing::list_public_tasks(&pool, share.calendar_id).await,
+        db::sharing::list_public_journals(&pool, share.calendar_id).await,
+    );
+    let (rows, tasks, journals) = match (rows, tasks, journals) {
+        (Ok(r), Ok(t), Ok(j)) => (r, t, j),
+        _ => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "feed failed").into_response(),
     };
     // Client-supplied VTIMEZONEs ride along so TZID-qualified events stay
     // interpretable in the public feed (ADR-012).
@@ -182,7 +307,17 @@ pub(crate) async fn public_feed(
             vtimezones: zones.clone(),
         });
     }
-    let ics = calendar_caldav::events_to_ics(&exports);
+    let mut ics = calendar_caldav::events_to_ics(&exports);
+    let extras: String = tasks
+        .iter()
+        .map(vtodo_text)
+        .chain(journals.iter().map(vjournal_text))
+        .collect();
+    if !extras.is_empty()
+        && let Some(pos) = ics.rfind("END:VCALENDAR")
+    {
+        ics.insert_str(pos, &extras);
+    }
     (
         axum::http::StatusCode::OK,
         [(
@@ -212,4 +347,46 @@ pub fn router() -> axum::Router<crate::AppState> {
         )
         .route("/api/subscriptions/{id}", delete(unsubscribe))
         .route("/share/{token}/calendar.ics", get(public_feed))
+}
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+
+    #[test]
+    fn text_values_are_escaped() {
+        // ICS injection: user text must not introduce properties or newlines.
+        assert_eq!(escape_ics_text("a;b,c\nd\\e"), "a\\;b\\,c\\nd\\\\e");
+    }
+
+    #[test]
+    fn long_lines_fold_at_75_octets() {
+        let folded = fold_ics_line(&format!("SUMMARY:{}", "x".repeat(120)));
+        for line in folded.split("\r\n") {
+            assert!(line.len() <= 75, "unfolded line too long: {}", line.len());
+        }
+        assert!(folded.contains("\r\n "));
+        // Multibyte text never splits mid-character.
+        let wide = fold_ics_line(&format!("SUMMARY:{}", "é".repeat(60)));
+        assert!(wide.contains("éé"));
+    }
+
+    #[test]
+    fn moments_render_utc_date_or_floating() {
+        let at = chrono::DateTime::from_timestamp(1_789_000_000, 0).unwrap();
+        assert_eq!(
+            moment_prop("DUE", Some(at), None, false),
+            format!("DUE:{}\r\n", at.format("%Y%m%dT%H%M%SZ"))
+        );
+        assert_eq!(
+            moment_prop("DUE", Some(at), None, true),
+            format!("DUE:{}\r\n", at.format("%Y%m%dT%H%M%S"))
+        );
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap();
+        assert_eq!(
+            moment_prop("DUE", None, Some(day), false),
+            "DUE;VALUE=DATE:20260920\r\n"
+        );
+        assert_eq!(moment_prop("DUE", None, None, false), "");
+    }
 }
