@@ -49,8 +49,28 @@ MIT licensed.
 - **PostgreSQL 16+** — the only runtime dependency.
 - **Rust** (stable toolchain, 2024 edition) — only if building from source.
 - **Docker + Docker Compose** — only if running via Compose.
+- **A Debian-family distro + systemd** — only for the `scripts/install.sh` path.
 
 ## Installation
+
+Pick one of three paths:
+
+| Path | When |
+|---|---|
+| **systemd (Debian)** | Bare-metal or VM deployment, service managed by systemd |
+| **Docker Compose** | Containerized deployment |
+| **Build from source** | You manage the process yourself (or another supervisor) |
+
+### systemd (Debian-family distros)
+
+```bash
+git clone https://github.com/btafoya/CalStack.git
+cd CalStack
+sudo scripts/install.sh                  # you already have PostgreSQL; prompts for DATABASE_URL
+sudo scripts/install.sh --with-postgres  # also apt-installs PostgreSQL and provisions a calstack DB
+```
+
+The installer builds from source (needs Rust), installs the binary to `/usr/local/bin/calendar-server`, generates `APP_ENCRYPTION_KEY` for you, writes a sandboxed `calendar-server.service`, enables it at boot, and offers to create the first admin. Idempotent — re-running upgrades the binary safely. Uninstall with `sudo scripts/uninstall.sh` (never touches your database). Details, flags, logs, and config-reload notes: [`scripts/README.md`](scripts/README.md).
 
 ### Docker Compose
 
