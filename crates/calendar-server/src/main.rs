@@ -278,6 +278,13 @@ fn security_headers() -> tower_http::set_header::SetResponseHeaderLayer<axum::ht
     )
 }
 
+fn frame_deny() -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
+    tower_http::set_header::SetResponseHeaderLayer::overriding(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    )
+}
+
 fn build_router(state: AppState) -> Router {
     let router = Router::new()
         .merge(calendar_web::router())
@@ -326,6 +333,7 @@ fn build_router(state: AppState) -> Router {
             audit::middleware,
         ))
         .layer(security_headers())
+        .layer(frame_deny())
         .with_state(state);
     // Outermost, so requests the guards reject are captured too.
     if capture::dir().is_some() {

@@ -335,6 +335,7 @@ async fn passkey_register_finish(
     post,
     path = "/api/auth/webauthn/login/start",
     request_body = LoginStartBody,
+    security(()),
     responses(
         (status = 200, description = "ceremony challenge (unknown users get an unusable one)", body = PasskeyChallengeView),
     )
@@ -382,6 +383,7 @@ async fn passkey_login_start(
     post,
     path = "/api/auth/webauthn/login/finish",
     request_body = LoginFinishBody,
+    security(()),
     responses(
         (status = 200, description = "session established (cookie set)", body = PasskeySessionView),
         (status = 400, description = "bad or expired challenge"),
