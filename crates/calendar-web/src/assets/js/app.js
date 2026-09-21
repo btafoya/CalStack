@@ -142,7 +142,6 @@
   // scripts expose load(cal) and skip reloads for an unchanged calendar.
   var PANE_LOADERS = {
     categories: function (cal) { CategoriesPane.load(cal); },
-    contacts: function (cal) { /* tenant-wide; contacts.js self-initializes */ },
     tasks: function (cal) { TasksPane.load(cal); },
     journals: function (cal) { JournalsPane.load(cal); },
     rules: function (cal) { RulesPane.load(cal); },
@@ -181,7 +180,7 @@
 
   function updateTabs() {
     var cal = state.currentCalendar;
-    $('#cal-tabs').prop('hidden', !cal);
+    $('#tab-bar-row').prop('hidden', !cal);
     $('#tab-btn-tasks, #tab-btn-journals').prop('hidden', !!(cal && cal.readOnly));
     $('#tab-btn-rules').prop('hidden', !(cal && !cal.readOnly && state.userIsAdmin));
     if (cal && $('#cal-tabs [data-tab="' + currentTab() + '"]').prop('hidden')) {
