@@ -699,11 +699,38 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     };
                     match object.kind {
                         ObjectKind::Event => {
-                            db::delete_event(&self.pool, object.id, None)
+                            // Deleting a delivered copy is a decline; deleting
+                            // the organizer's row cancels for everyone.
+                            if db::scheduling::origin_of(
+                                &self.pool,
+                                db::scheduling::SubjectKind::Event,
+                                object.id,
+                            )
+                            .await
+                            .unwrap_or(None)
+                            .is_some()
+                            {
+                                db::scheduling::decline_copy(
+                                    &self.pool,
+                                    db::scheduling::SubjectKind::Event,
+                                    object.id,
+                                    creds.user.id,
+                                )
                                 .await
                                 .map_err(fs_err)?;
-                            // Same as the JSON delete: attendees get METHOD:CANCEL.
-                            db::scheduling::schedule_cancels(&self.pool, object.id).await;
+                            } else {
+                                db::delete_event(&self.pool, object.id, None)
+                                    .await
+                                    .map_err(fs_err)?;
+                                db::scheduling::dispatch_cancel(
+                                    &self.pool,
+                                    db::scheduling::SubjectKind::Event,
+                                    object.id,
+                                    creds.user.id,
+                                )
+                                .await
+                                .ok();
+                            }
                             // Webhook trigger, same as the JSON API path.
                             if let Ok(webhooks) = db::webhooks::matching_webhooks(
                                 &self.pool,
@@ -726,12 +753,39 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                         }
                         // Task deletes cascade to overrides and the subtask
                         // tree (one change_log row each); journal deletes are
-                        // flat. Webhook and scheduling dispatch for these
-                        // kinds land with stages 5/8.
+                        // flat. A delivered copy delete is a decline; the
+                        // organizer's delete cancels for everyone.
                         ObjectKind::Todo => {
-                            db::tasks::delete_task(&self.pool, object.id, None)
+                            if db::scheduling::origin_of(
+                                &self.pool,
+                                db::scheduling::SubjectKind::Task,
+                                object.id,
+                            )
+                            .await
+                            .unwrap_or(None)
+                            .is_some()
+                            {
+                                db::scheduling::decline_copy(
+                                    &self.pool,
+                                    db::scheduling::SubjectKind::Task,
+                                    object.id,
+                                    creds.user.id,
+                                )
                                 .await
                                 .map_err(fs_err)?;
+                            } else {
+                                db::tasks::delete_task(&self.pool, object.id, None)
+                                    .await
+                                    .map_err(fs_err)?;
+                                db::scheduling::dispatch_cancel(
+                                    &self.pool,
+                                    db::scheduling::SubjectKind::Task,
+                                    object.id,
+                                    creds.user.id,
+                                )
+                                .await
+                                .ok();
+                            }
                         }
                         ObjectKind::Journal => {
                             db::journals::delete_journal(&self.pool, object.id, None)
@@ -1025,6 +1079,62 @@ impl WriteFile {
             );
             return Err(FsError::Forbidden);
         }
+        // A PUT to a delivered copy applies only the attendee's own PARTSTAT;
+        // everything else is discarded (the organizer's next dispatch
+        // rebuilds the copy).
+        if let Some((existing, _)) = db::get_event_by_href(&self.pool, self.calendar.id, &self.name)
+            .await
+            .ok()
+            && let Some(origin_id) = db::scheduling::origin_of(
+                &self.pool,
+                db::scheduling::SubjectKind::Event,
+                existing.id,
+            )
+            .await
+            .unwrap_or(None)
+        {
+            if let Some(email) = db::scheduling::attendee_email_for_user(
+                &self.pool,
+                db::scheduling::SubjectKind::Event,
+                existing.id,
+                self.user.id,
+            )
+            .await
+            .unwrap_or(None)
+                && let Some(partstat) = masters[0]
+                    .attendees
+                    .iter()
+                    .find(|a| {
+                        a.email
+                            .as_deref()
+                            .is_some_and(|e| e.eq_ignore_ascii_case(&self.user.email))
+                    })
+                    .and_then(|a| a.partstat.clone())
+            {
+                db::scheduling::reply(
+                    &self.pool,
+                    db::scheduling::SubjectKind::Event,
+                    origin_id,
+                    &email,
+                    &partstat,
+                )
+                .await
+                .map_err(fs_err)?;
+            }
+            // The new etag makes the client refetch; the write is done.
+            let (row, _) = db::get_event(&self.pool, existing.id)
+                .await
+                .map_err(fs_err)?;
+            self.new_meta = Some(Meta {
+                len: 0,
+                modified: row.updated_at.into(),
+                created: row.created_at.into(),
+                etag: row.etag.trim_matches('"').to_string(),
+                dir: false,
+                calendar: false,
+            });
+            return Ok(());
+        }
         // The ReadWrite capability was already enforced at open() time.
         let master = upsert_for(&self.user, masters[0]);
         let overrides: Vec<_> = overrides
@@ -1055,8 +1165,16 @@ impl WriteFile {
                 _ => FsError::GeneralFailure,
             }
         })?;
-        // New scheduled events fan out invitations.
-        db::scheduling::schedule_requests(&self.pool, event.id).await;
+        // Scheduling dispatch (stage 8a): copies for internal attendees,
+        // REQUEST intents for external ones.
+        db::scheduling::dispatch(
+            &self.pool,
+            db::scheduling::SubjectKind::Event,
+            event.id,
+            self.user.id,
+        )
+        .await
+        .ok();
         // Webhook triggers, same as the JSON API path.
         let trigger = if matches!(
             self.precondition,
@@ -1095,6 +1213,64 @@ impl WriteFile {
         &mut self,
         series: crate::ParsedTodoSeries,
     ) -> std::result::Result<(), FsError> {
+        // A PUT to a delivered copy applies only the assignee's own PARTSTAT;
+        // everything else is discarded (the organizer's next dispatch
+        // rebuilds the copy).
+        if let Some((existing, _)) =
+            db::tasks::get_task_by_href(&self.pool, self.calendar.id, &self.name)
+                .await
+                .ok()
+            && let Some(origin_id) = db::scheduling::origin_of(
+                &self.pool,
+                db::scheduling::SubjectKind::Task,
+                existing.id,
+            )
+            .await
+            .unwrap_or(None)
+        {
+            if let Some(email) = db::scheduling::attendee_email_for_user(
+                &self.pool,
+                db::scheduling::SubjectKind::Task,
+                existing.id,
+                self.user.id,
+            )
+            .await
+            .unwrap_or(None)
+                && let Some(partstat) = series
+                    .master
+                    .attendees
+                    .iter()
+                    .find(|a| {
+                        a.email
+                            .as_deref()
+                            .is_some_and(|e| e.eq_ignore_ascii_case(&self.user.email))
+                    })
+                    .and_then(|a| a.partstat.clone())
+            {
+                db::scheduling::reply(
+                    &self.pool,
+                    db::scheduling::SubjectKind::Task,
+                    origin_id,
+                    &email,
+                    &partstat,
+                )
+                .await
+                .map_err(fs_err)?;
+            }
+            // The new etag makes the client refetch; the write is done.
+            let (row, _) = db::tasks::get_task(&self.pool, existing.id)
+                .await
+                .map_err(fs_err)?;
+            self.new_meta = Some(Meta {
+                len: 0,
+                modified: row.updated_at.into(),
+                created: row.created_at.into(),
+                etag: row.etag.trim_matches('"').to_string(),
+                dir: false,
+                calendar: false,
+            });
+            return Ok(());
+        }
         // Client-supplied VTIMEZONEs ride along to the calendar's zone table
         // (ADR-012) so custom-zone tasks expand like events do.
         if !series.timezones.is_empty() {
@@ -1209,6 +1385,16 @@ impl WriteFile {
         let (task, _) = db::tasks::get_task(&self.pool, master_id)
             .await
             .map_err(fs_err)?;
+        // Scheduling dispatch (stage 8c): copies for internal assignees,
+        // REQUEST intents for external ones.
+        db::scheduling::dispatch(
+            &self.pool,
+            db::scheduling::SubjectKind::Task,
+            master_id,
+            self.user.id,
+        )
+        .await
+        .ok();
         self.new_meta = Some(Meta {
             len: 0,
             modified: task.updated_at.into(),

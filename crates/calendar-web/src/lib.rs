@@ -123,6 +123,16 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "js/tasks.js",
+        asset!("js/tasks.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "js/journals.js",
+        asset!("js/journals.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "js/admin.js",
         asset!("js/admin.js"),
         "text/javascript; charset=utf-8",
@@ -274,6 +284,8 @@ macro_rules! nav_menu_gated {
           <li class="nav-item"><a class="nav-link" href="/"><span class="nav-link-icon me-1"><i class="bi bi-calendar3"></i></span><span class="nav-link-title">Calendar</span></a></li>
           <li class="nav-item"><a class="nav-link" href="/categories"><span class="nav-link-icon me-1"><i class="bi bi-tags"></i></span><span class="nav-link-title">Categories</span></a></li>
           <li class="nav-item"><a class="nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="/tasks"><span class="nav-link-icon me-1"><i class="bi bi-check2-square"></i></span><span class="nav-link-title">Tasks</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="/journals"><span class="nav-link-icon me-1"><i class="bi bi-journal-text"></i></span><span class="nav-link-title">Journals</span></a></li>
           <li class="nav-item"><a class="nav-link" id="rules-link" href="/rules" hidden><span class="nav-link-icon me-1"><i class="bi bi-sliders"></i></span><span class="nav-link-title">Rules</span></a></li>
           <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers" hidden><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
           <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials" hidden><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
@@ -297,6 +309,8 @@ macro_rules! nav_menu_open {
           <li class="nav-item"><a class="nav-link" href="/"><span class="nav-link-icon me-1"><i class="bi bi-calendar3"></i></span><span class="nav-link-title">Calendar</span></a></li>
           <li class="nav-item"><a class="nav-link" href="/categories"><span class="nav-link-icon me-1"><i class="bi bi-tags"></i></span><span class="nav-link-title">Categories</span></a></li>
           <li class="nav-item"><a class="nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="/tasks"><span class="nav-link-icon me-1"><i class="bi bi-check2-square"></i></span><span class="nav-link-title">Tasks</span></a></li>
+          <li class="nav-item"><a class="nav-link" href="/journals"><span class="nav-link-icon me-1"><i class="bi bi-journal-text"></i></span><span class="nav-link-title">Journals</span></a></li>
           <li class="nav-item"><a class="nav-link" id="rules-link" href="/rules"><span class="nav-link-icon me-1"><i class="bi bi-sliders"></i></span><span class="nav-link-title">Rules</span></a></li>
           <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers"><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
           <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials"><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
@@ -1187,6 +1201,168 @@ const CREDENTIALS_PAGE: &str = concat!(
     r#"</body></html>"#
 );
 
+const TASKS_PAGE: &str = concat!(
+    r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CalStack — Tasks</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+<script src="/assets/js/theme.js"></script>
+</head>
+<body class="bg-body-tertiary">
+"#,
+    subpage_header!(),
+    nav_menu_open!(),
+    r#"<div class="container p-3">
+  <div class="d-flex align-items-center gap-2 mb-2">
+    <h1 class="h4 mb-0">Tasks</h1>
+    <select class="form-select form-select-sm w-auto" id="task-calendar-select"></select>
+  </div>
+  <div class="row g-2 mb-3">
+    <div class="col-auto">
+      <select class="form-select form-select-sm" id="task-status-filter" aria-label="Filter by status">
+        <option value="">All</option>
+        <option value="open">Open</option>
+        <option value="done">Completed</option>
+      </select></div>
+    <div class="col-auto flex-grow-1">
+      <input class="form-control form-control-sm" id="task-search" placeholder="Search tasks" aria-label="Search tasks"></div>
+  </div>
+  <form id="task-quick-add" class="input-group input-group-sm mb-3">
+    <input class="form-control" id="task-quick-summary" placeholder="Quick add a task…" aria-label="New task summary">
+    <button class="btn btn-primary" type="submit">Add</button>
+  </form>
+  <p id="task-empty" class="text-body-secondary" hidden></p>
+  <ul id="task-list" class="list-group"></ul>
+</div>
+<div class="modal fade" id="task-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog"><form id="task-form" class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5" id="task-modal-title">Edit task</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <div class="mb-3"><label class="form-label" for="tk-summary">Summary</label>
+        <input class="form-control" id="tk-summary" required></div>
+      <div class="mb-3"><label class="form-label" for="tk-desc">Description</label>
+        <textarea class="form-control" id="tk-desc" rows="4"></textarea></div>
+      <div class="row mb-3">
+        <div class="col"><span class="form-label d-block">Due</span>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="tk-all-day">
+            <label class="form-check-label" for="tk-all-day">All day</label>
+          </div>
+          <input class="form-control" id="tk-due-date" type="date" hidden>
+          <input class="form-control" id="tk-due-at" type="datetime-local" hidden></div>
+        <div class="col"><label class="form-label" for="tk-priority">Priority (0–9)</label>
+          <input class="form-control" id="tk-priority" type="number" min="0" max="9"></div>
+      </div>
+      <div class="row mb-3">
+        <div class="col"><label class="form-label" for="tk-status">Status</label>
+          <select class="form-select" id="tk-status">
+            <option value="">(none)</option>
+            <option value="NEEDS-ACTION">Needs action</option>
+            <option value="IN-PROCESS">In process</option>
+            <option value="COMPLETED">Completed</option>
+            <option value="CANCELLED">Cancelled</option>
+          </select></div>
+        <div class="col"><label class="form-label" for="tk-percent">Percent complete</label>
+          <input class="form-control" id="tk-percent" type="number" min="0" max="100"></div>
+      </div>
+      <div class="mb-3"><label class="form-label" for="tk-categories">Categories (comma-separated)</label>
+        <input class="form-control" id="tk-categories"></div>
+      <div class="mb-3"><label class="form-label" for="tk-parent-uid">Parent UID (subtask of)</label>
+        <input class="form-control" id="tk-parent-uid" placeholder="UID of the parent task"></div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-danger me-auto" id="tk-delete" hidden>Delete</button>
+      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
+      <button class="btn btn-primary" type="submit">Save</button>
+    </div>
+  </form></div>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/dialogs.js"></script>
+<script src="/assets/js/tasks.js"></script>
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
+
+const JOURNALS_PAGE: &str = concat!(
+    r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CalStack — Journals</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+<script src="/assets/js/theme.js"></script>
+</head>
+<body class="bg-body-tertiary">
+"#,
+    subpage_header!(),
+    nav_menu_open!(),
+    r#"<div class="container p-3">
+  <div class="d-flex align-items-center gap-2 mb-2">
+    <h1 class="h4 mb-0">Journals</h1>
+    <select class="form-select form-select-sm w-auto" id="journal-calendar-select"></select>
+    <input class="form-control form-control-sm w-auto ms-auto" id="journal-search" placeholder="Search" aria-label="Search journals">
+    <button class="btn btn-primary btn-sm" type="button" id="journal-new-btn">New journal</button>
+  </div>
+  <p id="journal-empty" class="text-body-secondary" hidden></p>
+  <ul id="journal-list" class="list-group"></ul>
+</div>
+<div class="modal fade" id="journal-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog"><form id="journal-form" class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5" id="journal-modal-title">Edit journal</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <div class="mb-3"><label class="form-label" for="jv-summary">Summary</label>
+        <input class="form-control" id="jv-summary" required></div>
+      <div class="mb-3"><label class="form-label" for="jv-desc">Notes</label>
+        <textarea class="form-control" id="jv-desc" rows="8"></textarea></div>
+      <div class="row mb-3">
+        <div class="col"><label class="form-label" for="jv-date">Date (optional)</label>
+          <input class="form-control" id="jv-date" type="date"></div>
+        <div class="col"><label class="form-label" for="jv-status">Status</label>
+          <select class="form-select" id="jv-status">
+            <option value="">(none)</option>
+            <option value="DRAFT">Draft</option>
+            <option value="FINAL">Final</option>
+            <option value="CANCELLED">Cancelled</option>
+          </select></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-danger me-auto" id="jv-delete" hidden>Delete</button>
+      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
+      <button class="btn btn-primary" type="submit">Save</button>
+    </div>
+  </form></div>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/dialogs.js"></script>
+<script src="/assets/js/journals.js"></script>
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
+
 const SWAGGER_PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -1231,6 +1407,28 @@ async fn credentials_page() -> impl IntoResponse {
     )
 }
 
+async fn tasks_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        TASKS_PAGE,
+    )
+}
+
+async fn journals_page() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        JOURNALS_PAGE,
+    )
+}
+
 async fn index() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -1263,6 +1461,8 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
         .route("/admin", axum::routing::get(admin_page))
         .route("/providers", axum::routing::get(providers_page))
         .route("/credentials", axum::routing::get(credentials_page))
+        .route("/tasks", axum::routing::get(tasks_page))
+        .route("/journals", axum::routing::get(journals_page))
         .route("/docs", axum::routing::get(swagger_page))
         .route("/assets/{*path}", axum::routing::get(assets))
         // Service workers must be served at their intended scope root.

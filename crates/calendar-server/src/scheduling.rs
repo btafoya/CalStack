@@ -19,7 +19,7 @@ use axum::{
 };
 use base64::Engine;
 use calendar_auth::Crypto;
-use calendar_db::{self as db};
+use calendar_db::{self as db, scheduling::SubjectKind};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -39,6 +39,25 @@ pub(crate) fn itip_body(
         // ponytail: iTIP bodies for custom-tzid events stay zone-less; the
         // attendee's client falls back to the tzdb name. Thread stored
         // zones through here when zone-accurate iMIP bodies matter.
+        vtimezones: vec![],
+    }])
+    .replacen(
+        "BEGIN:VCALENDAR",
+        &format!("BEGIN:VCALENDAR\r\nMETHOD:{method}"),
+        1,
+    )
+}
+
+/// The task-side twin of `itip_body`: METHOD:REQUEST/CANCEL VTODO bodies.
+pub(crate) fn itip_todo_body(
+    task: &db::tasks::TaskRow,
+    attendees: &[db::tasks::TaskAttendeeRow],
+    method: &str,
+) -> String {
+    calendar_caldav::todos_to_ics(&[calendar_caldav::TaskExportRow {
+        task: task.clone(),
+        attendees: attendees.to_vec(),
+        alarms: vec![],
         vtimezones: vec![],
     }])
     .replacen(
@@ -145,13 +164,19 @@ pub(crate) async fn postmark_inbound(
             message_id.clone()
         };
         for parsed in &events {
-            let Some(event) = find_event_by_uid(&pool, &parsed.uid).await else {
+            let Some((kind, subject_id)) = find_subject_by_uid(&pool, &parsed.uid).await else {
                 continue;
             };
             let method = inbound_method(parsed.method.as_deref());
-            let recorded =
-                db::scheduling::record_inbound(&pool, event.id, &from, &method, &message_id)
-                    .await?;
+            let recorded = db::scheduling::record_inbound(
+                &pool,
+                kind,
+                subject_id,
+                &from,
+                &method,
+                &message_id,
+            )
+            .await?;
             if recorded.is_none() {
                 continue; // duplicate delivery
             }
@@ -163,15 +188,16 @@ pub(crate) async fn postmark_inbound(
                             .is_some_and(|e| e.eq_ignore_ascii_case(&from))
                     }) && let Some(partstat) = &attendee.partstat
                     {
-                        db::scheduling::update_partstat(&pool, event.id, &from, partstat).await?;
+                        db::scheduling::reply(&pool, kind, subject_id, &from, partstat).await?;
                     }
                 }
                 "CANCEL" => {
-                    // Organizer cancelled: mark the event, leave partstat alone.
-                    sqlx::query(
-                        "UPDATE events SET status = 'CANCELLED', updated_at = now() WHERE id = $1",
-                    )
-                    .bind(event.id)
+                    // Organizer cancelled: mark the subject, leave partstat alone.
+                    let table = kind.table();
+                    sqlx::query(&format!(
+                        "UPDATE {table} SET status = 'CANCELLED', updated_at = now() WHERE id = $1"
+                    ))
+                    .bind(subject_id)
                     .execute(&pool)
                     .await
                     .map_err(db::DbError::from)?;
@@ -184,43 +210,97 @@ pub(crate) async fn postmark_inbound(
     Ok((StatusCode::OK, Json(json!({"ok": true}))).into_response())
 }
 
-async fn find_event_by_uid(pool: &sqlx::PgPool, uid: &str) -> Option<db::EventRow> {
-    sqlx::query_as::<_, db::EventRow>(
-        "SELECT * FROM events WHERE uid = $1 AND deleted_at IS NULL LIMIT 1",
+/// The origin row for a UID, in events first, then tasks (stage 8c: inbound
+/// replies find assigned tasks too). Copies never match (R7).
+async fn find_subject_by_uid(pool: &sqlx::PgPool, uid: &str) -> Option<(SubjectKind, Uuid)> {
+    let event: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM events WHERE uid = $1 AND deleted_at IS NULL AND origin_id IS NULL LIMIT 1",
     )
     .bind(uid)
     .fetch_optional(pool)
     .await
     .ok()
-    .flatten()
+    .flatten();
+    if let Some(id) = event {
+        return Some((SubjectKind::Event, id));
+    }
+    let task: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM tasks WHERE uid = $1 AND deleted_at IS NULL AND origin_id IS NULL LIMIT 1",
+    )
+    .bind(uid)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    task.map(|id| (SubjectKind::Task, id))
 }
 
-/// Sends every pending outbound iTIP message through the event tenant's
-/// email provider (Postmark preferred, then SMTP). Idempotent: messages move
-/// to `sent` exactly once.
+/// Sends every pending outbound iTIP message through the subject tenant's
+/// email provider (Postmark preferred, then SMTP). Renders per kind: events
+/// via VEVENT bodies, tasks via VTODO bodies. Idempotent: messages move to
+/// `sent` exactly once.
 pub(crate) async fn send_pending(pool: &sqlx::PgPool, crypto: Option<&Crypto>) {
     let Ok(pending) = db::scheduling::pending_outbound(pool).await else {
         return;
     };
     for message in pending {
-        let Ok((event, _)) = db::get_event(pool, message.event_id).await else {
-            db::scheduling::mark_message_status(pool, message.id, "failed", Some("event gone"))
-                .await
-                .ok();
-            continue;
-        };
-        let tenant_id = match db::get_calendar(pool, event.calendar_id).await {
-            Ok(cal) => Some(cal.tenant_id),
-            Err(_) => None,
+        let (kind, subject_id) = message.subject();
+        // Load the subject row and render per kind; a gone subject fails the
+        // message instead of looping forever.
+        let (summary, body, tenant_id) = match kind {
+            SubjectKind::Event => match db::get_event(pool, subject_id).await {
+                Ok((event, _)) => {
+                    let tenant_id = db::get_calendar(pool, event.calendar_id)
+                        .await
+                        .ok()
+                        .map(|cal| cal.tenant_id);
+                    let attendees = db::list_attendees(pool, event.id).await.unwrap_or_default();
+                    let location = db::location_for_event(pool, &event).await;
+                    let body = itip_body(&event, &attendees, location, &message.method);
+                    (event.summary, body, tenant_id)
+                }
+                Err(_) => {
+                    db::scheduling::mark_message_status(
+                        pool,
+                        message.id,
+                        "failed",
+                        Some("subject gone"),
+                    )
+                    .await
+                    .ok();
+                    continue;
+                }
+            },
+            SubjectKind::Task => match db::tasks::get_task(pool, subject_id).await {
+                Ok((task, _)) => {
+                    let tenant_id = db::get_calendar(pool, task.calendar_id)
+                        .await
+                        .ok()
+                        .map(|cal| cal.tenant_id);
+                    let attendees = db::tasks::list_task_attendees(pool, task.id)
+                        .await
+                        .unwrap_or_default();
+                    let body = itip_todo_body(&task, &attendees, &message.method);
+                    (task.summary, body, tenant_id)
+                }
+                Err(_) => {
+                    db::scheduling::mark_message_status(
+                        pool,
+                        message.id,
+                        "failed",
+                        Some("subject gone"),
+                    )
+                    .await
+                    .ok();
+                    continue;
+                }
+            },
         };
         let Some(provider) = load_email_provider(pool, tenant_id, crypto).await else {
             break; // no provider configured: leave messages pending
         };
-        let attendees = db::list_attendees(pool, event.id).await.unwrap_or_default();
-        let location = db::location_for_event(pool, &event).await;
-        let body = itip_body(&event, &attendees, location, &message.method);
         match provider
-            .send(&message.attendee_email, &event.summary, &body)
+            .send(&message.attendee_email, &summary, &body)
             .await
         {
             Ok(()) => {

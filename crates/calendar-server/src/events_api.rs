@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use calendar_db::{self as db};
+use calendar_db::{self as db, scheduling::SubjectKind};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -259,9 +259,9 @@ async fn create_event(
     let attendees = body.attendees.clone().unwrap_or_default();
     let (event, etag) =
         db::create_event(&pool, calendar_id, auth.user.id, &attendees, &data).await?;
-    if !attendees.is_empty() {
-        db::scheduling::schedule_requests(&pool, event.id).await;
-    }
+    // Scheduling dispatch (stage 8a): copies for internal attendees, REQUEST
+    // intents for external ones.
+    db::scheduling::dispatch(&pool, SubjectKind::Event, event.id, auth.user.id).await?;
     if let Ok(cal) = db::get_calendar(&pool, calendar_id).await {
         crate::rules_api::run_rules(
             &pool,
@@ -374,6 +374,43 @@ async fn patch_event(
         calendar_core::CalendarCapability::ReadWrite,
     )
     .await?;
+    // A delivered copy accepts only the attendee's own PARTSTAT; everything
+    // else is discarded (the organizer's next dispatch rebuilds the copy).
+    if let Some(origin_id) = db::scheduling::origin_of(&pool, SubjectKind::Event, event_id).await? {
+        let email = db::scheduling::attendee_email_for_user(
+            &pool,
+            SubjectKind::Event,
+            event_id,
+            auth.user.id,
+        )
+        .await?
+        .ok_or(AppError::Forbidden)?;
+        let partstat = body
+            .attendees
+            .unwrap_or_default()
+            .into_iter()
+            .find(|a| {
+                a.user_id == Some(auth.user.id)
+                    || a.email
+                        .as_deref()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(&auth.user.email))
+            })
+            .and_then(|a| a.partstat)
+            .ok_or_else(|| {
+                AppError::BadRequest("a delivered copy accepts only your own PARTSTAT".into())
+            })?;
+        db::scheduling::reply(&pool, SubjectKind::Event, origin_id, &email, &partstat).await?;
+        let (event, etag) = db::get_event(&pool, event_id).await?;
+        let rows = db::list_attendees(&pool, event.id).await?;
+        let registry = db::categories::registry_for_calendar(&pool, event.calendar_id).await?;
+        return Ok(Json(event_view(
+            &event,
+            &etag,
+            &rows,
+            db::location_for_event(&pool, &event).await.as_ref(),
+            &registry,
+        )));
+    }
     let location_id = match body.location.take() {
         Some(loc_body) => Some(create_location_from_body(&pool, loc_body).await?.id),
         None => None,
@@ -398,6 +435,8 @@ async fn patch_event(
         attendees: body.attendees,
     };
     let (event, etag) = db::update_event(&pool, event_id, if_match.0.as_deref(), &patch).await?;
+    // Scheduling dispatch: copies rebuilt, updated REQUESTs / removal CANCELs.
+    db::scheduling::dispatch(&pool, SubjectKind::Event, event.id, auth.user.id).await?;
     // Fire-and-forget: rules must never break the mutation (same as create).
     if let Ok(cal) = db::get_calendar(&pool, existing.calendar_id).await {
         crate::rules_api::run_rules(
@@ -424,6 +463,32 @@ async fn patch_event(
     )))
 }
 
+#[derive(serde::Deserialize)]
+struct SelfPartstatBody {
+    partstat: String,
+}
+
+/// RSVP endpoint for a signed-in attendee (stage 8a): resolves the caller's
+/// attendee identity on the origin (by attendee user_id or their account
+/// email — a delivered copy carries the same rows) and records the reply so
+/// it reaches the organizer's clients via sync.
+async fn patch_own_partstat(
+    State(AppState { pool, .. }): State<AppState>,
+    headers: HeaderMap,
+    Path(event_id): Path<Uuid>,
+    Json(body): Json<SelfPartstatBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    require_csrf(&auth, &headers)?;
+    let (_, _) = db::get_event(&pool, event_id).await?;
+    let email =
+        db::scheduling::attendee_email_for_user(&pool, SubjectKind::Event, event_id, auth.user.id)
+            .await?
+            .ok_or(AppError::Forbidden)?;
+    db::scheduling::reply(&pool, SubjectKind::Event, event_id, &email, &body.partstat).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 async fn delete_event(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -440,9 +505,19 @@ async fn delete_event(
         calendar_core::CalendarCapability::ReadWrite,
     )
     .await?;
+    // Deleting a delivered copy is a decline: DECLINED on the origin, copy
+    // soft-deleted. Deleting the organizer's row cancels for everyone.
+    if db::scheduling::origin_of(&pool, SubjectKind::Event, event_id)
+        .await?
+        .is_some()
+    {
+        db::scheduling::decline_copy(&pool, SubjectKind::Event, event_id, auth.user.id).await?;
+        return Ok(Json(serde_json::json!({"ok": true})));
+    }
     db::delete_event(&pool, event_id, if_match.0.as_deref()).await?;
-    // Cancelled meeting: queue METHOD:CANCEL iMIP messages for every attendee.
-    db::scheduling::schedule_cancels(&pool, existing.id).await;
+    // Cancelled meeting: METHOD:CANCEL to external attendees, copies to
+    // STATUS:CANCELLED with an in-app notice.
+    db::scheduling::dispatch_cancel(&pool, SubjectKind::Event, existing.id, auth.user.id).await?;
     // Fire-and-forget with the pre-change event as context; the row is gone
     // by now, so "existing" is all the delete rule ever sees.
     if let Ok(cal) = db::get_calendar(&pool, existing.calendar_id).await {
@@ -463,7 +538,6 @@ async fn delete_event(
 
 /// If-Match header extractor; None when absent.
 struct IfMatch(Option<String>);
-
 impl axum::extract::FromRequestParts<AppState> for IfMatch {
     type Rejection = std::convert::Infallible;
 
@@ -775,5 +849,9 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route(
             "/api/events/{id}",
             get(get_event).patch(patch_event).delete(delete_event),
+        )
+        .route(
+            "/api/events/{id}/attendees/self",
+            axum::routing::patch(patch_own_partstat),
         )
 }

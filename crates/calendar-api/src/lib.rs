@@ -436,6 +436,15 @@ pub fn openapi_document() -> serde_json::Value {
         }}),
     );
     put(
+        "/api/events/{id}/attendees/self",
+        json!({"patch": {"summary": "Update the caller's own RSVP on an event they attend",
+            "parameters": [param("id", true)],
+            "requestBody": {"required": true, "content": {"application/json": {"schema": {
+                "type": "object", "required": ["partstat"],
+                "properties": {"partstat": {"type": "string", "enum": ["NEEDS-ACTION", "ACCEPTED", "DECLINED", "TENTATIVE"]}}}}}},
+            "responses": {"200": {"description": "rsvp recorded"}, "403": {"description": "caller is not an attendee"}}}}),
+    );
+    put(
         "/api/notifications",
         json!({"get": {
             "summary": "In-app notifications", "responses": {"200": {"description": "list"}}
