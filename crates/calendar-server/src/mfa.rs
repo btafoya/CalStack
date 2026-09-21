@@ -21,6 +21,35 @@ use webauthn_rs::prelude::{
 
 // ============ TOTP ============
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct TotpSetupView {
+    otpauth_url: String,
+    secret_base32: String,
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct TotpCodeBody {
+    code: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct RecoveryCodesView {
+    /// Eight one-time codes, shown exactly once; stored hashed.
+    recovery_codes: Vec<String>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct TotpStatusView {
+    enabled: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/totp/setup",
+    responses(
+        (status = 201, description = "unconfirmed secret + otpauth URL", body = TotpSetupView),
+    )
+)]
 async fn totp_setup(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -35,10 +64,22 @@ async fn totp_setup(
     db::auth_ext::upsert_totp_secret(&pool, auth.user.id, &encrypted).await?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({"otpauth_url": totp.otpauth_url, "secret_base32": totp.base32_secret})),
+        Json(TotpSetupView {
+            otpauth_url: totp.otpauth_url,
+            secret_base32: totp.base32_secret,
+        }),
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/totp/verify",
+    request_body = TotpCodeBody,
+    responses(
+        (status = 200, description = "recovery codes", body = RecoveryCodesView),
+        (status = 401, description = "bad code"),
+    )
+)]
 async fn totp_verify(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -65,20 +106,34 @@ async fn totp_verify(
         .map(|c| calendar_auth::crypto::recovery_code_hash(c))
         .collect();
     db::auth_ext::confirm_totp(&pool, auth.user.id, &hashes).await?;
-    Ok(Json(json!({"recovery_codes": codes})))
+    Ok(Json(RecoveryCodesView {
+        recovery_codes: codes,
+    }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/totp",
+    responses(
+        (status = 200, description = "status", body = TotpStatusView),
+    )
+)]
 async fn totp_status(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     let row = db::auth_ext::get_totp_secret(&pool, auth.user.id).await?;
-    Ok(Json(json!({
-        "enabled": row.is_some_and(|r| r.confirmed_at.is_some()),
-    })))
+    Ok(Json(TotpStatusView {
+        enabled: row.is_some_and(|r| r.confirmed_at.is_some()),
+    }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/auth/totp",
+    responses((status = 200, description = "disabled", body = crate::OkView))
+)]
 async fn totp_disable(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -90,6 +145,46 @@ async fn totp_disable(
 }
 
 // ============ WebAuthn passkeys ============
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct PasskeyChallengeView {
+    challenge_id: Uuid,
+    /// Opaque WebAuthn ceremony challenge; hand it to the authenticator as-is.
+    #[schema(value_type = Object)]
+    challenge: serde_json::Value,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct PasskeyRegisteredView {
+    id: Uuid,
+    name: Option<String>,
+}
+
+/// Narrower than auth::UserView on purpose: the passkey-login response has
+/// always omitted the notify_* flags (shape preserved, see
+/// IMPLEMENTATION_PLAN.md's compatibility constraint).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct PasskeyUserView {
+    id: Uuid,
+    username: String,
+    email: String,
+    display_name: Option<String>,
+    is_admin: bool,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct PasskeySessionView {
+    csrf_token: String,
+    user: PasskeyUserView,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct PasskeyView {
+    id: Uuid,
+    name: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+    last_used_at: Option<chrono::DateTime<Utc>>,
+}
 
 /// Pending ceremony state, in-memory on purpose: challenges are single-use,
 /// 10-minute TTL, and a process restart just means the user retries.
@@ -134,29 +229,33 @@ impl PasskeyStore {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct TotpCodeBody {
-    code: String,
-}
-
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct RegisterFinishBody {
     challenge_id: Uuid,
     name: Option<String>,
+    #[schema(value_type = Object)]
     credential: RegisterPublicKeyCredential,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct LoginStartBody {
     username_or_email: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct LoginFinishBody {
     challenge_id: Uuid,
+    #[schema(value_type = Object)]
     credential: PublicKeyCredential,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/webauthn/register/start",
+    responses(
+        (status = 201, description = "ceremony challenge", body = PasskeyChallengeView),
+    )
+)]
 async fn passkey_register_start(
     State(AppState { pool, passkeys, .. }): State<AppState>,
     headers: HeaderMap,
@@ -182,10 +281,22 @@ async fn passkey_register_start(
     let id = store.insert(Ceremony::Register(state));
     Ok((
         StatusCode::CREATED,
-        Json(json!({"challenge_id": id, "challenge": ccr})),
+        Json(PasskeyChallengeView {
+            challenge_id: id,
+            challenge: serde_json::to_value(&ccr).map_err(|e| AppError::internal(e.to_string()))?,
+        }),
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/webauthn/register/finish",
+    request_body = RegisterFinishBody,
+    responses(
+        (status = 200, description = "passkey stored", body = PasskeyRegisteredView),
+        (status = 400, description = "bad or expired challenge"),
+    )
+)]
 async fn passkey_register_finish(
     State(AppState { pool, passkeys, .. }): State<AppState>,
     headers: HeaderMap,
@@ -214,9 +325,20 @@ async fn passkey_register_finish(
         body.name.as_deref(),
     )
     .await?;
-    Ok(Json(json!({"id": row.id, "name": row.name})))
+    Ok(Json(PasskeyRegisteredView {
+        id: row.id,
+        name: row.name,
+    }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/webauthn/login/start",
+    request_body = LoginStartBody,
+    responses(
+        (status = 200, description = "ceremony challenge (unknown users get an unusable one)", body = PasskeyChallengeView),
+    )
+)]
 async fn passkey_login_start(
     State(AppState { pool, passkeys, .. }): State<AppState>,
     Json(body): Json<LoginStartBody>,
@@ -250,9 +372,22 @@ async fn passkey_login_start(
         state,
         stored: passkeys_stored,
     });
-    Ok(Json(json!({"challenge_id": id, "challenge": rcr})))
+    Ok(Json(PasskeyChallengeView {
+        challenge_id: id,
+        challenge: serde_json::to_value(&rcr).map_err(|e| AppError::internal(e.to_string()))?,
+    }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/webauthn/login/finish",
+    request_body = LoginFinishBody,
+    responses(
+        (status = 200, description = "session established (cookie set)", body = PasskeySessionView),
+        (status = 400, description = "bad or expired challenge"),
+        (status = 401, description = "unauthorized"),
+    )
+)]
 async fn passkey_login_finish(
     State(AppState {
         pool,
@@ -315,24 +450,52 @@ async fn passkey_login_finish(
         None,
     )
     .await;
-    let mut response =
-        Json(json!({"csrf_token": csrf, "user": user_view_json(&user)})).into_response();
+    let mut response = Json(PasskeySessionView {
+        csrf_token: csrf,
+        user: PasskeyUserView {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            display_name: user.display_name,
+            is_admin: user.is_admin,
+        },
+    })
+    .into_response();
     set_session_cookie(&mut response, &secret);
     Ok(response)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/webauthn",
+    responses(
+        (status = 200, description = "list", body = Vec<PasskeyView>),
+    )
+)]
 async fn list_passkeys(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     let rows = db::auth_ext::list_webauthn_credentials(&pool, auth.user.id).await?;
-    Ok(Json(json!(rows
-        .iter()
-        .map(|r| json!({"id": r.id, "name": r.name, "created_at": r.created_at, "last_used_at": r.last_used_at}))
-        .collect::<Vec<_>>())))
+    Ok(Json(
+        rows.iter()
+            .map(|r| PasskeyView {
+                id: r.id,
+                name: r.name.clone(),
+                created_at: r.created_at,
+                last_used_at: r.last_used_at,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/auth/webauthn/{id}",
+    params(("id" = Uuid, Path, description = "passkey id")),
+    responses((status = 200, description = "removed", body = crate::OkView))
+)]
 async fn delete_passkey(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -341,18 +504,40 @@ async fn delete_passkey(
     let auth = resolve_auth(&pool, &headers).await?;
     require_session_mutation(&auth, &headers)?;
     db::auth_ext::delete_webauthn_credential(&pool, auth.user.id, credential_id).await?;
-    Ok(Json(json!({"ok": true})))
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
-fn user_view_json(user: &db::UserRow) -> serde_json::Value {
-    json!({
-        "id": user.id,
-        "username": user.username,
-        "email": user.email,
-        "display_name": user.display_name,
-        "is_admin": user.is_admin,
-    })
-}
+/// OpenAPI for the MFA module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        totp_setup,
+        totp_verify,
+        totp_status,
+        totp_disable,
+        passkey_register_start,
+        passkey_register_finish,
+        passkey_login_start,
+        passkey_login_finish,
+        list_passkeys,
+        delete_passkey,
+    ),
+    components(schemas(
+        TotpSetupView,
+        TotpCodeBody,
+        RecoveryCodesView,
+        TotpStatusView,
+        PasskeyChallengeView,
+        PasskeyRegisteredView,
+        PasskeyUserView,
+        PasskeySessionView,
+        PasskeyView,
+        RegisterFinishBody,
+        LoginStartBody,
+        LoginFinishBody,
+    ))
+)]
+pub(crate) struct MfaApi;
 
 pub fn router() -> axum::Router<crate::AppState> {
     axum::Router::new()

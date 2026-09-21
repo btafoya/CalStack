@@ -43,11 +43,20 @@ use utoipa::OpenApi;
 #[openapi(info(title = "CalStack API"))]
 struct ApiDoc;
 
+/// The `{"ok": true}` acknowledgement shared by several endpoints.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct OkView {
+    pub(crate) ok: bool,
+}
+
 /// The served document: generated paths win, the legacy hand-built fragment
 /// (`calendar_api::openapi_document`) fills only the gaps. The fragment is
 /// deleted once the last module is annotated.
 fn openapi_json() -> serde_json::Value {
-    let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("generated OpenAPI serializes");
+    let mut doc = ApiDoc::openapi();
+    doc.merge(auth::AuthApi::openapi());
+    doc.merge(mfa::MfaApi::openapi());
+    let mut doc = serde_json::to_value(doc).expect("generated OpenAPI serializes");
     let legacy = calendar_api::openapi_document();
 
     if doc.get("paths").is_none_or(|p| !p.is_object()) {
@@ -458,5 +467,38 @@ mod tests {
         assert!(doc["components"]["securitySchemes"]["sessionCookie"].is_object());
         assert!(doc["components"]["securitySchemes"]["bearerToken"].is_object());
         assert!(doc["security"].is_array());
+        // Auth routes are utoipa-generated since stage 2; the legacy fragment
+        // no longer lists them. Pin them so losing the annotation
+        // registration fails here, not in a codegen consumer.
+        for (path, method) in [
+            ("/api/auth/register", "post"),
+            ("/api/auth/login", "post"),
+            ("/api/auth/logout", "post"),
+            ("/api/auth/me", "get"),
+            ("/api/auth/password", "post"),
+            ("/api/auth/notify-prefs", "post"),
+            ("/api/auth/tokens", "post"),
+            ("/api/auth/tokens", "get"),
+            ("/api/auth/tokens/{id}", "delete"),
+            ("/api/auth/app-passwords", "post"),
+            ("/api/auth/app-passwords", "get"),
+            ("/api/auth/app-passwords/{id}", "delete"),
+            ("/api/auth/totp/setup", "post"),
+            ("/api/auth/totp/verify", "post"),
+            ("/api/auth/totp", "get"),
+            ("/api/auth/totp", "delete"),
+            ("/api/auth/webauthn/register/start", "post"),
+            ("/api/auth/webauthn/register/finish", "post"),
+            ("/api/auth/webauthn/login/start", "post"),
+            ("/api/auth/webauthn/login/finish", "post"),
+            ("/api/auth/webauthn", "get"),
+            ("/api/auth/webauthn/{id}", "delete"),
+        ] {
+            assert!(
+                doc["paths"][path][method].is_object(),
+                "{method} {path} missing from the generated document"
+            );
+        }
+        assert!(doc["components"]["schemas"]["UserView"].is_object());
     }
 }
