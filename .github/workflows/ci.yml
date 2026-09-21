@@ -40,8 +40,10 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/caldbtest
           CALENDAR_DB_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/caldbtest
-      # Full protocol suite against the same service container.
+      # Full protocol suite against the same service container. cargo test
+      # only builds the server bin in test mode (target/debug/deps), never as
+      # target/debug/calendar-server — link it for the suite to drive.
       - name: Interop suite
-        run: tests/interop/run.sh
+        run: cargo build --bin calendar-server && tests/interop/run.sh
         env:
           EXTERNAL_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/caltest
