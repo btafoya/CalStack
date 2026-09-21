@@ -4,7 +4,7 @@
 
 calendar-server
 - HTTP routing
-- OpenAPI
+- OpenAPI: the document at `/api/openapi.json` (rendered by a vendored Swagger UI at `/docs`, no CDN) is 100% generated with utoipa from `#[utoipa::path]` annotations on the handlers; each `*_api.rs` module owns an `#[derive(OpenApi)]` struct merged in `openapi_json()`. Annotating a new route is mandatory — the pinned path inventory in `main.rs`'s test and the interop suite's response validation (`tests/interop/validate_responses.py`) both fail when the document and the handlers disagree
 - CalDAV/WebDAV
 - authentication middleware
 - embedded web UI
@@ -38,10 +38,6 @@ calendar-caldav
 - dav-server-rs adapter
 - iCalendar parse/serialize
 - WebDAV sync/ETag/ACL integration
-
-calendar-api
-- OpenAPI models and handlers
-- the generated document is served at `/api/openapi.json`; a vendored Swagger UI renders it at `/docs` (no CDN)
 
 calendar-rules
 - triggers, conditions and actions

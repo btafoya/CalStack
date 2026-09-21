@@ -11,7 +11,7 @@ calendar-server/src/dav.rs          + entry_carddav() — second DavHandler over
 calendar-carddav/                   NEW crate: PgAddressBookFs (dav-server DavFileSystem),
                                     vCard parse/serialize, location parsing
 calendar-db/src/contacts.rs         NEW module: address_books + contacts CRUD, search, ctag
-calendar-api/                       OpenAPI additions
+calendar-api/                       OpenAPI additions (now: utoipa annotations on contacts_api.rs)
 calendar-web/                       /contacts page + contacts.js + event-editor autocomplete
 ```
 

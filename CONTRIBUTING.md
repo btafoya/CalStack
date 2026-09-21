@@ -49,10 +49,11 @@ make interop  # end-to-end protocol suite against a throwaway PostgreSQL
 
 ## Codebase conventions
 
-- **Workspace layout** — one crate per concern under `crates/`: `calendar-core` (domain), `calendar-db` (normalized store + migrations), `calendar-caldav`/`calendar-carddav` (protocol), `calendar-api`/`calendar-auth`/`calendar-notify`/`calendar-rules`, `calendar-server` (executable, routing, jobs), `calendar-web` (embedded UI).
+- **Workspace layout** — one crate per concern under `crates/`: `calendar-core` (domain), `calendar-db` (normalized store + migrations), `calendar-caldav`/`calendar-carddav` (protocol), `calendar-auth`/`calendar-notify`/`calendar-rules`, `calendar-server` (executable, routing, jobs, OpenAPI annotations), `calendar-web` (embedded UI).
 - **PostgreSQL is the canonical store** — data lives in normalized tables; iCalendar and vCard are wire formats, never the source of truth. Parse ICS only through `calendar-caldav::parse_ics` (the `icalendar` crate itself rejects folded lines).
 - **Migrations** — plain SQL under `migrations/` at the repo root. Never edit an applied migration; add a new one. `crates/calendar-db/build.rs` re-runs on `migrations/` changes — don't remove it.
 - **No new runtime dependencies** without strong justification. The architecture mandate is: one binary, one PostgreSQL, nothing else.
+- **OpenAPI is generated from the code** — every `/api` handler carries a `#[utoipa::path]` annotation and registers in its module's `#[derive(OpenApi)]` struct; response bodies get typed view structs. A new endpoint without annotations fails the pinned inventory test in `main.rs`, and live responses are validated against the generated schemas in `make interop`.
 - **Web UI** — Bootstrap 5.3 + jQuery 4, vendored assets only (no CDN, no build step). Every non-GET browser call goes through the shared `api()` helper so errors surface to the user.
 - **Security** — never log passwords, tokens, passkeys, OTP secrets, provider credentials, or attachment contents. Add auth/authorization tests for any new endpoint.
 - **Docs follow behavior** — if a change alters API surface, config, or protocol behavior, update `docs/` and the README in the same PR.

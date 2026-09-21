@@ -97,8 +97,8 @@ scope once — `WHERE tenant_id = $1 AND (calendar_id = $2 OR calendar_id IS NUL
 
 ### OpenAPI
 
-`calendar-api/src/lib.rs`: `/categories` paths + schemas; `category_details`
-added to the event schema.
+Categories carry utoipa annotations (`categories_api.rs`); the
+`category_details` nested view lives in `events_api::EventView`.
 
 ## Web UI
 

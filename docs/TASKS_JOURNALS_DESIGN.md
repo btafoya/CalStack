@@ -243,7 +243,7 @@ GET        /api/calendars/{id}/occurrences  + ?include=tasks,journals  (dated ma
 GET        /api/search                      + tasks[], journals[]
 ```
 
-Task view adds `subtasks_count`, `next_open` (recurring), `is_overdue`. `calendar-api` OpenAPI is hand-maintained; add `Task`, `Journal` schemas and the routes above plus `components` on `Calendar`. Attachments on tasks are out of scope (inline `ATTACH` round-trips through `extra_props`).
+Task view adds `subtasks_count`, `next_open` (recurring), `is_overdue`. The OpenAPI document is generated with utoipa from handler annotations; `tasks_api.rs`/`journals_api.rs` carry `#[utoipa::path]` annotations and their `TaskView`/`JournalView` response structs. Attachments on tasks are out of scope (inline `ATTACH` round-trips through `extra_props`).
 
 ## 8. Web UI
 
