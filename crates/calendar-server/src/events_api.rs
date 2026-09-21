@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct LocationBody {
     provider: Option<String>,
     provider_place_id: Option<String>,
@@ -28,10 +28,11 @@ struct LocationBody {
     longitude: Option<f64>,
     website: Option<String>,
     phone: Option<String>,
+    #[schema(value_type = Object)]
     provider_metadata: Option<serde_json::Value>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct EventBody {
     uid: Option<String>,
     summary: String,
@@ -45,13 +46,17 @@ struct EventBody {
     tzid: Option<String>,
     all_day: Option<bool>,
     rrule: Option<String>,
+    #[schema(value_type = Object)]
     rdate: Option<serde_json::Value>,
+    #[schema(value_type = Object)]
     exdate: Option<serde_json::Value>,
     status: Option<String>,
     priority: Option<i16>,
     class: Option<String>,
     transp: Option<String>,
     categories: Option<Vec<String>>,
+    /// Calendar-db's attendee write model; each entry needs an email or a telephone.
+    #[schema(value_type = Vec<Object>)]
     attendees: Option<Vec<db::NewAttendee>>,
     location: Option<LocationBody>,
     // exception support
@@ -87,23 +92,87 @@ async fn create_location_from_body(
         .map_err(Into::into)
 }
 
-fn location_view(loc: &db::LocationRow) -> serde_json::Value {
-    serde_json::json!({
-        "id": loc.id,
-        "provider": loc.provider,
-        "provider_place_id": loc.provider_place_id,
-        "display_name": loc.display_name,
-        "formatted_address": loc.formatted_address,
-        "street_address": loc.street_address,
-        "locality": loc.locality,
-        "administrative_area": loc.administrative_area,
-        "postal_code": loc.postal_code,
-        "country": loc.country,
-        "latitude": loc.latitude,
-        "longitude": loc.longitude,
-        "website": loc.website,
-        "phone": loc.phone,
-    })
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct LocationView {
+    id: Uuid,
+    provider: Option<String>,
+    provider_place_id: Option<String>,
+    display_name: Option<String>,
+    formatted_address: Option<String>,
+    street_address: Option<String>,
+    locality: Option<String>,
+    administrative_area: Option<String>,
+    postal_code: Option<String>,
+    country: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    website: Option<String>,
+    phone: Option<String>,
+}
+
+fn location_view(loc: &db::LocationRow) -> LocationView {
+    LocationView {
+        id: loc.id,
+        provider: loc.provider.clone(),
+        provider_place_id: loc.provider_place_id.clone(),
+        display_name: loc.display_name.clone(),
+        formatted_address: loc.formatted_address.clone(),
+        street_address: loc.street_address.clone(),
+        locality: loc.locality.clone(),
+        administrative_area: loc.administrative_area.clone(),
+        postal_code: loc.postal_code.clone(),
+        country: loc.country.clone(),
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        website: loc.website.clone(),
+        phone: loc.phone.clone(),
+    }
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct CategoryDetailView {
+    slug: String,
+    name: String,
+    color: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct EventView {
+    id: Uuid,
+    calendar_id: Uuid,
+    uid: String,
+    master_event_id: Option<Uuid>,
+    recurrence_id: Option<chrono::NaiveDateTime>,
+    recurrence_id_date: Option<chrono::NaiveDate>,
+    summary: String,
+    description_html: Option<String>,
+    description_text: Option<String>,
+    url: Option<String>,
+    starts_at: Option<DateTime<Utc>>,
+    ends_at: Option<DateTime<Utc>>,
+    start_date: Option<chrono::NaiveDate>,
+    end_date: Option<chrono::NaiveDate>,
+    tzid: Option<String>,
+    all_day: bool,
+    rrule: Option<String>,
+    #[schema(value_type = Object)]
+    rdate: serde_json::Value,
+    #[schema(value_type = Object)]
+    exdate: serde_json::Value,
+    status: Option<String>,
+    priority: Option<i16>,
+    class: Option<String>,
+    transp: Option<String>,
+    categories: Vec<String>,
+    category_details: Vec<CategoryDetailView>,
+    location_id: Option<Uuid>,
+    location: Option<LocationView>,
+    organizer_email: String,
+    sequence: i32,
+    etag: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    attendees: Vec<crate::AttendeeView>,
 }
 
 fn event_view(
@@ -112,50 +181,64 @@ fn event_view(
     attendees: &[db::AttendeeRow],
     location: Option<&db::LocationRow>,
     registry: &db::categories::CategoryRegistry,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": event.id,
-        "calendar_id": event.calendar_id,
-        "uid": event.uid,
-        "master_event_id": event.master_event_id,
-        "recurrence_id": event.recurrence_id,
-        "recurrence_id_date": event.recurrence_id_date,
-        "summary": event.summary,
-        "description_html": event.description_html,
-        "description_text": event.description_text,
-        "url": event.url,
-        "starts_at": event.starts_at,
-        "ends_at": event.ends_at,
-        "start_date": event.start_date,
-        "end_date": event.end_date,
-        "tzid": event.tzid,
-        "all_day": event.all_day,
-        "rrule": event.rrule,
-        "rdate": event.rdate,
-        "exdate": event.exdate,
-        "status": event.status,
-        "priority": event.priority,
-        "class": event.class,
-        "transp": event.transp,
-        "categories": event.categories,
-        "category_details": event.categories.iter().filter_map(|slug| {
-            registry.get(slug).map(|info| serde_json::json!({
-                "slug": slug, "name": info.name, "color": info.color,
-            }))
-        }).collect::<Vec<_>>(),
-        "location_id": event.location_id,
-        "location": location.map(location_view),
-        "organizer_email": event.organizer_email,
-        "sequence": event.sequence,
-        "etag": etag,
-        "created_at": event.created_at,
-        "updated_at": event.updated_at,
-        "attendees": attendees.iter().map(|a| serde_json::json!({
-            "email": a.email, "display_name": a.display_name, "telephone": a.telephone,
-            "role": a.role, "partstat": a.partstat, "rsvp": a.rsvp,
-            "contact_id": a.contact_id, "user_id": a.user_id,
-        })).collect::<Vec<_>>(),
-    })
+) -> EventView {
+    EventView {
+        id: event.id,
+        calendar_id: event.calendar_id,
+        uid: event.uid.clone(),
+        master_event_id: event.master_event_id,
+        recurrence_id: event.recurrence_id,
+        recurrence_id_date: event.recurrence_id_date,
+        summary: event.summary.clone(),
+        description_html: event.description_html.clone(),
+        description_text: event.description_text.clone(),
+        url: event.url.clone(),
+        starts_at: event.starts_at,
+        ends_at: event.ends_at,
+        start_date: event.start_date,
+        end_date: event.end_date,
+        tzid: event.tzid.clone(),
+        all_day: event.all_day,
+        rrule: event.rrule.clone(),
+        rdate: event.rdate.clone(),
+        exdate: event.exdate.clone(),
+        status: event.status.clone(),
+        priority: event.priority,
+        class: event.class.clone(),
+        transp: event.transp.clone(),
+        categories: event.categories.clone(),
+        category_details: event
+            .categories
+            .iter()
+            .filter_map(|slug| {
+                registry.get(slug).map(|info| CategoryDetailView {
+                    slug: slug.clone(),
+                    name: info.name.clone(),
+                    color: info.color.clone(),
+                })
+            })
+            .collect(),
+        location_id: event.location_id,
+        location: location.map(location_view),
+        organizer_email: event.organizer_email.clone(),
+        sequence: event.sequence,
+        etag: etag.to_string(),
+        created_at: event.created_at,
+        updated_at: event.updated_at,
+        attendees: attendees
+            .iter()
+            .map(|a| crate::AttendeeView {
+                email: a.email.clone(),
+                display_name: a.display_name.clone(),
+                telephone: a.telephone.clone(),
+                role: a.role.clone(),
+                partstat: a.partstat.clone(),
+                rsvp: a.rsvp,
+                contact_id: a.contact_id,
+                user_id: a.user_id,
+            })
+            .collect(),
+    }
 }
 
 /// Mirrors the events-table CHECK constraints; the full structural model lives
@@ -201,6 +284,36 @@ fn validate_event_body(body: &EventBody) -> Result<(), AppError> {
     Ok(())
 }
 
+/// One expanded occurrence: the (possibly exception) event plus its slot.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct OccurrenceView {
+    event: EventView,
+    occurrence: Option<OccurrencePoint>,
+    is_exception: bool,
+}
+
+/// `{"kind": "timed", "at": ...}` or `{"kind": "all_day", "date": "..."}`;
+/// the absent half is omitted from the payload (skip, not null).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct OccurrencePoint {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    date: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/calendars/{id}/events",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    request_body = EventBody,
+    responses(
+        (status = 201, description = "created (master or RECURRENCE-ID exception)", body = EventView),
+        (status = 400, description = "validation error"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn create_event(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -289,7 +402,7 @@ async fn create_event(
     ))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct RangeQuery {
     from: Option<chrono::DateTime<Utc>>,
     to: Option<chrono::DateTime<Utc>>,
@@ -299,6 +412,19 @@ struct RangeQuery {
     // ponytail: no pagination yet; per-calendar windows stay small.
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/calendars/{id}/events",
+    params(
+        ("id" = Uuid, Path, description = "calendar id"),
+        ("from" = Option<chrono::DateTime<Utc>>, Query, description = "window start (default: now - 30d)"),
+        ("to" = Option<chrono::DateTime<Utc>>, Query, description = "window end (default: now + 90d)"),
+    ),
+    responses(
+        (status = 200, description = "events", body = Vec<EventView>),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn list_events(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -317,7 +443,7 @@ async fn list_events(
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let events = db::list_events_in_range(&pool, calendar_id, from, to).await?;
     let registry = db::categories::registry_for_calendar(&pool, calendar_id).await?;
-    let mut out: Vec<serde_json::Value> = Vec::with_capacity(events.len());
+    let mut out: Vec<EventView> = Vec::with_capacity(events.len());
     for e in &events {
         let location = db::location_for_event(&pool, e).await;
         out.push(event_view(
@@ -328,9 +454,18 @@ async fn list_events(
             &registry,
         ));
     }
-    Ok(Json(serde_json::json!(out)))
+    Ok(Json(out))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/events/{id}",
+    params(("id" = Uuid, Path, description = "event id")),
+    responses(
+        (status = 200, description = "event", body = EventView),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn get_event(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -357,6 +492,20 @@ async fn get_event(
     )))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/events/{id}",
+    params(
+        ("id" = Uuid, Path, description = "event id"),
+        ("if-match" = Option<String>, Header, description = "ETag for optimistic concurrency (412 on mismatch)"),
+    ),
+    request_body = EventBody,
+    responses(
+        (status = 200, description = "updated", body = EventView),
+        (status = 400, description = "validation error or ETag mismatch"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn patch_event(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -463,8 +612,9 @@ async fn patch_event(
     )))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct SelfPartstatBody {
+    /// NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE.
     partstat: String,
 }
 
@@ -472,6 +622,13 @@ struct SelfPartstatBody {
 /// attendee identity on the origin (by attendee user_id or their account
 /// email — a delivered copy carries the same rows) and records the reply so
 /// it reaches the organizer's clients via sync.
+#[utoipa::path(
+    patch,
+    path = "/api/events/{id}/attendees/self",
+    params(("id" = Uuid, Path, description = "event id")),
+    request_body = SelfPartstatBody,
+    responses((status = 200, description = "reply recorded", body = crate::OkView))
+)]
 async fn patch_own_partstat(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -489,6 +646,15 @@ async fn patch_own_partstat(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/events/{id}",
+    params(
+        ("id" = Uuid, Path, description = "event id"),
+        ("if-match" = Option<String>, Header, description = "ETag for optimistic concurrency (412 on mismatch)"),
+    ),
+    responses((status = 200, description = "deleted (soft, sync-visible tombstone)", body = crate::OkView))
+)]
 async fn delete_event(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -557,6 +723,17 @@ impl axum::extract::FromRequestParts<AppState> for IfMatch {
 
 /// Expanded occurrences with exceptions overlaid: each master occurrence
 /// matching an exception's RECURRENCE-ID is replaced by that exception row.
+#[utoipa::path(
+    get,
+    path = "/api/calendars/{id}/occurrences",
+    params(
+        ("id" = Uuid, Path, description = "calendar id"),
+        ("from" = Option<chrono::DateTime<Utc>>, Query, description = "window start (default: now - 30d)"),
+        ("to" = Option<chrono::DateTime<Utc>>, Query, description = "window end (default: now + 90d)"),
+        ("include" = Option<String>, Query, description = "comma-separated extras: tasks,journals append dated markers (type: task/journal) to the event entries"),
+    ),
+    responses((status = 200, description = "occurrences", body = Vec<OccurrenceView>))
+)]
 async fn list_occurrences(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -574,7 +751,12 @@ async fn list_occurrences(
     let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let rows = db::list_events_in_range(&pool, calendar_id, from, to).await?;
-    let mut out = expand_occurrences_json(&pool, calendar_id, rows, from, to).await?;
+    let mut out: Vec<serde_json::Value> =
+        expand_occurrences_json(&pool, calendar_id, rows, from, to)
+            .await?
+            .into_iter()
+            .map(|o| serde_json::to_value(o).expect("occurrence view serializes"))
+            .collect();
     // Additive ?include=tasks,journals: dated markers for the calendar view;
     // the event entries above keep their shape untouched.
     let include: Vec<&str> = query
@@ -586,10 +768,20 @@ async fn list_occurrences(
         .filter(|s| !s.is_empty())
         .collect();
     if include.contains(&"tasks") {
-        out.extend(include_task_markers(&pool, calendar_id, from, to).await?);
+        out.extend(
+            include_task_markers(&pool, calendar_id, from, to)
+                .await?
+                .into_iter()
+                .map(|m| serde_json::to_value(m).expect("task marker serializes")),
+        );
     }
     if include.contains(&"journals") {
-        out.extend(include_journal_markers(&pool, calendar_id, from, to).await?);
+        out.extend(
+            include_journal_markers(&pool, calendar_id, from, to)
+                .await?
+                .into_iter()
+                .map(|m| serde_json::to_value(m).expect("journal marker serializes")),
+        );
     }
     Ok(Json(serde_json::json!(out)))
 }
@@ -601,7 +793,7 @@ async fn include_task_markers(
     calendar_id: Uuid,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-) -> Result<Vec<serde_json::Value>, AppError> {
+) -> Result<Vec<TaskMarkerView>, AppError> {
     let rows = db::tasks::list_tasks(pool, calendar_id, &db::tasks::TaskFilter::default()).await?;
     let uids: Vec<String> = rows.iter().map(|t| t.uid.clone()).collect();
     let counts: std::collections::HashMap<String, i64> = if uids.is_empty() {
@@ -646,20 +838,66 @@ async fn include_task_markers(
         } else {
             None
         };
-        out.push(serde_json::json!({
-            "type": "task",
-            "id": t.id,
-            "summary": t.summary,
-            "due": t.due_at.map(|d| serde_json::json!(d))
-                .or_else(|| t.due_date.map(|d| serde_json::json!(d.to_string()))),
-            "status": t.status,
-            "percent": t.percent_complete,
-            "completed": t.completed_at,
-            "next_open": next_open,
-            "subtasks_count": counts.get(&t.uid).copied().unwrap_or(0),
-        }));
+        out.push(TaskMarkerView {
+            kind: "task",
+            id: t.id,
+            summary: t.summary.clone(),
+            due: t
+                .due_at
+                .map(|d| MarkerPoint {
+                    timed: Some(d),
+                    all_day: None,
+                })
+                .or_else(|| {
+                    t.due_date.map(|d| MarkerPoint {
+                        timed: None,
+                        all_day: Some(d.to_string()),
+                    })
+                }),
+            status: t.status.clone(),
+            percent: t.percent_complete,
+            completed: t.completed_at,
+            next_open,
+            subtasks_count: counts.get(&t.uid).copied().unwrap_or(0),
+        });
     }
     Ok(out)
+}
+
+/// One `{"timed": ...}` or `{"all_day": "..."}` slot; the absent half is
+/// omitted from the payload (skip, not null).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct MarkerPoint {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timed: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    all_day: Option<String>,
+}
+
+/// Calendar-view marker for a dated task (`?include=tasks`).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct TaskMarkerView {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: Uuid,
+    summary: String,
+    due: Option<MarkerPoint>,
+    status: Option<String>,
+    percent: Option<i16>,
+    completed: Option<DateTime<Utc>>,
+    next_open: Option<DateTime<Utc>>,
+    subtasks_count: i64,
+}
+
+/// Calendar-view marker for a dated journal (`?include=journals`).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct JournalMarkerView {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    id: Uuid,
+    summary: String,
+    start: Option<MarkerPoint>,
+    status: Option<String>,
 }
 
 /// Dated journal markers: journals whose DTSTART falls in the window.
@@ -669,7 +907,7 @@ async fn include_journal_markers(
     calendar_id: Uuid,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-) -> Result<Vec<serde_json::Value>, AppError> {
+) -> Result<Vec<JournalMarkerView>, AppError> {
     let rows = db::journals::list_journals(
         pool,
         calendar_id,
@@ -682,23 +920,37 @@ async fn include_journal_markers(
     .await?;
     Ok(rows
         .iter()
-        .map(|j| {
-            serde_json::json!({
-                "type": "journal",
-                "id": j.id,
-                "summary": j.summary,
-                "start": j.starts_at.map(|d| serde_json::json!(d))
-                    .or_else(|| j.start_date.map(|d| serde_json::json!(d.to_string()))),
-                "status": j.status,
-            })
+        .map(|j| JournalMarkerView {
+            kind: "journal",
+            id: j.id,
+            summary: j.summary.clone(),
+            start: j
+                .starts_at
+                .map(|d| MarkerPoint {
+                    timed: Some(d),
+                    all_day: None,
+                })
+                .or_else(|| {
+                    j.start_date.map(|d| MarkerPoint {
+                        timed: None,
+                        all_day: Some(d.to_string()),
+                    })
+                }),
+            status: j.status.clone(),
         })
         .collect())
 }
 
-/// GET /api/subscriptions/{id}/occurrences — same expansion as
-/// `list_occurrences`, but for a calendar the caller doesn't own: access is
-/// gated on holding a live subscription to it, not on calendar ACL, and only
-/// PUBLIC-class events come back (matches the public feed's privacy rule).
+#[utoipa::path(
+    get,
+    path = "/api/subscriptions/{id}/occurrences",
+    params(
+        ("id" = Uuid, Path, description = "subscription id"),
+        ("from" = Option<chrono::DateTime<Utc>>, Query, description = "window start (default: now - 30d)"),
+        ("to" = Option<chrono::DateTime<Utc>>, Query, description = "window end (default: now + 90d)"),
+    ),
+    responses((status = 200, description = "PUBLIC-class occurrences of the subscribed calendar", body = Vec<OccurrenceView>))
+)]
 async fn list_subscription_occurrences(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -712,7 +964,7 @@ async fn list_subscription_occurrences(
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let rows = db::list_public_events_in_range(&pool, calendar_id, from, to).await?;
     let out = expand_occurrences_json(&pool, calendar_id, rows, from, to).await?;
-    Ok(Json(serde_json::json!(out)))
+    Ok(Json(out))
 }
 
 /// Expanded occurrences with exceptions overlaid: each master occurrence
@@ -723,7 +975,7 @@ async fn expand_occurrences_json(
     rows: Vec<db::EventRow>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
-) -> Result<Vec<serde_json::Value>, AppError> {
+) -> Result<Vec<OccurrenceView>, AppError> {
     let registry = db::categories::registry_for_calendar(pool, calendar_id).await?;
     let master_ids: Vec<Uuid> = rows
         .iter()
@@ -736,7 +988,7 @@ async fn expand_occurrences_json(
         .await
         .unwrap_or_default();
 
-    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut out: Vec<OccurrenceView> = Vec::new();
     for event in &rows {
         // Exception rows surface only through their master's overlay.
         if event.master_event_id.is_some() {
@@ -744,18 +996,31 @@ async fn expand_occurrences_json(
         }
         if event.rrule.is_none() {
             let location = db::location_for_event(pool, event).await;
-            let mut view = serde_json::json!({
-                "event": event_view(event, &db::event_etag(event), &[], location.as_ref(), &registry)
-            });
-            view["occurrence"] = match (event.starts_at, event.start_date) {
-                (Some(at), _) => serde_json::json!({"kind": "timed", "at": at}),
-                (None, Some(date)) => {
-                    serde_json::json!({"kind": "all_day", "date": date.to_string()})
-                }
-                _ => serde_json::Value::Null,
+            let view = event_view(
+                event,
+                &db::event_etag(event),
+                &[],
+                location.as_ref(),
+                &registry,
+            );
+            let occurrence = match (event.starts_at, event.start_date) {
+                (Some(at), _) => Some(OccurrencePoint {
+                    kind: "timed",
+                    at: Some(at),
+                    date: None,
+                }),
+                (None, Some(date)) => Some(OccurrencePoint {
+                    kind: "all_day",
+                    at: None,
+                    date: Some(date.to_string()),
+                }),
+                _ => None,
             };
-            view["is_exception"] = serde_json::json!(false);
-            out.push(view);
+            out.push(OccurrenceView {
+                event: view,
+                occurrence,
+                is_exception: false,
+            });
             continue;
         }
         let dtstart = match (event.starts_at, event.start_date) {
@@ -790,23 +1055,30 @@ async fn expand_occurrences_json(
                 .find(|ex| ex.master_event_id == Some(event.id) && ex.recurrence_id == Some(wall));
             let (source, is_exception) = matched.map_or((event, false), |ex| (ex, true));
             let location = db::location_for_event(pool, source).await;
-            let mut view = event_view(
+            let event_view = event_view(
                 source,
                 &db::event_etag(source),
                 &[],
                 location.as_ref(),
                 &registry,
             );
-            view["occurrence"] = match point {
-                calendar_core::DateOrDateTime::Timed(at) => {
-                    serde_json::json!({"kind": "timed", "at": at})
-                }
-                calendar_core::DateOrDateTime::AllDay(date) => {
-                    serde_json::json!({"kind": "all_day", "date": date.to_string()})
-                }
+            let occurrence = match point {
+                calendar_core::DateOrDateTime::Timed(at) => OccurrencePoint {
+                    kind: "timed",
+                    at: Some(at),
+                    date: None,
+                },
+                calendar_core::DateOrDateTime::AllDay(date) => OccurrencePoint {
+                    kind: "all_day",
+                    at: None,
+                    date: Some(date.to_string()),
+                },
             };
-            view["is_exception"] = serde_json::json!(is_exception);
-            out.push(view);
+            out.push(OccurrenceView {
+                event: event_view,
+                occurrence: Some(occurrence),
+                is_exception,
+            });
         }
     }
     Ok(out)
@@ -855,3 +1127,33 @@ pub fn router() -> axum::Router<crate::AppState> {
             axum::routing::patch(patch_own_partstat),
         )
 }
+
+/// OpenAPI for the events module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        create_event,
+        list_events,
+        get_event,
+        patch_event,
+        delete_event,
+        patch_own_partstat,
+        list_occurrences,
+        list_subscription_occurrences,
+    ),
+    components(schemas(
+        EventBody,
+        LocationBody,
+        SelfPartstatBody,
+        EventView,
+        LocationView,
+        CategoryDetailView,
+        OccurrenceView,
+        OccurrencePoint,
+        TaskMarkerView,
+        JournalMarkerView,
+        MarkerPoint,
+        crate::OkView,
+    ))
+)]
+pub(crate) struct EventsApi;

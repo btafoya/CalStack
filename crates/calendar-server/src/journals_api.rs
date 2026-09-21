@@ -13,7 +13,7 @@ use calendar_db::{self as db};
 use chrono::{DateTime, NaiveDate, Utc};
 use uuid::Uuid;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct JournalBody {
     uid: Option<String>,
     summary: String,
@@ -52,30 +52,63 @@ fn validate_journal_body(body: &JournalBody) -> Result<(), AppError> {
 }
 
 /// Journal view. Never includes extra_props (D9: they round-trip but stay
-/// unmodelled and private).
-pub(crate) fn journal_view(journal: &db::journals::JournalRow, etag: &str) -> serde_json::Value {
-    serde_json::json!({
-        "id": journal.id,
-        "calendar_id": journal.calendar_id,
-        "uid": journal.uid,
-        "summary": journal.summary,
-        "description_html": journal.description_html,
-        "description_text": journal.description_text,
-        "url": journal.url,
-        "starts_at": journal.starts_at,
-        "start_date": journal.start_date,
-        "tzid": journal.tzid,
-        "floating": journal.floating,
-        "status": journal.status,
-        "class": journal.class,
-        "categories": journal.categories,
-        "sequence": journal.sequence,
-        "etag": etag,
-        "created_at": journal.created_at,
-        "updated_at": journal.updated_at,
-    })
+/// unmodelled and private) and never `href` (CalDAV plumbing, not API).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct JournalView {
+    id: Uuid,
+    calendar_id: Uuid,
+    uid: String,
+    summary: String,
+    description_html: Option<String>,
+    description_text: Option<String>,
+    url: Option<String>,
+    starts_at: Option<DateTime<Utc>>,
+    start_date: Option<NaiveDate>,
+    tzid: Option<String>,
+    floating: bool,
+    status: Option<String>,
+    class: Option<String>,
+    categories: Vec<String>,
+    sequence: i32,
+    etag: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
+pub(crate) fn journal_view(journal: &db::journals::JournalRow, etag: &str) -> JournalView {
+    JournalView {
+        id: journal.id,
+        calendar_id: journal.calendar_id,
+        uid: journal.uid.clone(),
+        summary: journal.summary.clone(),
+        description_html: journal.description_html.clone(),
+        description_text: journal.description_text.clone(),
+        url: journal.url.clone(),
+        starts_at: journal.starts_at,
+        start_date: journal.start_date,
+        tzid: journal.tzid.clone(),
+        floating: journal.floating,
+        status: journal.status.clone(),
+        class: journal.class.clone(),
+        categories: journal.categories.clone(),
+        sequence: journal.sequence,
+        etag: etag.to_string(),
+        created_at: journal.created_at,
+        updated_at: journal.updated_at,
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/calendars/{id}/journals",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    request_body = JournalBody,
+    responses(
+        (status = 201, description = "created (VJOURNAL); an undated one is a note", body = JournalView),
+        (status = 400, description = "validation error"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn create_journal(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -125,15 +158,33 @@ async fn create_journal(
     Ok((StatusCode::CREATED, Json(journal_view(&journal, &etag))))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct JournalListQuery {
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
+    /// true = only journals without a DTSTART (notes).
     undated: Option<bool>,
     category: Option<String>,
+    /// Case-insensitive substring over the summary.
     q: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/calendars/{id}/journals",
+    params(
+        ("id" = Uuid, Path, description = "calendar id"),
+        ("from" = Option<DateTime<Utc>>, Query, description = "window start"),
+        ("to" = Option<DateTime<Utc>>, Query, description = "window end"),
+        ("undated" = Option<bool>, Query, description = "true = only journals without a DTSTART (notes)"),
+        ("category" = Option<String>, Query, description = "category slug"),
+        ("q" = Option<String>, Query, description = "case-insensitive substring over the summary"),
+    ),
+    responses(
+        (status = 200, description = "journals, newest first", body = Vec<JournalView>),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn list_journals(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -164,10 +215,19 @@ async fn list_journals(
         }
         None => rows,
     };
-    let out: Vec<serde_json::Value> = rows.iter().map(|j| journal_view(j, &j.etag)).collect();
-    Ok(Json(serde_json::json!(out)))
+    let out: Vec<JournalView> = rows.iter().map(|j| journal_view(j, &j.etag)).collect();
+    Ok(Json(out))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/journals/{id}",
+    params(("id" = Uuid, Path, description = "journal id")),
+    responses(
+        (status = 200, description = "journal with its ETag", body = JournalView),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn get_journal(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -185,6 +245,20 @@ async fn get_journal(
     Ok(Json(journal_view(&journal, &etag)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/journals/{id}",
+    params(
+        ("id" = Uuid, Path, description = "journal id"),
+        ("if-match" = Option<String>, Header, description = "ETag for optimistic concurrency (412 on mismatch)"),
+    ),
+    request_body = JournalBody,
+    responses(
+        (status = 200, description = "updated", body = JournalView),
+        (status = 400, description = "validation error or ETag mismatch"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn patch_journal(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -232,6 +306,15 @@ async fn patch_journal(
     Ok(Json(journal_view(&journal, &etag)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/journals/{id}",
+    params(
+        ("id" = Uuid, Path, description = "journal id"),
+        ("if-match" = Option<String>, Header, description = "ETag for optimistic concurrency (412 on mismatch)"),
+    ),
+    responses((status = 200, description = "deleted (soft, sync-visible tombstone)", body = crate::OkView))
+)]
 async fn delete_journal(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -305,6 +388,20 @@ pub fn router() -> axum::Router<crate::AppState> {
         )
 }
 
+/// OpenAPI for the journals module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        create_journal,
+        list_journals,
+        get_journal,
+        patch_journal,
+        delete_journal
+    ),
+    components(schemas(JournalBody, JournalListQuery, JournalView, crate::OkView))
+)]
+pub(crate) struct JournalsApi;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,7 +437,7 @@ mod tests {
     #[test]
     fn journal_view_shape_has_no_extra_props() {
         let j = row();
-        let v = journal_view(&j, "etag-1");
+        let v = serde_json::to_value(journal_view(&j, "etag-1")).unwrap();
         assert_eq!(v["summary"], "standup notes");
         assert_eq!(v["start_date"], "2026-09-20");
         assert_eq!(v["status"], "FINAL");

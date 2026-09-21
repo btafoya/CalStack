@@ -14,7 +14,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct TaskBody {
     uid: Option<String>,
     summary: String,
@@ -29,7 +29,9 @@ struct TaskBody {
     duration_secs: Option<i64>,
     tzid: Option<String>,
     rrule: Option<String>,
+    #[schema(value_type = Object)]
     rdate: Option<serde_json::Value>,
+    #[schema(value_type = Object)]
     exdate: Option<serde_json::Value>,
     status: Option<String>,
     percent_complete: Option<i16>,
@@ -38,11 +40,12 @@ struct TaskBody {
     categories: Option<Vec<String>>,
     parent_uid: Option<String>,
     sort_order: Option<i64>,
+    #[schema(value_type = Vec<Object>)]
     attendees: Option<Vec<db::NewAttendee>>,
     alarms: Option<Vec<AlarmBody>>,
 }
 
-#[derive(serde::Deserialize, Clone)]
+#[derive(serde::Deserialize, Clone, utoipa::ToSchema)]
 struct AlarmBody {
     action: String,
     related: Option<String>,
@@ -190,27 +193,81 @@ async fn subtask_counts(
         .collect())
 }
 
-fn alarms_view(alarms: &[db::tasks::TaskAlarmRow]) -> Vec<serde_json::Value> {
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AlarmView {
+    id: Uuid,
+    action: String,
+    related: Option<String>,
+    offset_secs: Option<i64>,
+    trigger_at: Option<DateTime<Utc>>,
+    description: Option<String>,
+    summary: Option<String>,
+    recipient_emails: Vec<String>,
+    notify_channels: Vec<String>,
+}
+
+fn alarms_view(alarms: &[db::tasks::TaskAlarmRow]) -> Vec<AlarmView> {
     alarms
         .iter()
-        .map(|a| {
-            serde_json::json!({
-                "id": a.id,
-                "action": a.action,
-                "related": a.related,
-                "offset_secs": a.offset_secs(),
-                "trigger_at": a.trigger_at,
-                "description": a.description,
-                "summary": a.summary,
-                "recipient_emails": a.recipient_emails,
-                "notify_channels": a.notify_channels,
-            })
+        .map(|a| AlarmView {
+            id: a.id,
+            action: a.action.clone(),
+            related: a.related.clone(),
+            offset_secs: a.offset_secs(),
+            trigger_at: a.trigger_at,
+            description: a.description.clone(),
+            summary: a.summary.clone(),
+            recipient_emails: a.recipient_emails.clone(),
+            notify_channels: a.notify_channels.clone(),
         })
         .collect()
 }
 
 /// Task view (design section 7): the modelled row plus subtasks_count,
 /// next_open and is_overdue. Never includes extra_props.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct TaskView {
+    id: Uuid,
+    calendar_id: Uuid,
+    uid: String,
+    summary: String,
+    description_html: Option<String>,
+    description_text: Option<String>,
+    url: Option<String>,
+    location: Option<String>,
+    starts_at: Option<DateTime<Utc>>,
+    start_date: Option<NaiveDate>,
+    due_at: Option<DateTime<Utc>>,
+    due_date: Option<NaiveDate>,
+    duration_secs: Option<i64>,
+    tzid: Option<String>,
+    floating: bool,
+    completed_at: Option<DateTime<Utc>>,
+    rrule: Option<String>,
+    #[schema(value_type = Object)]
+    rdate: serde_json::Value,
+    #[schema(value_type = Object)]
+    exdate: serde_json::Value,
+    status: Option<String>,
+    percent_complete: Option<i16>,
+    priority: Option<i16>,
+    class: Option<String>,
+    categories: Vec<String>,
+    parent_uid: Option<String>,
+    sort_order: Option<i64>,
+    organizer_email: Option<String>,
+    organizer_name: Option<String>,
+    sequence: i32,
+    etag: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    attendees: Vec<crate::AttendeeView>,
+    alarms: Vec<AlarmView>,
+    subtasks_count: i64,
+    next_open: Option<DateTime<Utc>>,
+    is_overdue: bool,
+}
+
 pub(crate) fn task_view(
     task: &db::tasks::TaskRow,
     etag: &str,
@@ -218,52 +275,71 @@ pub(crate) fn task_view(
     alarms: &[db::tasks::TaskAlarmRow],
     next_open: Option<DateTime<Utc>>,
     subtasks_count: i64,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": task.id,
-        "calendar_id": task.calendar_id,
-        "uid": task.uid,
-        "summary": task.summary,
-        "description_html": task.description_html,
-        "description_text": task.description_text,
-        "url": task.url,
-        "location": task.location,
-        "starts_at": task.starts_at,
-        "start_date": task.start_date,
-        "due_at": task.due_at,
-        "due_date": task.due_date,
-        "duration_secs": task.duration.as_ref().map(|i| i.microseconds / 1_000_000),
-        "tzid": task.tzid,
-        "floating": task.floating,
-        "completed_at": task.completed_at,
-        "rrule": task.rrule,
-        "rdate": task.rdate,
-        "exdate": task.exdate,
-        "status": task.status,
-        "percent_complete": task.percent_complete,
-        "priority": task.priority,
-        "class": task.class,
-        "categories": task.categories,
-        "parent_uid": task.parent_uid,
-        "sort_order": task.sort_order,
-        "organizer_email": task.organizer_email,
-        "organizer_name": task.organizer_name,
-        "sequence": task.sequence,
-        "etag": etag,
-        "created_at": task.created_at,
-        "updated_at": task.updated_at,
-        "attendees": attendees.iter().map(|a| serde_json::json!({
-            "email": a.email, "display_name": a.display_name, "telephone": a.telephone,
-            "role": a.role, "partstat": a.partstat, "rsvp": a.rsvp,
-            "contact_id": a.contact_id, "user_id": a.user_id,
-        })).collect::<Vec<_>>(),
-        "alarms": alarms_view(alarms),
-        "subtasks_count": subtasks_count,
-        "next_open": next_open,
-        "is_overdue": is_overdue(task),
-    })
+) -> TaskView {
+    TaskView {
+        id: task.id,
+        calendar_id: task.calendar_id,
+        uid: task.uid.clone(),
+        summary: task.summary.clone(),
+        description_html: task.description_html.clone(),
+        description_text: task.description_text.clone(),
+        url: task.url.clone(),
+        location: task.location.clone(),
+        starts_at: task.starts_at,
+        start_date: task.start_date,
+        due_at: task.due_at,
+        due_date: task.due_date,
+        duration_secs: task.duration.as_ref().map(|i| i.microseconds / 1_000_000),
+        tzid: task.tzid.clone(),
+        floating: task.floating,
+        completed_at: task.completed_at,
+        rrule: task.rrule.clone(),
+        rdate: task.rdate.clone(),
+        exdate: task.exdate.clone(),
+        status: task.status.clone(),
+        percent_complete: task.percent_complete,
+        priority: task.priority,
+        class: task.class.clone(),
+        categories: task.categories.clone(),
+        parent_uid: task.parent_uid.clone(),
+        sort_order: task.sort_order,
+        organizer_email: task.organizer_email.clone(),
+        organizer_name: task.organizer_name.clone(),
+        sequence: task.sequence,
+        etag: etag.to_string(),
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        attendees: attendees
+            .iter()
+            .map(|a| crate::AttendeeView {
+                email: a.email.clone(),
+                display_name: a.display_name.clone(),
+                telephone: a.telephone.clone(),
+                role: a.role.clone(),
+                partstat: a.partstat.clone(),
+                rsvp: a.rsvp,
+                contact_id: a.contact_id,
+                user_id: a.user_id,
+            })
+            .collect(),
+        alarms: alarms_view(alarms),
+        subtasks_count,
+        next_open,
+        is_overdue: is_overdue(task),
+    }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/calendars/{id}/tasks",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    request_body = TaskBody,
+    responses(
+        (status = 201, description = "created (VTODO master)", body = TaskView),
+        (status = 400, description = "validation error"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn create_task(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -383,16 +459,35 @@ async fn fire_task_hooks(
     crate::webhooks_api::fire(pool, cal.tenant_id, task_id, trigger).await;
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct TaskListQuery {
     status: Option<String>,
     due_before: Option<DateTime<Utc>>,
     due_after: Option<DateTime<Utc>>,
     category: Option<String>,
+    /// The parent task's uid (subtasks chain by parent_uid).
     parent_id: Option<String>,
+    /// Case-insensitive substring over the summary.
     q: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/calendars/{id}/tasks",
+    params(
+        ("id" = Uuid, Path, description = "calendar id"),
+        ("status" = Option<String>, Query, description = "filter by status"),
+        ("due_before" = Option<DateTime<Utc>>, Query),
+        ("due_after" = Option<DateTime<Utc>>, Query),
+        ("category" = Option<String>, Query, description = "category slug"),
+        ("parent_id" = Option<String>, Query, description = "the parent task's uid (subtasks chain by parent_uid)"),
+        ("q" = Option<String>, Query, description = "case-insensitive substring over the summary"),
+    ),
+    responses(
+        (status = 200, description = "task masters (undated included)", body = Vec<TaskView>),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn list_tasks(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -448,7 +543,7 @@ async fn list_tasks(
             counts.get(&t.uid).copied().unwrap_or(0),
         ));
     }
-    Ok(Json(serde_json::json!(out)))
+    Ok(Json(out))
 }
 
 /// If-Match header extractor; None when absent. (Same shape as events'.)
@@ -471,6 +566,15 @@ impl axum::extract::FromRequestParts<AppState> for IfMatch {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/tasks/{id}",
+    params(("id" = Uuid, Path, description = "task id")),
+    responses(
+        (status = 200, description = "task with its ETag", body = TaskView),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn get_task(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -518,6 +622,20 @@ async fn task_extras(
     Ok((next_open, subtasks_count))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/tasks/{id}",
+    params(
+        ("id" = Uuid, Path, description = "task id"),
+        ("if-match" = Option<String>, Header, description = "ETag for optimistic concurrency (412 on mismatch)"),
+    ),
+    request_body = TaskBody,
+    responses(
+        (status = 200, description = "updated", body = TaskView),
+        (status = 400, description = "validation error or ETag mismatch"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn patch_task(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -630,6 +748,15 @@ async fn patch_task(
     )))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/tasks/{id}",
+    params(
+        ("id" = Uuid, Path, description = "task id"),
+        ("if-match" = Option<String>, Header, description = "ETag for optimistic concurrency (412 on mismatch)"),
+    ),
+    responses((status = 200, description = "deleted; subtasks cascade (deleted count returned)", body = TaskDeleteView))
+)]
 async fn delete_task(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -673,15 +800,19 @@ async fn delete_task(
     Ok(Json(serde_json::json!({"ok": true, "deleted": n})))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct CompleteBody {
+    /// For recurring tasks: the occurrence being completed (writes a
+    /// RECURRENCE-ID override). One of "timed" or "all_day".
     occurrence: Option<OccurrenceBody>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone, Copy, utoipa::ToSchema)]
 #[serde(untagged)]
 enum OccurrenceBody {
+    /// Naive local wall clock, e.g. "2026-09-20T08:30:00".
     Timed { timed: chrono::NaiveDateTime },
+    /// All-day date, e.g. "2026-09-20".
     AllDay { all_day: NaiveDate },
 }
 
@@ -694,6 +825,23 @@ impl OccurrenceBody {
     }
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct TaskDeleteView {
+    ok: bool,
+    /// Live subtasks deleted along with the master (cascade count).
+    deleted: i64,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/tasks/{id}/complete",
+    params(("id" = Uuid, Path, description = "task id")),
+    request_body = CompleteBody,
+    responses(
+        (status = 200, description = "completed", body = TaskView),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn complete_task(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -734,6 +882,16 @@ async fn complete_task(
     )))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/tasks/{id}/reopen",
+    params(("id" = Uuid, Path, description = "task id")),
+    request_body = CompleteBody,
+    responses(
+        (status = 200, description = "reopened", body = TaskView),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn reopen_task(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -779,6 +937,31 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/tasks/{id}/complete", post(complete_task))
         .route("/api/tasks/{id}/reopen", post(reopen_task))
 }
+
+/// OpenAPI for the tasks module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        create_task,
+        list_tasks,
+        get_task,
+        patch_task,
+        delete_task,
+        complete_task,
+        reopen_task,
+    ),
+    components(schemas(
+        TaskBody,
+        AlarmBody,
+        TaskListQuery,
+        CompleteBody,
+        OccurrenceBody,
+        TaskView,
+        AlarmView,
+        TaskDeleteView,
+    ))
+)]
+pub(crate) struct TasksApi;
 
 #[cfg(test)]
 mod tests {
@@ -836,7 +1019,7 @@ mod tests {
     #[test]
     fn task_view_shape_has_no_extra_props() {
         let t = row(|_| {});
-        let v = task_view(&t, "etag-1", &[], &[], None, 4);
+        let v = serde_json::to_value(task_view(&t, "etag-1", &[], &[], None, 4)).unwrap();
         assert_eq!(v["summary"], "buy milk");
         assert_eq!(v["status"], "NEEDS-ACTION");
         assert_eq!(v["class"], "PRIVATE");

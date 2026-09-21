@@ -36,6 +36,7 @@ use calendar_db::{self as db};
 use chrono::Duration;
 use clap::{Parser, Subcommand};
 use utoipa::OpenApi;
+use uuid::Uuid;
 
 /// utoipa-generated OpenAPI: handlers gain `#[utoipa::path]` annotations
 /// stage by stage (see IMPLEMENTATION_PLAN.md) and register here.
@@ -49,6 +50,21 @@ pub(crate) struct OkView {
     pub(crate) ok: bool,
 }
 
+/// Attendee as surfaced in event and task responses (identical shape in both;
+/// calendar-db's AttendeeRow and tasks::TaskAttendeeRow are distinct structs,
+/// so callers construct this from whichever they hold).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AttendeeView {
+    pub(crate) email: Option<String>,
+    pub(crate) display_name: Option<String>,
+    pub(crate) telephone: Option<String>,
+    pub(crate) role: String,
+    pub(crate) partstat: String,
+    pub(crate) rsvp: Option<bool>,
+    pub(crate) contact_id: Option<Uuid>,
+    pub(crate) user_id: Option<Uuid>,
+}
+
 /// The served document: generated paths win, the legacy hand-built fragment
 /// (`calendar_api::openapi_document`) fills only the gaps. The fragment is
 /// deleted once the last module is annotated.
@@ -56,6 +72,10 @@ fn openapi_json() -> serde_json::Value {
     let mut doc = ApiDoc::openapi();
     doc.merge(auth::AuthApi::openapi());
     doc.merge(mfa::MfaApi::openapi());
+    doc.merge(calendars_api::CalendarsApi::openapi());
+    doc.merge(events_api::EventsApi::openapi());
+    doc.merge(tasks_api::TasksApi::openapi());
+    doc.merge(journals_api::JournalsApi::openapi());
     let mut doc = serde_json::to_value(doc).expect("generated OpenAPI serializes");
     let legacy = calendar_api::openapi_document();
 
@@ -500,5 +520,45 @@ mod tests {
             );
         }
         assert!(doc["components"]["schemas"]["UserView"].is_object());
+        // Calendaring core is utoipa-generated since stage 3 (legacy fragment
+        // no longer lists these either):
+        for (path, method) in [
+            ("/api/calendars", "post"),
+            ("/api/calendars", "get"),
+            ("/api/calendars/{id}", "get"),
+            ("/api/calendars/{id}", "patch"),
+            ("/api/calendars/{id}", "delete"),
+            ("/api/calendars/{id}/acl", "get"),
+            ("/api/calendars/{id}/acl", "put"),
+            ("/api/calendars/{id}/events", "post"),
+            ("/api/calendars/{id}/events", "get"),
+            ("/api/calendars/{id}/occurrences", "get"),
+            ("/api/calendars/{id}/tasks", "post"),
+            ("/api/calendars/{id}/tasks", "get"),
+            ("/api/tasks/{id}", "get"),
+            ("/api/tasks/{id}", "patch"),
+            ("/api/tasks/{id}", "delete"),
+            ("/api/tasks/{id}/complete", "post"),
+            ("/api/tasks/{id}/reopen", "post"),
+            ("/api/calendars/{id}/journals", "post"),
+            ("/api/calendars/{id}/journals", "get"),
+            ("/api/journals/{id}", "get"),
+            ("/api/journals/{id}", "patch"),
+            ("/api/journals/{id}", "delete"),
+            ("/api/events/{id}", "get"),
+            ("/api/events/{id}", "patch"),
+            ("/api/events/{id}", "delete"),
+            ("/api/events/{id}/attendees/self", "patch"),
+            ("/api/subscriptions/{id}/occurrences", "get"),
+        ] {
+            assert!(
+                doc["paths"][path][method].is_object(),
+                "{method} {path} missing from the generated document"
+            );
+        }
+        assert!(doc["components"]["schemas"]["CalendarView"].is_object());
+        assert!(doc["components"]["schemas"]["EventView"].is_object());
+        assert!(doc["components"]["schemas"]["TaskView"].is_object());
+        assert!(doc["components"]["schemas"]["JournalView"].is_object());
     }
 }
