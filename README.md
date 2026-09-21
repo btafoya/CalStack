@@ -10,24 +10,30 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://github.com/btafoya/CalStack/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/btafoya/CalStack/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/rust-stable%20(2024%20edition)-orange.svg">
+  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg">
 </p>
 
 ---
 
-CalStack speaks CalDAV to real clients (Apple Calendar, Thunderbird, DAVx5, Outlook) and exposes a normalized OpenAPI domain model for everything else. One binary, one database, no Redis, no queue service, no data directory.
+CalStack speaks CalDAV (and CardDAV) to real clients (Apple Calendar/Contacts, Thunderbird, DAVx5, Outlook) and exposes a normalized OpenAPI domain model for everything else. One binary, one database, no Redis, no queue service, no data directory.
 
 ## Features
 
-- **CalDAV** (RFC 4791) discovery, `MKCALENDAR`, CRUD, `calendar-query`/`calendar-multiget` REPORTs, `sync-collection` incremental sync, `free-busy-query`.
+- **CalDAV** (RFC 4791) discovery, `MKCALENDAR`, CRUD, `calendar-query`/`calendar-multiget` REPORTs, `sync-collection` incremental sync, `free-busy-query` — for events, tasks, and journals alike.
+- **CardDAV** (RFC 6352) address books — `.well-known/carddav` discovery, vCard CRUD, the same app passwords as CalDAV, plus a normalized contacts API and web page.
 - **OpenAPI 3.1** domain API — the full model, not a CalDAV wrapper. Served live at `/api/openapi.json`.
 - **PostgreSQL-normalized events** — full RRULE/RDATE/EXDATE/RECURRENCE-ID recurrence, hand-rolled and DST-correct, with client-supplied VTIMEZONE definitions parsed, stored per calendar, and honored during expansion (custom tzids never silently become UTC). iCalendar is a wire format, never the source of truth.
+- **Tasks and journals** — VTODO and VJOURNAL are first-class stored components (ADR-015), not opaque blobs: normalized columns beside `extra_props` for anything unmodelled, full recurrence with overrides, CalDAV and API round-trips, and web pages.
+- **Categories** — tenant-wide color-coded registry shared across every calendar; managed from the web UI, carried on events and exposed through the API.
 - **ACLs** — multiple owners per calendar, owner/read-write/read-only/free-busy capabilities.
 - **Public sharing** — revocable, optionally-expiring share tokens; anonymous read-only `.ics` feeds that withhold private/confidential events and attendee contact data. A share token also works as a read-only CalDAV credential when `allows_caldav` is set.
-- **Auth** — local accounts (Argon2id), WebAuthn/passkeys, TOTP 2FA with recovery codes, scoped API bearer tokens, CalDAV app passwords.
+- **Auth** — local accounts (Argon2id), WebAuthn/passkeys, TOTP 2FA with recovery codes, scoped API bearer tokens, CalDAV app passwords, and lockout after repeated failed logins.
 - **Reminders** — VALARMs fire from a PostgreSQL-backed durable job queue (no external scheduler) and reach you however you want: in-app always, plus email, SMS, and Web Push. Pick channels per alarm, opt out per user, and failed sends retry with backoff before giving up with a notice in the app.
 - **Attachments** — capped, stored as `bytea` in PostgreSQL.
 - **Search** — PostgreSQL full-text, no external search service.
-- **Scheduling** — outbound iTIP invitations and cancellations, inbound iMIP replies via a Postmark webhook. Sender identity is trusted from Postmark's inbound pipeline (SPF/DKIM/DMARC happen there); the server only checks the From against the attendee list. Do not configure the webhook if you do not trust your inbound mail pipeline.
+- **Scheduling** — outbound iTIP invitations and cancellations, inbound iMIP replies via a Postmark webhook. Attendees on the same tenant get organizer-rebuilt copies of the event directly — no email involved — and their replies round-trip internally. Sender identity is trusted from Postmark's inbound pipeline (SPF/DKIM/DMARC happen there); the server only checks the From against the attendee list. Do not configure the webhook if you do not trust your inbound mail pipeline.
 - **Rules** — trigger → condition → action automation on event created/updated/deleted (field/op/value conditions, in-app / SMS / webhook actions), scoped to one calendar or tenant-wide; managed from the web UI.
 - **Webhooks** — register HMAC-SHA256-signed webhook URLs per tenant; every event create/update/delete (via the API or CalDAV) and rule webhook action delivers an at-least-once signed payload through the durable job queue, with retries, delivery history, and a send-test button.
 - **Audit trail** — every authenticated API mutation and login event is recorded (actor, action, object, status) and rendered on the Admin page; rows purge after `AUDIT_RETENTION_DAYS`.
@@ -142,6 +148,10 @@ docker compose run --rm app create-admin admin admin@example.com correcthorsebat
 Open `http://<BIND_ADDR>/` (redirects to `/login` if unauthenticated). Register an account, create a calendar, and use the built-in week-view calendar to add events.
 
 - **Account** (nav bar, every signed-in user) — change your password (this revokes every other live session), turn off email/SMS/push reminders if you don't want them, and enable Web Push on the current device.
+- **Tasks** (nav bar) — VTODO to-do lists with due dates, priority, recurrence, and completion, in both list and web form.
+- **Journals** (nav bar) — VJOURNAL day-notes with per-entry status.
+- **Categories** (nav bar) — tenant-wide category registry with colors; entries become selectable on every event form.
+- **Contacts** (nav bar) — vCard address book backing the CardDAV endpoint.
 - **Rules** (nav bar, scoped to whichever calendar is selected) — create/enable/disable/delete trigger → action automation, per calendar or tenant-wide.
 - **Providers** (nav bar) — configure Postmark, SMTP, Twilio, or Web Push (VAPID) credentials, edit them later, and send a test message from any row. Postmark's MessageStream is configurable and defaults to `outbound`; Web Push key pairs are generated for you on first save.
 - **Admin** (nav bar, visible only to `is_admin` users) — list accounts, create users, promote/demote admin status, enable/disable accounts.
@@ -156,7 +166,7 @@ Point any CalDAV client at:
 https://<your-host>/
 ```
 
-Discovery follows the standard `.well-known/caldav` → `current-user-principal` → `calendar-home-set` chain, so most clients (Apple Calendar/Contacts, Thunderbird + built-in CalDAV, DAVx5, Outlook via a CalDAV bridge) auto-configure from that URL alone.
+Discovery follows the standard `.well-known/caldav` → `current-user-principal` → `calendar-home-set` chain, so most clients (Apple Calendar/Contacts, Thunderbird + built-in CalDAV, DAVx5, Outlook via a CalDAV bridge) auto-configure from that URL alone. CardDAV clients go through `.well-known/carddav` to `/contacts` the same way; a single CalDAV+CardDAV URL like `https://<your-host>/` covers both.
 
 Authenticate with a **CalDAV app password**, not your login password — create one from the web UI or the API:
 
