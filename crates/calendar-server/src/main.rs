@@ -35,6 +35,45 @@ use calendar_core::validate_username;
 use calendar_db::{self as db};
 use chrono::Duration;
 use clap::{Parser, Subcommand};
+use utoipa::OpenApi;
+
+/// utoipa-generated OpenAPI: handlers gain `#[utoipa::path]` annotations
+/// stage by stage (see IMPLEMENTATION_PLAN.md) and register here.
+#[derive(OpenApi)]
+#[openapi(info(title = "CalStack API"))]
+struct ApiDoc;
+
+/// The served document: generated paths win, the legacy hand-built fragment
+/// (`calendar_api::openapi_document`) fills only the gaps. The fragment is
+/// deleted once the last module is annotated.
+fn openapi_json() -> serde_json::Value {
+    let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("generated OpenAPI serializes");
+    let legacy = calendar_api::openapi_document();
+
+    if doc.get("paths").is_none_or(|p| !p.is_object()) {
+        doc["paths"] = serde_json::json!({});
+    }
+    if doc.get("components").is_none_or(|c| !c.is_object()) {
+        doc["components"] = serde_json::json!({});
+    }
+    for (route, methods) in legacy["paths"].as_object().expect("legacy paths") {
+        let paths = doc["paths"].as_object_mut().unwrap();
+        paths.entry(route.clone()).or_insert(methods.clone());
+    }
+    for key in ["schemas", "securitySchemes"] {
+        if doc["components"].get(key).is_none_or(|c| !c.is_object()) {
+            doc["components"][key] = serde_json::json!({});
+        }
+        for (name, schema) in legacy["components"][key].as_object().into_iter().flatten() {
+            let slot = doc["components"][key].as_object_mut().unwrap();
+            slot.entry(name.clone()).or_insert(schema.clone());
+        }
+    }
+    if doc.get("security").is_none() {
+        doc["security"] = legacy["security"].clone();
+    }
+    doc
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -214,10 +253,7 @@ fn build_router(state: AppState) -> Router {
         .merge(tasks_api::router())
         .merge(journals_api::router())
         .merge(webhooks_api::router())
-        .route(
-            "/api/openapi.json",
-            get(|| async { axum::Json(calendar_api::openapi_document()) }),
-        )
+        .route("/api/openapi.json", get(|| async { Json(openapi_json()) }))
         .route("/healthz", get(|| async { "ok" }))
         .route("/calendars", axum::routing::any(dav::entry))
         .route("/calendars/", axum::routing::any(dav::entry))
@@ -397,5 +433,30 @@ async fn main() -> anyhow::Result<()> {
             email,
             password,
         } => run_create_admin(&cfg, &username, &email, &password).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stage-1 gate (IMPLEMENTATION_PLAN.md): the served document is 3.1.0
+    /// and covers every path of the legacy fragment.
+    #[test]
+    fn openapi_is_31_and_covers_legacy_paths() {
+        let doc = openapi_json();
+        assert_eq!(doc["openapi"], "3.1.0");
+        let legacy = calendar_api::openapi_document();
+        for (route, methods) in legacy["paths"].as_object().unwrap() {
+            for method in methods.as_object().unwrap().keys() {
+                assert!(
+                    doc["paths"][route][method].is_object(),
+                    "{method} {route} missing from the served document"
+                );
+            }
+        }
+        assert!(doc["components"]["securitySchemes"]["sessionCookie"].is_object());
+        assert!(doc["components"]["securitySchemes"]["bearerToken"].is_object());
+        assert!(doc["security"].is_array());
     }
 }
