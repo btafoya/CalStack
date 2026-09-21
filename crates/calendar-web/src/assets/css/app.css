@@ -61,6 +61,17 @@ body > .container {
   flex-grow: 1;
 }
 
+/* The calendar page's row (sidebar + tab panes) fills the space between the
+   navbar and the footer, so the sidebar border always reaches the bottom. */
+body > .container-fluid {
+  display: flex;
+  flex-direction: column;
+}
+
+body > .container-fluid > .row {
+  flex-grow: 1;
+}
+
 /* Primary accents (Bootstrap 5.3.3 bakes #0d6efd into these) */
 .btn-primary {
   --bs-btn-bg: #1554C0;
