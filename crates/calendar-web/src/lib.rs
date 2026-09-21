@@ -265,6 +265,7 @@ macro_rules! subpage_header {
     <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="CalStack"></a>
     <div class="collapse navbar-collapse" id="navbar-menu">
       <ul class="navbar-nav">
+        <li class="nav-item"><a class="nav-link" id="contacts-nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
         <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers"><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
         <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials"><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
         <li class="nav-item"><a class="nav-link" id="admin-nav-link" href="/admin"><span class="nav-link-icon me-1"><i class="bi bi-shield-lock"></i></span><span class="nav-link-title">Admin</span></a></li>
@@ -384,6 +385,7 @@ const APP_PAGE_HEAD: &str = concat!(
     <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="CalStack"></a>
     <div class="collapse navbar-collapse" id="navbar-menu">
       <ul class="navbar-nav">
+        <li class="nav-item"><a class="nav-link" id="contacts-nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
         <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers" hidden><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
         <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials" hidden><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
         <li class="nav-item"><a class="nav-link" id="admin-nav-link" href="/admin" hidden><span class="nav-link-icon me-1"><i class="bi bi-shield-lock"></i></span><span class="nav-link-title">Admin</span></a></li>
@@ -392,9 +394,6 @@ const APP_PAGE_HEAD: &str = concat!(
     <div class="navbar-nav flex-row order-md-last">
       <div class="nav-item me-2 d-none d-md-flex">
         <button id="search-btn" class="nav-link px-2" type="button" aria-label="Search"><i class="bi bi-search"></i></button>
-      </div>
-      <div class="nav-item me-2 d-none d-md-flex">
-        <button id="share-btn" class="nav-link px-2" type="button" aria-label="Share"><i class="bi bi-share"></i></button>
       </div>
       <div class="nav-item me-2">
         <button type="button" id="theme-toggle" class="nav-link px-0" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
@@ -429,14 +428,16 @@ const APP_PAGE_HEAD: &str = concat!(
       <ul id="sub-list" class="list-group list-group-flush small"><li class="list-group-item text-body-secondary">Loading…</li></ul>
     </aside>
     <main class="col-md-9 col-lg-10 p-3">
-      <ul class="nav nav-tabs mb-3" id="cal-tabs" hidden role="tablist">
+      <div class="d-flex align-items-start mb-3" id="tab-bar-row" hidden>
+        <ul class="nav nav-tabs flex-grow-1" id="cal-tabs" role="tablist">
         <li class="nav-item"><button class="nav-link active" id="tab-btn-calendar" data-tab="calendar" data-bs-toggle="tab" data-bs-target="#tab-calendar" type="button" role="tab" aria-selected="true">Calendar</button></li>
         <li class="nav-item"><button class="nav-link" id="tab-btn-categories" data-tab="categories" data-bs-toggle="tab" data-bs-target="#tab-categories" type="button" role="tab">Categories</button></li>
-        <li class="nav-item"><button class="nav-link" id="tab-btn-contacts" data-tab="contacts" data-bs-toggle="tab" data-bs-target="#tab-contacts" type="button" role="tab">Contacts</button></li>
         <li class="nav-item"><button class="nav-link" id="tab-btn-tasks" data-tab="tasks" data-bs-toggle="tab" data-bs-target="#tab-tasks" type="button" role="tab">Tasks</button></li>
         <li class="nav-item"><button class="nav-link" id="tab-btn-journals" data-tab="journals" data-bs-toggle="tab" data-bs-target="#tab-journals" type="button" role="tab">Journals</button></li>
         <li class="nav-item"><button class="nav-link" id="tab-btn-rules" data-tab="rules" data-bs-toggle="tab" data-bs-target="#tab-rules" type="button" role="tab" hidden>Rules</button></li>
-      </ul>
+        </ul>
+        <button id="share-btn" class="btn btn-outline-secondary btn-sm ms-2" type="button" title="Sharing and access for this calendar"><i class="bi bi-share"></i></button>
+      </div>
       <div class="tab-content">
         <div class="tab-pane fade show active" id="tab-calendar" role="tabpanel">
           <div id="calendar" hidden></div>
@@ -463,45 +464,6 @@ const APP_PAGE_HEAD: &str = concat!(
             <thead><tr><th>Preview</th><th>Name</th><th>Slug</th><th>Scope</th><th></th></tr></thead>
             <tbody id="cat-rows"><tr><td colspan="5" class="text-body-secondary">Loading…</td></tr></tbody>
           </table>
-        </div>
-        <div class="tab-pane fade" id="tab-contacts" role="tabpanel">
-          <div class="row">
-            <div class="col-md-3 mb-3">
-              <div class="d-flex align-items-center justify-content-between mb-2">
-                <h1 class="h5 mb-0">Address books</h1>
-                <button id="ab-new" class="btn btn-sm btn-outline-primary" type="button" title="New address book"><i class="bi bi-plus-lg"></i></button>
-              </div>
-              <div class="list-group" id="ab-list"><div class="list-group-item text-body-secondary">Loading…</div></div>
-              <p class="text-body-secondary small mt-2">Personal books sync via CardDAV at <code>/contacts/</code>. The directory book lists every user in your tenant and is read-only.</p>
-            </div>
-            <div class="col-md-9">
-              <div class="d-flex align-items-center gap-2 mb-2">
-                <h1 class="h5 mb-0" id="ab-current-name">Contacts</h1>
-                <input class="form-control form-control-sm w-auto ms-auto" id="ct-search" placeholder="Search">
-              </div>
-              <form id="ct-form" class="card p-3 mb-3">
-                <div class="row g-2 align-items-end">
-                  <div class="col"><label class="form-label" for="ct-name">Name</label>
-                    <input class="form-control" id="ct-name" required></div>
-                  <div class="col"><label class="form-label" for="ct-org">Organization</label>
-                    <input class="form-control" id="ct-org"></div>
-                  <div class="col"><label class="form-label" for="ct-email">Email</label>
-                    <input class="form-control" id="ct-email" type="email"></div>
-                  <div class="col"><label class="form-label" for="ct-tel">Phone</label>
-                    <input class="form-control" id="ct-tel" type="tel"></div>
-                  <div class="col-auto form-check mb-2">
-                    <input class="form-check-input" type="checkbox" id="ct-mobile" checked>
-                    <label class="form-check-label" for="ct-mobile">Mobile</label></div>
-                  <div class="col-auto d-flex align-items-end">
-                    <button class="btn btn-primary" type="submit">Add contact</button></div>
-                </div>
-              </form>
-              <table class="table table-sm bg-body">
-                <thead><tr><th>Name</th><th>Org</th><th>Email</th><th>Phone</th><th></th></tr></thead>
-                <tbody id="ct-rows"><tr><td colspan="5" class="text-body-secondary">Loading…</td></tr></tbody>
-              </table>
-            </div>
-          </div>
         </div>
         <div class="tab-pane fade" id="tab-tasks" role="tabpanel">
           <div class="row g-2 mb-3">
@@ -898,7 +860,6 @@ const APP_PAGE_HEAD: &str = concat!(
 <script src="/assets/js/journals.js?v=17"></script>
 <script src="/assets/js/rules.js?v=17"></script>
 <script src="/assets/js/categories.js?v=17"></script>
-<script src="/assets/js/contacts.js?v=17"></script>
 <script src="/assets/js/app.js?v=17"></script>
 </body></html>"#
 );
@@ -1086,12 +1047,89 @@ async fn rules_page(query: axum::extract::RawQuery) -> impl IntoResponse {
     redirect_to_tab("rules", query).await
 }
 
+// Contacts stays a standalone page: address books are tenant-wide, not
+// calendar-scoped, so it lives in the navbar rather than the calendar tabs.
+const CONTACTS_PAGE: &str = concat!(
+    r#"<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CalStack — Contacts</title>
+<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
+<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
+<link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+<script src="/assets/js/theme.js"></script>
+</head>
+<body class="bg-body-tertiary">
+"#,
+    subpage_header!(),
+    r#"<div class="container-fluid p-3">
+  <div class="row">
+    <div class="col-md-3 mb-3">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <h1 class="h5 mb-0">Address books</h1>
+        <button id="ab-new" class="btn btn-sm btn-outline-primary" type="button" title="New address book"><i class="bi bi-plus-lg"></i></button>
+      </div>
+      <div class="list-group" id="ab-list"><div class="list-group-item text-body-secondary">Loading…</div></div>
+      <p class="text-body-secondary small mt-2">Personal books sync via CardDAV at <code>/contacts/</code>. The directory book lists every user in your tenant and is read-only.</p>
+    </div>
+    <div class="col-md-9">
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <h1 class="h5 mb-0" id="ab-current-name">Contacts</h1>
+        <input class="form-control form-control-sm w-auto ms-auto" id="ct-search" placeholder="Search">
+      </div>
+      <form id="ct-form" class="card p-3 mb-3">
+        <div class="row g-2 align-items-end">
+          <div class="col"><label class="form-label" for="ct-name">Name</label>
+            <input class="form-control" id="ct-name" required></div>
+          <div class="col"><label class="form-label" for="ct-org">Organization</label>
+            <input class="form-control" id="ct-org"></div>
+          <div class="col"><label class="form-label" for="ct-email">Email</label>
+            <input class="form-control" id="ct-email" type="email"></div>
+          <div class="col"><label class="form-label" for="ct-tel">Phone</label>
+            <input class="form-control" id="ct-tel" type="tel"></div>
+          <div class="col-auto form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="ct-mobile" checked>
+            <label class="form-check-label" for="ct-mobile">Mobile</label></div>
+          <div class="col-auto d-flex align-items-end">
+            <button class="btn btn-primary" type="submit">Add contact</button></div>
+        </div>
+      </form>
+      <table class="table table-sm bg-body">
+        <thead><tr><th>Name</th><th>Org</th><th>Email</th><th>Phone</th><th></th></tr></thead>
+        <tbody id="ct-rows"><tr><td colspan="5" class="text-body-secondary">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script src="/assets/js/jquery.min.js"></script>
+<script src="/assets/js/jquery-migrate.min.js"></script>
+<script src="/assets/js/api.js"></script>
+<script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/sweetalert2.min.js"></script>
+<script src="/assets/js/dialogs.js"></script>
+<script src="/assets/js/contacts.js"></script>
+"#,
+    footer_html!(),
+    r#"</body></html>"#
+);
+
 async fn categories_page(query: axum::extract::RawQuery) -> impl IntoResponse {
     redirect_to_tab("categories", query).await
 }
 
 async fn contacts_page() -> impl IntoResponse {
-    redirect_to_tab("contacts", axum::extract::RawQuery(None)).await
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        CONTACTS_PAGE,
+    )
 }
 
 async fn admin_page() -> impl IntoResponse {

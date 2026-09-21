@@ -47,6 +47,20 @@
   --calstack-green: #20D866;
 }
 
+/* Full-height pages: the content area stretches so short pages still fill
+   the viewport (footer pinned to the bottom) and tab panes get the full
+   column height. */
+body {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+body > .container-fluid,
+body > .container {
+  flex-grow: 1;
+}
+
 /* Primary accents (Bootstrap 5.3.3 bakes #0d6efd into these) */
 .btn-primary {
   --bs-btn-bg: #1554C0;
@@ -153,6 +167,8 @@
 /* Subtle 2px brand accent along the bottom of the header. */
 header.navbar {
   position: relative;
+  /* The merged navbar keeps the old nav band's secondary surface. */
+  background-color: var(--bs-secondary-bg) !important;
 }
 
 header.navbar::after {
