@@ -48,11 +48,11 @@ DATABASE_URL="$TEST_DB_URL" \
 BIND_ADDR="127.0.0.1:$PORT" APP_ENCRYPTION_KEY="$APPKEY" RUST_LOG=warn \
   setsid "$BIN" serve >"$DATA/server.log" 2>&1 &
 SRV_PID=$!
-for _ in $(seq 1 50); do
+for _ in $(seq 1 150); do
   curl -s -m 1 "$BASE/healthz" >/dev/null 2>&1 && break
   sleep 0.2
 done
-curl -s "$BASE/healthz" | grep -q ok || fail "server did not start (see $DATA/server.log)"
+curl -s "$BASE/healthz" | grep -q ok || { echo "--- server.log:" >&2; cat "$DATA/server.log" >&2; fail "server did not start (see $DATA/server.log)"; }
 
 # ============ helpers ============
 register() { # user email password -> sets session jar + csrf file
@@ -713,8 +713,8 @@ DATABASE_URL="$TEST_DB_URL" \
 BIND_ADDR="127.0.0.1:$PORT" APP_ENCRYPTION_KEY="$APPKEY" RUST_LOG=warn \
   setsid "$BIN" serve >>"$DATA/server.log" 2>&1 &
 SRV_PID=$!
-for _ in $(seq 1 50); do curl -s -m 1 "$BASE/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
-curl -s "$BASE/healthz" | grep -q ok || fail "server did not restart"
+for _ in $(seq 1 150); do curl -s -m 1 "$BASE/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
+curl -s "$BASE/healthz" | grep -q ok || { echo "--- server.log:" >&2; tail -n 40 "$DATA/server.log" >&2; fail "server did not restart"; }
 curl -s -b "$DATA/alice.jar" "$BASE/api/auth/me" | grep -q '"username"' \
   || fail "session did not survive the restart"
 for _ in $(seq 1 120); do
