@@ -16,11 +16,29 @@ fn places_key(config: &Config) -> Result<&str, AppError> {
         .ok_or_else(|| AppError::bad_request("place autocomplete is not configured"))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct AutocompleteQuery {
     q: String,
 }
 
+/// One autocomplete suggestion.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct PlaceSuggestion {
+    /// Display label for the picker.
+    label: String,
+    /// Opaque Places place id; feed it to /api/places/{place_id}.
+    place_id: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/places/autocomplete",
+    params(("q" = String, Query, description = "free-text search input")),
+    responses(
+        (status = 200, description = "suggestions", body = Vec<PlaceSuggestion>),
+        (status = 400, description = "places not configured or lookup failed"),
+    )
+)]
 async fn places_autocomplete(
     State(AppState { pool, config, .. }): State<AppState>,
     headers: HeaderMap,
@@ -118,6 +136,15 @@ fn place_details_to_location(details: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/places/{place_id}",
+    params(("place_id" = String, Path, description = "opaque Places place id")),
+    responses(
+        (status = 200, description = "mapped onto the event LocationBody shape", body = crate::events_api::LocationBody),
+        (status = 400, description = "places not configured or lookup failed"),
+    )
+)]
 async fn place_details(
     State(AppState { pool, config, .. }): State<AppState>,
     headers: HeaderMap,
@@ -152,6 +179,14 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/places/autocomplete", get(places_autocomplete))
         .route("/api/places/{place_id}", get(place_details))
 }
+
+/// OpenAPI for the places module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(places_autocomplete, place_details),
+    components(schemas(AutocompleteQuery, PlaceSuggestion, crate::events_api::LocationBody))
+)]
+pub(crate) struct PlacesApi;
 
 #[cfg(test)]
 mod places_tests {

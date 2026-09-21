@@ -48,15 +48,35 @@ fn validate_trigger_type(trigger_type: &str) -> Result<(), AppError> {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct RuleBody {
     name: String,
     enabled: Option<bool>,
     trigger_type: String,
     /// Calendar this rule applies to; omit/null for tenant-wide (all calendars).
     calendar_id: Option<Uuid>,
+    #[schema(value_type = Object)]
     conditions: Option<Value>,
+    #[schema(value_type = Object)]
     actions: Option<Value>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct RuleView {
+    id: Uuid,
+    name: String,
+    enabled: bool,
+    trigger_type: String,
+    calendar_id: Option<Uuid>,
+    #[schema(value_type = Object)]
+    conditions: Value,
+    #[schema(value_type = Object)]
+    actions: Value,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct RuleCreatedView {
+    id: Uuid,
 }
 
 /// The tenant's enabled Twilio provider, config decrypted.
@@ -269,14 +289,30 @@ fn lookup<'a>(context: &'a Value, path: &str) -> Option<&'a Value> {
 
 // ============ provider CRUD ============
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct ProviderBody {
     kind: String,
     name: String,
     /// Credentials envelope-encrypted with the environment key before storage.
+    #[schema(value_type = Object)]
     config: Value,
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ProviderCreatedView {
+    id: Uuid,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/notification-providers",
+    request_body = ProviderBody,
+    responses(
+        (status = 201, description = "created (upsert per tenant/kind/name); webpush providers get a server-generated VAPID key pair", body = ProviderCreatedView),
+        (status = 400, description = "unknown provider kind"),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn create_provider(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -321,6 +357,22 @@ async fn create_provider(
     Ok((axum::http::StatusCode::CREATED, Json(json!({"id": id}))))
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ProviderView {
+    id: Uuid,
+    kind: String,
+    name: String,
+    enabled: bool,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/notification-providers",
+    responses(
+        (status = 200, description = "tenant providers (no config)", body = Vec<ProviderView>),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn list_providers(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -343,13 +395,27 @@ async fn list_providers(
     .fetch_all(&pool)
     .await
     .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
-    Ok(Json(json!(
+    Ok(Json(
         rows.iter()
-            .map(|r| json!({"id": r.id, "kind": r.kind, "name": r.name, "enabled": r.enabled}))
-            .collect::<Vec<_>>()
-    )))
+            .map(|r| ProviderView {
+                id: r.id,
+                kind: r.kind.clone(),
+                name: r.name.clone(),
+                enabled: r.enabled,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/notification-providers/{id}",
+    params(("id" = Uuid, Path, description = "provider id")),
+    responses(
+        (status = 200, description = "deleted", body = crate::OkView),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn delete_provider(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -368,8 +434,29 @@ async fn delete_provider(
     Ok(Json(json!({"ok": true})))
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ProviderDetailView {
+    id: Uuid,
+    kind: String,
+    name: String,
+    enabled: bool,
+    /// Decrypted credentials (admin-only; the edit modal pre-fills from this).
+    #[schema(value_type = Object)]
+    config: Value,
+}
+
 /// One provider with its decrypted config (admin-only; the edit modal
 /// pre-fills credentials from this).
+#[utoipa::path(
+    get,
+    path = "/api/notification-providers/{id}",
+    params(("id" = Uuid, Path, description = "provider id")),
+    responses(
+        (status = 200, description = "provider with decrypted config (session + admin only)", body = ProviderDetailView),
+        (status = 403, description = "not admin or not a browser session"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn get_provider(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -413,13 +500,24 @@ async fn get_provider(
     })))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct ProviderPatch {
     name: Option<String>,
     enabled: Option<bool>,
+    #[schema(value_type = Object)]
     config: Option<Value>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/notification-providers/{id}",
+    params(("id" = Uuid, Path, description = "provider id")),
+    request_body = ProviderPatch,
+    responses(
+        (status = 200, description = "updated", body = crate::OkView),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn patch_provider(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -465,13 +563,33 @@ async fn patch_provider(
 /// Sends a test message through the provider's real channel. Always returns
 /// 200 with ok true/false so the UI can show the outcome inline in the test
 /// modal instead of the shared api() alert.
-#[derive(serde::Deserialize)]
+/// Always returns 200 with ok true/false so the UI can show the outcome inline
+/// in the test modal instead of the shared api() alert.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct ProviderTestBody {
     to: String,
     subject: Option<String>,
     body: Option<String>,
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ProviderTestView {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/notification-providers/{id}/test",
+    params(("id" = Uuid, Path, description = "provider id")),
+    request_body = ProviderTestBody,
+    responses(
+        (status = 200, description = "delivery attempted; ok false carries the error", body = ProviderTestView),
+        (status = 403, description = "not admin"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn test_provider(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -536,8 +654,14 @@ async fn test_provider(
     }
     .await;
     Ok(Json(match result {
-        Ok(()) => json!({"ok": true}),
-        Err(e) => json!({"ok": false, "error": e.to_string()}),
+        Ok(()) => ProviderTestView {
+            ok: true,
+            error: None,
+        },
+        Err(e) => ProviderTestView {
+            ok: false,
+            error: Some(e.to_string()),
+        },
     }))
 }
 
@@ -552,6 +676,16 @@ struct RuleListRow {
     actions: Value,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/rules",
+    request_body = RuleBody,
+    responses(
+        (status = 201, description = "created", body = RuleCreatedView),
+        (status = 400, description = "unknown trigger_type"),
+        (status = 403, description = "not admin or not calendar owner"),
+    )
+)]
 async fn create_rule(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -581,14 +715,26 @@ async fn create_rule(
     .fetch_one(&pool)
     .await
     .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
-    Ok((axum::http::StatusCode::CREATED, Json(json!({"id": id}))))
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(RuleCreatedView { id }),
+    ))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct RulesQuery {
     calendar_id: Option<Uuid>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/rules",
+    params(("calendar_id" = Option<Uuid>, Query, description = "restrict to one calendar (calendar-scoped plus tenant-wide rules)")),
+    responses(
+        (status = 200, description = "rules ordered by position", body = Vec<RuleView>),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn list_rules(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -608,23 +754,39 @@ async fn list_rules(
     .fetch_all(&pool)
     .await
     .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
-    Ok(Json(json!(
+    Ok(Json(
         rows.iter()
-            .map(|r| json!({
-                "id": r.id, "name": r.name, "enabled": r.enabled, "trigger_type": r.trigger_type,
-                "calendar_id": r.calendar_id, "conditions": r.conditions, "actions": r.actions,
-            }))
-            .collect::<Vec<_>>()
-    )))
+            .map(|r| RuleView {
+                id: r.id,
+                name: r.name.clone(),
+                enabled: r.enabled,
+                trigger_type: r.trigger_type.clone(),
+                calendar_id: r.calendar_id,
+                conditions: r.conditions.clone(),
+                actions: r.actions.clone(),
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct RuleUpdateBody {
     enabled: bool,
     /// Only present when the caller changes the trigger; validated like create.
     trigger_type: Option<String>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/rules/{id}",
+    params(("id" = Uuid, Path, description = "rule id")),
+    request_body = RuleUpdateBody,
+    responses(
+        (status = 200, description = "updated", body = crate::OkView),
+        (status = 400, description = "unknown trigger_type"),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn update_rule(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -652,6 +814,15 @@ async fn update_rule(
     Ok(Json(json!({"ok": true})))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/rules/{id}",
+    params(("id" = Uuid, Path, description = "rule id")),
+    responses(
+        (status = 200, description = "deleted", body = crate::OkView),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn delete_rule(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -686,6 +857,40 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/rules", post(create_rule).get(list_rules))
         .route("/api/rules/{id}", patch(update_rule).delete(delete_rule))
 }
+
+/// OpenAPI for the rules and notification-provider module; merged into the
+/// served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        create_provider,
+        list_providers,
+        get_provider,
+        patch_provider,
+        delete_provider,
+        test_provider,
+        create_rule,
+        list_rules,
+        update_rule,
+        delete_rule,
+    ),
+    components(schemas(
+        RuleBody,
+        RuleView,
+        RuleCreatedView,
+        RulesQuery,
+        RuleUpdateBody,
+        ProviderBody,
+        ProviderView,
+        ProviderCreatedView,
+        ProviderDetailView,
+        ProviderPatch,
+        ProviderTestBody,
+        ProviderTestView,
+        crate::OkView,
+    ))
+)]
+pub(crate) struct RulesApi;
 
 #[cfg(test)]
 mod tests {

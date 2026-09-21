@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 // ============ attachments ============
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct AttachmentBody {
     filename: String,
     content_type: String,
@@ -30,6 +30,32 @@ struct AttachmentBody {
     data: String,
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AttachmentView {
+    id: Uuid,
+    filename: String,
+    content_type: String,
+    byte_size: i64,
+    /// Only in list/meta responses; never on create (it is computed here).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/calendars/{id}/events/{event_id}/attachments",
+    params(
+        ("id" = Uuid, Path, description = "calendar id"),
+        ("event_id" = Uuid, Path, description = "event id"),
+    ),
+    request_body = AttachmentBody,
+    responses(
+        (status = 201, description = "stored in PostgreSQL", body = AttachmentView),
+        (status = 400, description = "invalid base64 or over the byte cap"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn create_attachment(
     State(AppState { pool, config, .. }): State<AppState>,
     headers: HeaderMap,
@@ -70,13 +96,29 @@ async fn create_attachment(
     .await?;
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(json!({
-            "id": row.id, "filename": row.filename, "content_type": row.content_type,
-            "byte_size": row.byte_size, "created_at": row.created_at,
-        })),
+        Json(AttachmentView {
+            id: row.id,
+            filename: row.filename,
+            content_type: row.content_type,
+            byte_size: row.byte_size,
+            sha256: None,
+            created_at: row.created_at,
+        }),
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/calendars/{id}/events/{event_id}/attachments",
+    params(
+        ("id" = Uuid, Path, description = "calendar id"),
+        ("event_id" = Uuid, Path, description = "event id"),
+    ),
+    responses(
+        (status = 200, description = "attachments", body = Vec<AttachmentView>),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn list_attachments(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -95,17 +137,30 @@ async fn list_attachments(
         return Err(AppError::NotFound);
     }
     let rows = db::attachments::list_attachments(&pool, event_id).await?;
-    Ok(Json(json!(
+    Ok(Json(
         rows.iter()
-            .map(|r| json!({
-                "id": r.id, "filename": r.filename, "content_type": r.content_type,
-                "byte_size": r.byte_size, "sha256": hex(&r.sha256), "created_at": r.created_at,
-            }))
-            .collect::<Vec<_>>()
-    )))
+            .map(|r| AttachmentView {
+                id: r.id,
+                filename: r.filename.clone(),
+                content_type: r.content_type.clone(),
+                byte_size: r.byte_size,
+                sha256: Some(hex(&r.sha256)),
+                created_at: r.created_at,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// Attachment download, guarded by the event's calendar ACL.
+#[utoipa::path(
+    get,
+    path = "/api/attachments/{id}",
+    params(("id" = Uuid, Path, description = "attachment id")),
+    responses(
+        (status = 200, description = "raw bytes with content-type and content-disposition"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn get_attachment(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -142,6 +197,15 @@ async fn get_attachment(
 }
 
 /// Attachment metadata only (no bytes), same ACL as the download.
+#[utoipa::path(
+    get,
+    path = "/api/attachments/{id}/meta",
+    params(("id" = Uuid, Path, description = "attachment id")),
+    responses(
+        (status = 200, description = "metadata", body = AttachmentView),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn get_attachment_meta(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -164,12 +228,25 @@ async fn get_attachment_meta(
     )
     .await?;
     let meta = db::attachments::get_attachment_meta(&pool, attachment_id).await?;
-    Ok(Json(json!({
-        "id": meta.id, "filename": meta.filename, "content_type": meta.content_type,
-        "byte_size": meta.byte_size, "sha256": hex(&meta.sha256), "created_at": meta.created_at,
-    })))
+    Ok(Json(AttachmentView {
+        id: meta.id,
+        filename: meta.filename,
+        content_type: meta.content_type,
+        byte_size: meta.byte_size,
+        sha256: Some(hex(&meta.sha256)),
+        created_at: meta.created_at,
+    }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/attachments/{id}",
+    params(("id" = Uuid, Path, description = "attachment id")),
+    responses(
+        (status = 200, description = "deleted", body = crate::OkView),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn delete_attachment(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -202,13 +279,80 @@ fn hex(bytes: &[u8]) -> String {
 
 // ============ search ============
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct SearchQueryParams {
+    /// Free-text search over summaries; one of q/attendee required.
     q: Option<String>,
+    /// Search by attendee email or telephone.
     attendee: Option<String>,
     limit: Option<i64>,
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct SearchEventHit {
+    id: Uuid,
+    calendar_id: Uuid,
+    uid: String,
+    summary: String,
+    starts_at: Option<chrono::DateTime<chrono::Utc>>,
+    ends_at: Option<chrono::DateTime<chrono::Utc>>,
+    start_date: Option<chrono::NaiveDate>,
+    all_day: bool,
+    categories: Vec<String>,
+    rank: f32,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct SearchTaskHit {
+    id: Uuid,
+    calendar_id: Uuid,
+    uid: String,
+    summary: String,
+    starts_at: Option<chrono::DateTime<chrono::Utc>>,
+    start_date: Option<chrono::NaiveDate>,
+    due_at: Option<chrono::DateTime<chrono::Utc>>,
+    due_date: Option<chrono::NaiveDate>,
+    status: Option<String>,
+    parent_uid: Option<String>,
+    url: Option<String>,
+    categories: Vec<String>,
+    rank: f32,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct SearchJournalHit {
+    id: Uuid,
+    calendar_id: Uuid,
+    uid: String,
+    summary: String,
+    starts_at: Option<chrono::DateTime<chrono::Utc>>,
+    start_date: Option<chrono::NaiveDate>,
+    status: Option<String>,
+    url: Option<String>,
+    categories: Vec<String>,
+    rank: f32,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct SearchView {
+    events: Vec<SearchEventHit>,
+    tasks: Vec<SearchTaskHit>,
+    journals: Vec<SearchJournalHit>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/search",
+    params(
+        ("q" = Option<String>, Query, description = "free-text query"),
+        ("attendee" = Option<String>, Query, description = "attendee email or telephone"),
+        ("limit" = Option<i64>, Query, description = "max hits per kind (default 50)"),
+    ),
+    responses(
+        (status = 200, description = "event, task and journal hits", body = SearchView),
+        (status = 400, description = "q or attendee required"),
+    )
+)]
 async fn search(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -226,52 +370,103 @@ async fn search(
     let hits = db::search::search_events(&pool, auth.user.id, &query).await?;
     let task_hits = db::search::search_tasks(&pool, auth.user.id, &query).await?;
     let journal_hits = db::search::search_journals(&pool, auth.user.id, &query).await?;
-    // JSON arrays cannot carry keys, so "add tasks/journals beside the existing
-    // top-level array" lands as an object: the event hits keep their exact
-    // item shape under "events", "tasks"/"journals" are additive keys.
-    Ok(Json(json!({
-        "events": hits.iter().map(|hit| {
+    // The event hits keep their exact item shape under "events";
+    // "tasks"/"journals" are additive keys.
+    Ok(Json(SearchView {
+        events: hits
+            .iter()
+            .map(|hit| {
                 let e = &hit.event;
-                json!({
-                    "id": e.id, "calendar_id": e.calendar_id, "uid": e.uid,
-                    "summary": e.summary, "starts_at": e.starts_at, "ends_at": e.ends_at,
-                    "start_date": e.start_date, "all_day": e.all_day,
-                    "categories": e.categories, "rank": hit.rank,
-                })
+                SearchEventHit {
+                    id: e.id,
+                    calendar_id: e.calendar_id,
+                    uid: e.uid.clone(),
+                    summary: e.summary.clone(),
+                    starts_at: e.starts_at,
+                    ends_at: e.ends_at,
+                    start_date: e.start_date,
+                    all_day: e.all_day,
+                    categories: e.categories.clone(),
+                    rank: hit.rank,
+                }
             })
-            .collect::<Vec<_>>(),
-        "tasks": task_hits.iter().map(|hit| {
+            .collect(),
+        tasks: task_hits
+            .iter()
+            .map(|hit| {
                 let t = &hit.task;
-                json!({
-                    "id": t.id, "calendar_id": t.calendar_id, "uid": t.uid,
-                    "summary": t.summary, "starts_at": t.starts_at, "start_date": t.start_date,
-                    "due_at": t.due_at, "due_date": t.due_date,
-                    "status": t.status, "parent_uid": t.parent_uid, "url": t.url,
-                    "categories": t.categories, "rank": hit.rank,
-                })
+                SearchTaskHit {
+                    id: t.id,
+                    calendar_id: t.calendar_id,
+                    uid: t.uid.clone(),
+                    summary: t.summary.clone(),
+                    starts_at: t.starts_at,
+                    start_date: t.start_date,
+                    due_at: t.due_at,
+                    due_date: t.due_date,
+                    status: t.status.clone(),
+                    parent_uid: t.parent_uid.clone(),
+                    url: t.url.clone(),
+                    categories: t.categories.clone(),
+                    rank: hit.rank,
+                }
             })
-            .collect::<Vec<_>>(),
-        "journals": journal_hits.iter().map(|hit| {
+            .collect(),
+        journals: journal_hits
+            .iter()
+            .map(|hit| {
                 let j = &hit.journal;
-                json!({
-                    "id": j.id, "calendar_id": j.calendar_id, "uid": j.uid,
-                    "summary": j.summary, "starts_at": j.starts_at, "start_date": j.start_date,
-                    "status": j.status, "url": j.url,
-                    "categories": j.categories, "rank": hit.rank,
-                })
+                SearchJournalHit {
+                    id: j.id,
+                    calendar_id: j.calendar_id,
+                    uid: j.uid.clone(),
+                    summary: j.summary.clone(),
+                    starts_at: j.starts_at,
+                    start_date: j.start_date,
+                    status: j.status.clone(),
+                    url: j.url.clone(),
+                    categories: j.categories.clone(),
+                    rank: hit.rank,
+                }
             })
-            .collect::<Vec<_>>(),
-    })))
+            .collect(),
+    }))
 }
 
 /// Application change stream (docs/PRD.md section 11): change_log entries
 /// after a sequence, across every readable calendar.
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct ChangesQuery {
+    /// Change-log sequence to resume from (0 = everything).
     since: Option<i64>,
     limit: Option<i64>,
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ChangeView {
+    seq: i64,
+    calendar_id: Uuid,
+    resource_id: Uuid,
+    operation: String,
+    changed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ChangesView {
+    changes: Vec<ChangeView>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/changes",
+    params(
+        ("since" = Option<i64>, Query, description = "resume cursor (change-log seq; 0 = from the start)"),
+        ("limit" = Option<i64>, Query, description = "max entries (default 500)"),
+    ),
+    responses(
+        (status = 200, description = "change-log entries across every readable calendar", body = ChangesView),
+    )
+)]
 async fn list_changes(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -285,12 +480,18 @@ async fn list_changes(
         params.limit.unwrap_or(500),
     )
     .await?;
-    Ok(Json(json!({
-        "changes": rows.iter().map(|c| json!({
-            "seq": c.seq, "calendar_id": c.calendar_id, "resource_id": c.resource_id,
-            "operation": c.operation, "changed_at": c.changed_at,
-        })).collect::<Vec<_>>(),
-    })))
+    Ok(Json(ChangesView {
+        changes: rows
+            .iter()
+            .map(|c| ChangeView {
+                seq: c.seq,
+                calendar_id: c.calendar_id,
+                resource_id: c.resource_id,
+                operation: c.operation.clone(),
+                changed_at: c.changed_at,
+            })
+            .collect(),
+    }))
 }
 
 // ============ change stream: SSE adapter ============
@@ -408,6 +609,14 @@ struct StreamChangesQuery {
     since: Option<i64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/changes/stream",
+    params(("since" = Option<i64>, Query, description = "resume cursor; a fresh connect (no since) starts from the current head and receives a sync frame first")),
+    responses(
+        (status = 200, description = "text/event-stream: sync | change | done frames; ends with a done cursor after at most 30 minutes (client reconnects with its last seq)"),
+    )
+)]
 async fn stream_changes(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -449,6 +658,23 @@ type NotificationRow = (
     Option<chrono::DateTime<chrono::Utc>>,
 );
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct NotificationView {
+    id: Uuid,
+    channel: String,
+    title: Option<String>,
+    body: Option<String>,
+    read_at: Option<chrono::DateTime<chrono::Utc>>,
+    read: bool,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/notifications",
+    responses(
+        (status = 200, description = "the caller's notifications, newest first (max 200)", body = Vec<NotificationView>),
+    )
+)]
 async fn list_notifications(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -462,16 +688,26 @@ async fn list_notifications(
     .fetch_all(&pool)
     .await
     .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
-    Ok(Json(json!(
+    Ok(Json(
         rows.iter()
-            .map(|(id, channel, title, body, read_at)| json!({
-                "id": id, "channel": channel, "title": title, "body": body,
-                "read_at": read_at, "read": read_at.is_some(),
-            }))
-            .collect::<Vec<_>>()
-    )))
+            .map(|(id, channel, title, body, read_at)| NotificationView {
+                id: *id,
+                channel: channel.clone(),
+                title: title.clone(),
+                body: body.clone(),
+                read_at: *read_at,
+                read: read_at.is_some(),
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/notifications/{id}/read",
+    params(("id" = Uuid, Path, description = "notification id")),
+    responses((status = 200, description = "marked read", body = crate::OkView))
+)]
 async fn mark_notification_read(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -499,6 +735,25 @@ type AuditRow = (
     chrono::DateTime<chrono::Utc>,
 );
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AuditView {
+    seq: i64,
+    tenant_id: Option<Uuid>,
+    action: String,
+    object_type: String,
+    change_summary: Option<serde_json::Value>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/audit",
+    params(("limit" = Option<i64>, Query, description = "max entries (default 100, capped at 1000)")),
+    responses(
+        (status = 200, description = "audit trail, newest first", body = Vec<AuditView>),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn list_audit(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -516,14 +771,18 @@ async fn list_audit(
     .fetch_all(&pool)
     .await
     .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
-    Ok(Json(json!(
+    Ok(Json(
         rows.iter()
-            .map(|(seq, tenant, action, object, summary, at)| json!({
-                "seq": seq, "tenant_id": tenant, "action": action,
-                "object_type": object, "change_summary": summary, "created_at": at,
-            }))
-            .collect::<Vec<_>>()
-    )))
+            .map(|(seq, tenant, action, object, summary, at)| AuditView {
+                seq: *seq,
+                tenant_id: *tenant,
+                action: action.clone(),
+                object_type: object.clone(),
+                change_summary: summary.clone(),
+                created_at: *at,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 pub fn router() -> axum::Router<crate::AppState> {
@@ -544,6 +803,41 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/notifications/{id}/read", post(mark_notification_read))
         .route("/api/audit", get(list_audit))
 }
+
+/// OpenAPI for the extras module (attachments, search, change stream,
+/// notifications, audit); merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        create_attachment,
+        list_attachments,
+        get_attachment,
+        get_attachment_meta,
+        delete_attachment,
+        search,
+        list_changes,
+        stream_changes,
+        list_notifications,
+        mark_notification_read,
+        list_audit,
+    ),
+    components(schemas(
+        AttachmentBody,
+        AttachmentView,
+        SearchQueryParams,
+        SearchEventHit,
+        SearchTaskHit,
+        SearchJournalHit,
+        SearchView,
+        ChangesQuery,
+        ChangeView,
+        ChangesView,
+        NotificationView,
+        AuditView,
+        crate::OkView,
+    ))
+)]
+pub(crate) struct ExtrasApi;
 
 #[cfg(test)]
 mod tests {

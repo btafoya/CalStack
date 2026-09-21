@@ -48,7 +48,7 @@
 **Goal**: Remaining modules converted; handled in small sub-batches to keep each commit green.
 **Success Criteria**: All `/api/*` routes come from annotations; legacy fragment contains no paths.
 **Tests**: compatibility fixture tests per converted view; completeness test covers the full ~66-path inventory.
-**Status**: Not Started
+**Status**: Complete (all 10 remaining modules annotated — sharing, webhooks, push, rules+providers, categories, contacts, admin, extras [attachments/search/changes/stream/notifications/audit], places. First-time documentation for /api/search, /api/changes, /api/changes/stream, /api/notifications, /api/attachments/{id}/meta. Legacy `openapi_document()` reduced to info + security schemes only; its pin test now asserts zero paths — the complete /api inventory is pinned in calendar-server's main.rs test)
 
 ## Stage 5: Delete legacy doc + response-schema validation in interop
 

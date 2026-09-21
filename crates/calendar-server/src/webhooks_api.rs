@@ -53,19 +53,30 @@ fn encrypt_sign_key(
 }
 
 /// One webhook without its secret; `has_sign_key` is all callers ever learn.
-fn webhook_json(w: &db::webhooks::WebhookRow) -> Value {
-    json!({
-        "id": w.id,
-        "url": w.url,
-        "name": w.name,
-        "enabled": w.enabled,
-        "events": w.events,
-        "has_sign_key": w.secret_encrypted.is_some(),
-        "created_at": w.created_at.to_rfc3339(),
-    })
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct WebhookView {
+    id: Uuid,
+    url: String,
+    name: String,
+    enabled: bool,
+    events: Vec<String>,
+    has_sign_key: bool,
+    created_at: String,
 }
 
-#[derive(serde::Deserialize)]
+fn webhook_json(w: &db::webhooks::WebhookRow) -> WebhookView {
+    WebhookView {
+        id: w.id,
+        url: w.url.clone(),
+        name: w.name.clone(),
+        enabled: w.enabled,
+        events: w.events.clone(),
+        has_sign_key: w.secret_encrypted.is_some(),
+        created_at: w.created_at.to_rfc3339(),
+    }
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct WebhookBody {
     url: String,
     name: String,
@@ -76,6 +87,16 @@ struct WebhookBody {
     sign_key: Option<String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/webhooks",
+    request_body = WebhookBody,
+    responses(
+        (status = 201, description = "created", body = WebhookView),
+        (status = 400, description = "bad url or unknown trigger"),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn create_webhook(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -110,6 +131,14 @@ async fn create_webhook(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/webhooks",
+    responses(
+        (status = 200, description = "tenant webhooks", body = Vec<WebhookView>),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn list_webhooks(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -118,11 +147,19 @@ async fn list_webhooks(
     require_admin(&auth)?;
     let tenant_id = db::find_personal_tenant(&pool, auth.user.id).await?;
     let rows = db::webhooks::list_webhooks(&pool, tenant_id).await?;
-    Ok(Json(json!(
-        rows.iter().map(webhook_json).collect::<Vec<_>>()
-    )))
+    Ok(Json(rows.iter().map(webhook_json).collect::<Vec<_>>()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/webhooks/{id}",
+    params(("id" = Uuid, Path, description = "webhook id")),
+    responses(
+        (status = 200, description = "webhook", body = WebhookView),
+        (status = 403, description = "not admin"),
+        (status = 404, description = "absent or other tenant"),
+    )
+)]
 async fn get_webhook(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -140,7 +177,7 @@ async fn get_webhook(
     Ok(Json(webhook_json(&webhook)))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct WebhookPatch {
     url: Option<String>,
     name: Option<String>,
@@ -150,6 +187,17 @@ struct WebhookPatch {
     sign_key: Option<String>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/webhooks/{id}",
+    params(("id" = Uuid, Path, description = "webhook id")),
+    request_body = WebhookPatch,
+    responses(
+        (status = 200, description = "updated", body = WebhookView),
+        (status = 403, description = "not admin"),
+        (status = 404, description = "absent or other tenant"),
+    )
+)]
 async fn patch_webhook(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -189,6 +237,16 @@ async fn patch_webhook(
     Ok(Json(webhook_json(&updated)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/webhooks/{id}",
+    params(("id" = Uuid, Path, description = "webhook id")),
+    responses(
+        (status = 200, description = "deleted", body = crate::OkView),
+        (status = 403, description = "not admin"),
+        (status = 404, description = "absent or other tenant"),
+    )
+)]
 async fn delete_webhook(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -206,9 +264,27 @@ async fn delete_webhook(
     Ok(Json(json!({"ok": true})))
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct WebhookTestView {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    delivery_id: Uuid,
+}
+
 /// Sends a real signed delivery with a fake event to the configured URL,
 /// synchronously, and records the attempt — mirrors the notification-provider
 /// test pattern (always 200 with ok true/false).
+#[utoipa::path(
+    post,
+    path = "/api/webhooks/{id}/test",
+    params(("id" = Uuid, Path, description = "webhook id")),
+    responses(
+        (status = 200, description = "delivery attempted; ok false carries the error", body = WebhookTestView),
+        (status = 403, description = "not admin"),
+        (status = 404, description = "absent or other tenant"),
+    )
+)]
 async fn test_webhook(
     State(AppState { pool, crypto, .. }): State<AppState>,
     headers: HeaderMap,
@@ -240,13 +316,40 @@ async fn test_webhook(
     )
     .await
     {
-        Ok(()) => Ok(Json(json!({"ok": true, "delivery_id": delivery_id}))),
-        Err(e) => Ok(Json(
-            json!({"ok": false, "error": e, "delivery_id": delivery_id}),
-        )),
+        Ok(()) => Ok(Json(WebhookTestView {
+            ok: true,
+            error: None,
+            delivery_id,
+        })),
+        Err(e) => Ok(Json(WebhookTestView {
+            ok: false,
+            error: Some(e),
+            delivery_id,
+        })),
     }
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct DeliveryView {
+    id: Uuid,
+    status: String,
+    attempts: i32,
+    response_code: Option<i32>,
+    error: Option<String>,
+    delivered_at: Option<String>,
+    created_at: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/webhooks/{id}/deliveries",
+    params(("id" = Uuid, Path, description = "webhook id")),
+    responses(
+        (status = 200, description = "last 50 deliveries", body = Vec<DeliveryView>),
+        (status = 403, description = "not admin"),
+        (status = 404, description = "absent or other tenant"),
+    )
+)]
 async fn list_deliveries(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -260,19 +363,19 @@ async fn list_deliveries(
         return Err(AppError::NotFound);
     }
     let rows = db::webhooks::list_deliveries(&pool, webhook_id, 50).await?;
-    Ok(Json(json!(
+    Ok(Json(
         rows.iter()
-            .map(|d| json!({
-                "id": d.id,
-                "status": d.status,
-                "attempts": d.attempts,
-                "response_code": d.response_code,
-                "error": d.error,
-                "delivered_at": d.delivered_at.map(|t| t.to_rfc3339()),
-                "created_at": d.created_at.to_rfc3339(),
-            }))
-            .collect::<Vec<_>>()
-    )))
+            .map(|d| DeliveryView {
+                id: d.id,
+                status: d.status.clone(),
+                attempts: d.attempts,
+                response_code: d.response_code,
+                error: d.error.clone(),
+                delivered_at: d.delivered_at.map(|t| t.to_rfc3339()),
+                created_at: d.created_at.to_rfc3339(),
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// Minimal EventRow for the synthetic test event (no DB row behind it).
@@ -329,6 +432,29 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/webhooks/{id}/test", post(test_webhook))
         .route("/api/webhooks/{id}/deliveries", get(list_deliveries))
 }
+
+/// OpenAPI for the webhooks module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        create_webhook,
+        list_webhooks,
+        get_webhook,
+        patch_webhook,
+        delete_webhook,
+        test_webhook,
+        list_deliveries
+    ),
+    components(schemas(
+        WebhookBody,
+        WebhookPatch,
+        WebhookView,
+        WebhookTestView,
+        DeliveryView,
+        crate::OkView,
+    ))
+)]
+pub(crate) struct WebhooksApi;
 
 /// Fires the tenant's matching webhooks for one event trigger. Fire-and-forget:
 /// enqueue failures are logged and skipped, never breaking the mutation.

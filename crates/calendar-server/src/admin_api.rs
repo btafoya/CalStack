@@ -10,17 +10,39 @@ use axum::{
     routing::{get, patch},
 };
 use calendar_db::{self as db, UserRow};
-use serde_json::json;
 use uuid::Uuid;
 
-fn admin_user_view(user: &UserRow) -> serde_json::Value {
-    json!({
-        "id": user.id, "username": user.username, "email": user.email,
-        "display_name": user.display_name, "is_admin": user.is_admin,
-        "disabled": user.disabled_at.is_some(), "created_at": user.created_at,
-    })
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AdminUserView {
+    id: Uuid,
+    username: String,
+    email: String,
+    display_name: Option<String>,
+    is_admin: bool,
+    disabled: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
+fn admin_user_view(user: &UserRow) -> AdminUserView {
+    AdminUserView {
+        id: user.id,
+        username: user.username.clone(),
+        email: user.email.clone(),
+        display_name: user.display_name.clone(),
+        is_admin: user.is_admin,
+        disabled: user.disabled_at.is_some(),
+        created_at: user.created_at,
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/users",
+    responses(
+        (status = 200, description = "all accounts", body = Vec<AdminUserView>),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn list_users(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -33,12 +55,10 @@ async fn list_users(
         .fetch_all(&pool)
         .await
         .map_err(|e| AppError::from(db::DbError::Sql(e)))?;
-    Ok(Json(json!(
-        rows.iter().map(admin_user_view).collect::<Vec<_>>()
-    )))
+    Ok(Json(rows.iter().map(admin_user_view).collect::<Vec<_>>()))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct CreateUserBody {
     username: String,
     email: String,
@@ -47,6 +67,16 @@ struct CreateUserBody {
     is_admin: Option<bool>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/users",
+    request_body = CreateUserBody,
+    responses(
+        (status = 201, description = "created", body = AdminUserView),
+        (status = 400, description = "validation error"),
+        (status = 403, description = "not admin"),
+    )
+)]
 async fn create_user(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -93,12 +123,24 @@ async fn create_user(
     ))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct UpdateUserBody {
     is_admin: Option<bool>,
     disabled: Option<bool>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/admin/users/{id}",
+    params(("id" = Uuid, Path, description = "user id (cannot be your own)")),
+    request_body = UpdateUserBody,
+    responses(
+        (status = 200, description = "updated", body = AdminUserView),
+        (status = 400, description = "cannot change your own admin/disabled status"),
+        (status = 403, description = "not admin"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn update_user(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -142,3 +184,11 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/admin/users", get(list_users).post(create_user))
         .route("/api/admin/users/{id}", patch(update_user))
 }
+
+/// OpenAPI for the admin module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list_users, create_user, update_user),
+    components(schemas(CreateUserBody, UpdateUserBody, AdminUserView))
+)]
+pub(crate) struct AdminApi;

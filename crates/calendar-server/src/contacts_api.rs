@@ -17,6 +17,54 @@ use calendar_db::{self as db};
 use serde_json::json;
 use uuid::Uuid;
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ContactEmailView {
+    email: String,
+    kind: Option<String>,
+    is_primary: bool,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ContactTelView {
+    number: String,
+    kind: Option<String>,
+    is_mobile: bool,
+    is_primary: bool,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ContactMemberView {
+    contact_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+    full_name: String,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ContactView {
+    id: Uuid,
+    address_book_id: Uuid,
+    uid: String,
+    /// "individual" or "group".
+    kind: String,
+    full_name: String,
+    given_name: Option<String>,
+    family_name: Option<String>,
+    org: Option<String>,
+    title: Option<String>,
+    street_address: Option<String>,
+    locality: Option<String>,
+    region: Option<String>,
+    postal_code: Option<String>,
+    country: Option<String>,
+    has_photo: bool,
+    etag: String,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    emails: Vec<ContactEmailView>,
+    tels: Vec<ContactTelView>,
+    /// Group membership only (kind = "group"); empty otherwise.
+    members: Vec<ContactMemberView>,
+}
+
 fn contact_json(
     c: &db::contacts::ContactRow,
     emails: &[db::contacts::ContactEmailRow],
@@ -74,6 +122,23 @@ async fn group_member_uris(
 
 // ============ address books ============
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AddressBookSummary {
+    id: Uuid,
+    slug: String,
+    name: String,
+    /// "personal" for owned books, "directory" for the virtual tenant book.
+    kind: &'static str,
+    ctag: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/addressbooks",
+    responses(
+        (status = 200, description = "the caller's books plus the virtual tenant directory", body = Vec<AddressBookSummary>),
+    )
+)]
 async fn list_address_books(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -96,12 +161,21 @@ async fn list_address_books(
     Ok(Json(json!(out)))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct AddressBookBody {
     slug: String,
     name: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/addressbooks",
+    request_body = AddressBookBody,
+    responses(
+        (status = 201, description = "created", body = AddressBookRowView),
+        (status = 400, description = "invalid or reserved slug"),
+    )
+)]
 async fn create_address_book(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -120,11 +194,36 @@ async fn create_address_book(
     Ok((axum::http::StatusCode::CREATED, Json(json!(row))))
 }
 
-#[derive(serde::Deserialize)]
+/// Mirrors calendar-db's AddressBookRow (its serde shape is the create/rename
+/// response; the list endpoint returns summaries).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AddressBookRowView {
+    id: Uuid,
+    tenant_id: Uuid,
+    owner_user_id: Uuid,
+    slug: String,
+    name: String,
+    ctag: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct RenameBody {
     name: String,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/addressbooks/{id}",
+    params(("id" = Uuid, Path, description = "address book id (owner only)")),
+    request_body = RenameBody,
+    responses(
+        (status = 200, description = "renamed", body = AddressBookRowView),
+        (status = 403, description = "not owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn patch_address_book(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -143,6 +242,16 @@ async fn patch_address_book(
     Ok(Json(json!(row)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/addressbooks/{id}",
+    params(("id" = Uuid, Path, description = "address book id (owner only)")),
+    responses(
+        (status = 200, description = "deleted (soft)", body = crate::OkView),
+        (status = 403, description = "not owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn delete_address_book(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -162,6 +271,16 @@ async fn delete_address_book(
 
 // ============ contacts ============
 
+#[utoipa::path(
+    get,
+    path = "/api/addressbooks/{id}/contacts",
+    params(("id" = Uuid, Path, description = "address book id (the tenant directory id lists every member)")),
+    responses(
+        (status = 200, description = "contacts, or directory entries for the virtual directory book", body = Vec<ContactView>),
+        (status = 403, description = "not owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn list_contacts(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -196,7 +315,7 @@ async fn list_contacts(
     Ok(Json(json!(out)))
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, utoipa::ToSchema)]
 struct ContactBody {
     /// "individual" (default) or "group". Ignored on PATCH — a contact's
     /// kind doesn't change after creation.
@@ -218,7 +337,7 @@ struct ContactBody {
     member_user_ids: Vec<Uuid>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct EmailBody {
     email: String,
     kind: Option<String>,
@@ -226,7 +345,7 @@ struct EmailBody {
     is_primary: bool,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct TelBody {
     number: String,
     kind: Option<String>,
@@ -236,6 +355,18 @@ struct TelBody {
     is_primary: bool,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/addressbooks/{id}/contacts",
+    params(("id" = Uuid, Path, description = "address book id (owner only)")),
+    request_body = ContactBody,
+    responses(
+        (status = 201, description = "created", body = ContactView),
+        (status = 400, description = "validation error or unknown member"),
+        (status = 403, description = "not owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn create_contact(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -324,6 +455,16 @@ async fn create_contact(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/contacts/{id}",
+    params(("id" = Uuid, Path, description = "contact id")),
+    responses(
+        (status = 200, description = "contact with emails, tels and group members", body = ContactView),
+        (status = 403, description = "not the book owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn get_contact(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -345,6 +486,17 @@ async fn get_contact(
     Ok(Json(contact_json(&contact, &emails, &tels, &members)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/contacts/{id}",
+    params(("id" = Uuid, Path, description = "contact id")),
+    request_body = ContactBody,
+    responses(
+        (status = 200, description = "updated", body = ContactView),
+        (status = 403, description = "not the book owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn patch_contact(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -427,6 +579,16 @@ async fn patch_contact(
     Ok(Json(contact_json(&contact, &emails, &tels, &members)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/contacts/{id}",
+    params(("id" = Uuid, Path, description = "contact id")),
+    responses(
+        (status = 200, description = "deleted (soft, CardDAV-visible tombstone)", body = crate::OkView),
+        (status = 403, description = "not the book owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn delete_contact(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -449,6 +611,15 @@ async fn delete_contact(
 
 // ============ photo ============
 
+#[utoipa::path(
+    get,
+    path = "/api/contacts/{id}/photo",
+    params(("id" = Uuid, Path, description = "contact id")),
+    responses(
+        (status = 200, description = "photo bytes with the stored MIME type"),
+        (status = 404, description = "absent or no photo"),
+    )
+)]
 async fn get_photo(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -470,13 +641,25 @@ async fn get_photo(
     Ok(([(axum::http::header::CONTENT_TYPE, mime)], data))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct PhotoBody {
     content_type: String,
     /// base64-encoded bytes; capped like event attachments (ADR-010).
     data: String,
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/contacts/{id}/photo",
+    params(("id" = Uuid, Path, description = "contact id")),
+    request_body = PhotoBody,
+    responses(
+        (status = 200, description = "stored", body = crate::OkView),
+        (status = 400, description = "invalid base64 or over the byte cap"),
+        (status = 403, description = "not the book owner"),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn put_photo(
     State(AppState { pool, config, .. }): State<AppState>,
     headers: HeaderMap,
@@ -509,13 +692,21 @@ async fn put_photo(
 
 // ============ autocomplete ============
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct AutocompleteQuery {
     q: String,
 }
 
 /// Attendee typeahead: personal books plus the tenant directory, ranked by
 /// name match. Read-only; no CSRF needed.
+#[utoipa::path(
+    get,
+    path = "/api/contacts/autocomplete",
+    params(("q" = String, Query, description = "typeahead needle")),
+    responses(
+        (status = 200, description = "personal contacts plus directory users (max ~10 each)", body = Vec<ContactView>),
+    )
+)]
 async fn autocomplete(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -570,3 +761,39 @@ pub fn router() -> axum::Router<crate::AppState> {
         )
         .route("/api/contacts/{id}/photo", get(get_photo).put(put_photo))
 }
+
+/// OpenAPI for the contacts module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        list_address_books,
+        create_address_book,
+        patch_address_book,
+        delete_address_book,
+        list_contacts,
+        create_contact,
+        get_contact,
+        patch_contact,
+        delete_contact,
+        get_photo,
+        put_photo,
+        autocomplete,
+    ),
+    components(schemas(
+        AddressBookBody,
+        RenameBody,
+        AddressBookRowView,
+        AddressBookSummary,
+        ContactBody,
+        EmailBody,
+        TelBody,
+        ContactView,
+        ContactEmailView,
+        ContactTelView,
+        ContactMemberView,
+        PhotoBody,
+        AutocompleteQuery,
+        crate::OkView,
+    ))
+)]
+pub(crate) struct ContactsApi;

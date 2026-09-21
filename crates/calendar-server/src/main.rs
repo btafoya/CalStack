@@ -76,6 +76,15 @@ fn openapi_json() -> serde_json::Value {
     doc.merge(events_api::EventsApi::openapi());
     doc.merge(tasks_api::TasksApi::openapi());
     doc.merge(journals_api::JournalsApi::openapi());
+    doc.merge(sharing_api::SharingApi::openapi());
+    doc.merge(webhooks_api::WebhooksApi::openapi());
+    doc.merge(push_api::PushApi::openapi());
+    doc.merge(rules_api::RulesApi::openapi());
+    doc.merge(categories_api::CategoriesApi::openapi());
+    doc.merge(contacts_api::ContactsApi::openapi());
+    doc.merge(admin_api::AdminApi::openapi());
+    doc.merge(extras::ExtrasApi::openapi());
+    doc.merge(places::PlacesApi::openapi());
     let mut doc = serde_json::to_value(doc).expect("generated OpenAPI serializes");
     let legacy = calendar_api::openapi_document();
 
@@ -560,5 +569,76 @@ mod tests {
         assert!(doc["components"]["schemas"]["EventView"].is_object());
         assert!(doc["components"]["schemas"]["TaskView"].is_object());
         assert!(doc["components"]["schemas"]["JournalView"].is_object());
+        // Stage 4 modules; the legacy fragment now lists no paths at all, so
+        // this pin list is the complete /api inventory:
+        for (path, method) in [
+            ("/api/calendars/{id}/shares", "post"),
+            ("/api/calendars/{id}/shares", "get"),
+            ("/api/calendars/{id}/shares/{share_id}", "delete"),
+            ("/api/subscriptions", "post"),
+            ("/api/subscriptions", "get"),
+            ("/api/subscriptions/{id}", "delete"),
+            ("/api/webhooks", "post"),
+            ("/api/webhooks", "get"),
+            ("/api/webhooks/{id}", "get"),
+            ("/api/webhooks/{id}", "patch"),
+            ("/api/webhooks/{id}", "delete"),
+            ("/api/webhooks/{id}/test", "post"),
+            ("/api/webhooks/{id}/deliveries", "get"),
+            ("/api/push/subscriptions", "post"),
+            ("/api/push/subscriptions", "delete"),
+            ("/api/push/public-key", "get"),
+            ("/api/notification-providers", "post"),
+            ("/api/notification-providers", "get"),
+            ("/api/notification-providers/{id}", "get"),
+            ("/api/notification-providers/{id}", "patch"),
+            ("/api/notification-providers/{id}", "delete"),
+            ("/api/notification-providers/{id}/test", "post"),
+            ("/api/rules", "post"),
+            ("/api/rules", "get"),
+            ("/api/rules/{id}", "patch"),
+            ("/api/rules/{id}", "delete"),
+            ("/api/categories", "post"),
+            ("/api/categories", "get"),
+            ("/api/categories/{id}", "patch"),
+            ("/api/categories/{id}", "delete"),
+            ("/api/addressbooks", "post"),
+            ("/api/addressbooks", "get"),
+            ("/api/addressbooks/{id}", "patch"),
+            ("/api/addressbooks/{id}", "delete"),
+            ("/api/addressbooks/{id}/contacts", "post"),
+            ("/api/addressbooks/{id}/contacts", "get"),
+            ("/api/contacts/autocomplete", "get"),
+            ("/api/contacts/{id}", "get"),
+            ("/api/contacts/{id}", "patch"),
+            ("/api/contacts/{id}", "delete"),
+            ("/api/contacts/{id}/photo", "get"),
+            ("/api/contacts/{id}/photo", "put"),
+            ("/api/admin/users", "get"),
+            ("/api/admin/users", "post"),
+            ("/api/admin/users/{id}", "patch"),
+            ("/api/calendars/{id}/events/{event_id}/attachments", "post"),
+            ("/api/calendars/{id}/events/{event_id}/attachments", "get"),
+            ("/api/attachments/{id}", "get"),
+            ("/api/attachments/{id}", "delete"),
+            ("/api/attachments/{id}/meta", "get"),
+            ("/api/search", "get"),
+            ("/api/changes", "get"),
+            ("/api/changes/stream", "get"),
+            ("/api/notifications", "get"),
+            ("/api/notifications/{id}/read", "post"),
+            ("/api/audit", "get"),
+            ("/api/places/autocomplete", "get"),
+            ("/api/places/{place_id}", "get"),
+        ] {
+            assert!(
+                doc["paths"][path][method].is_object(),
+                "{method} {path} missing from the generated document"
+            );
+        }
+        assert!(doc["components"]["schemas"]["ContactView"].is_object());
+        assert!(doc["components"]["schemas"]["WebhookView"].is_object());
+        assert!(doc["components"]["schemas"]["ProviderView"].is_object());
+        assert!(doc["components"]["schemas"]["RuleView"].is_object());
     }
 }
