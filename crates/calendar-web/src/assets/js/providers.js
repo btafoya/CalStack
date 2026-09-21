@@ -98,7 +98,14 @@
       var $test = $('<button class="btn btn-outline-secondary btn-sm" type="button" title="Send test message"><i class="bi bi-send"></i></button>');
       $test.on('click', function () { openTest(p); });
       var $del = $('<button class="btn btn-outline-danger btn-sm" type="button">Delete</button>');
-      $del.on('click', function () { api('DELETE', '/api/notification-providers/' + p.id).done(loadProviders); });
+      $del.on('click', function () {
+        confirmDialog('Delete provider "' + p.name + '"? Reminders and rules using it stop working.').done(function () {
+          api('DELETE', '/api/notification-providers/' + p.id).done(function () {
+            toast('Provider deleted.');
+            loadProviders();
+          });
+        });
+      });
       $('<tr>')
         .append($('<td>').text(p.kind))
         .append($('<td>').text(p.name))
@@ -128,6 +135,7 @@
       }).done(function () {
         $('#provider-form')[0].reset();
         renderFields();
+        toast('Provider added.');
         loadProviders();
       });
     });
@@ -142,6 +150,7 @@
         config: config,
       }).done(function () {
         $('#provider-edit-modal').modal('hide');
+        toast('Provider updated.');
         loadProviders();
       });
     });

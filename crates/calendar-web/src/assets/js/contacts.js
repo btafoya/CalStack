@@ -21,7 +21,10 @@
           $del.on('click', function (ev) {
             ev.stopPropagation();
             confirmDialog('Delete address book "' + b.name + '"? Its contacts go with it.').done(function () {
-              api('DELETE', '/api/addressbooks/' + b.id).done(loadBooks);
+              api('DELETE', '/api/addressbooks/' + b.id).done(function () {
+                toast('Address book deleted.');
+                loadBooks();
+              });
             });
           });
           $item.append($del);
@@ -61,7 +64,10 @@
         var $del = $('<button class="btn btn-outline-danger btn-sm" type="button">Delete</button>');
         $del.on('click', function () {
           confirmDialog('Delete contact "' + c.full_name + '"?').done(function () {
-            api('DELETE', '/api/contacts/' + c.id).done(loadContacts);
+            api('DELETE', '/api/contacts/' + c.id).done(function () {
+              toast('Contact deleted.');
+              loadContacts();
+            });
           });
         });
         $tr.append($('<td class="text-end">').append($del));
@@ -99,7 +105,10 @@
       promptDialog('Address book name:').done(function (name) {
         if (!name) { return; }
         var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'book';
-        api('POST', '/api/addressbooks', { slug: slug, name: name }).done(loadBooks);
+        api('POST', '/api/addressbooks', { slug: slug, name: name }).done(function () {
+          toast('Address book created.');
+          loadBooks();
+        });
       });
     });
 
@@ -120,16 +129,10 @@
       }).done(function () {
         $('#ct-form')[0].reset();
         $('#ct-mobile').prop('checked', true);
+        toast('Contact added.');
         loadContacts();
       });
     });
 
-    api('GET', '/api/auth/me').done(function (user) {
-      if (user.is_admin) { $('#admin-nav-link, #rules-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
-    });
-    $('#account-btn').on('click', function () { window.location.href = '/'; });
-    $('#logout-btn').on('click', function () {
-      api('POST', '/api/auth/logout').done(function () { window.location.href = '/login'; });
-    });
   });
 })();

@@ -8,6 +8,7 @@
   // jQuery or patching the vendored summernote bundle.
   if (!$.now) { $.now = Date.now; }
 
+  var urlParams = new URLSearchParams(window.location.search);
   var state = {
     calendars: [],
     currentCalendar: null,
@@ -23,10 +24,15 @@
     currentAcl: [],
     currentShares: [],
     calendarActivated: false,
+    calendarChosen: false,
     categoryRegistry: [],
     eventCategories: [],
     username: '',
     userPrefs: { notify_email: true, notify_sms: true, notify_push: true },
+    userIsAdmin: false,
+    // restore target from ?calendar=&tab= (also accepts legacy ?calendar_id=)
+    wantCalendar: urlParams.get('calendar') || urlParams.get('calendar_id'),
+    wantTab: urlParams.get('tab'),
   };
 
   // ponytail: disables whatever button/submit triggered a mutating call, to
@@ -49,7 +55,7 @@
       $btn.prop('disabled', false);
     }).fail(function (xhr) {
       if (xhr.status === 401) { window.location.href = '/login'; return; }
-      window.alert((xhr.responseJSON && xhr.responseJSON.error) || 'Request failed');
+      errorDialog((xhr.responseJSON && xhr.responseJSON.error) || 'Request failed');
     });
   }
 
@@ -124,14 +130,69 @@
     return bootstrap.Modal.getOrCreateInstance(document.getElementById(id));
   }
 
+  // Calendar/ACL capability values as user-facing labels; owner is the
+  // default state so it gets no suffix at all.
+  var CAP_TEXT = { read_write: 'read / write', read_only: 'read-only', free_busy: 'free/busy' };
+  function capText(cap) { return CAP_TEXT[cap] || ''; }
+
   // ============ calendars ============
-  function updateRulesLink() {
-    var cal = state.currentCalendar;
-    // Rules are calendar-owner config; a subscription has no calendar_id of
-    // its own to point the link at, so hide it rather than link to a 403.
-    $('#rules-link').toggle(!!cal && !cal.readOnly);
-    if (cal && !cal.readOnly) { $('#rules-link').attr('href', '/rules?calendar_id=' + cal.id); }
+  // ============ calendar-scoped tabs ============
+  // The six views of the selected calendar live as Bootstrap tab panes in the
+  // main area; the sidebar selection is the only calendar selector. Pane
+  // scripts expose load(cal) and skip reloads for an unchanged calendar.
+  var PANE_LOADERS = {
+    categories: function (cal) { CategoriesPane.load(cal); },
+    contacts: function (cal) { /* tenant-wide; contacts.js self-initializes */ },
+    tasks: function (cal) { TasksPane.load(cal); },
+    journals: function (cal) { JournalsPane.load(cal); },
+    rules: function (cal) { RulesPane.load(cal); },
+  };
+
+  function currentTab() {
+    return $('#cal-tabs .nav-link.active').attr('data-tab') || 'calendar';
   }
+
+  function showTab(name) {
+    var $btn = $('#cal-tabs [data-tab="' + name + '"]');
+    if (!$btn.length || $btn.prop('hidden')) {
+      name = 'calendar';
+      $btn = $('#cal-tabs [data-tab="calendar"]');
+    }
+    bootstrap.Tab.getOrCreateInstance($btn[0]).show();
+  }
+
+  function setUrl() {
+    var p = new URLSearchParams();
+    // Subscriptions have no addressable URL — only owned calendars persist.
+    if (state.currentCalendar && !state.currentCalendar.subscriptionId) {
+      p.set('calendar', state.currentCalendar.id);
+    }
+    var tab = currentTab();
+    if (tab !== 'calendar') { p.set('tab', tab); }
+    var qs = p.toString();
+    window.history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : ''));
+  }
+
+  function refreshActivePane() {
+    var cal = state.currentCalendar;
+    var fn = cal && PANE_LOADERS[currentTab()];
+    if (fn) { fn(cal); }
+  }
+
+  function updateTabs() {
+    var cal = state.currentCalendar;
+    $('#cal-tabs').prop('hidden', !cal);
+    $('#tab-btn-tasks, #tab-btn-journals').prop('hidden', !!(cal && cal.readOnly));
+    $('#tab-btn-rules').prop('hidden', !(cal && !cal.readOnly && state.userIsAdmin));
+    if (cal && $('#cal-tabs [data-tab="' + currentTab() + '"]').prop('hidden')) {
+      showTab('calendar');
+    }
+  }
+
+  $(document).on('shown.bs.tab', '#cal-tabs [data-bs-toggle="tab"]', function () {
+    refreshActivePane();
+    setUrl();
+  });
 
   // Only render the calendar widget once a calendar is actually selected;
   // otherwise show a placeholder in its place.
@@ -145,7 +206,7 @@
     state.currentCalendar = cal;
     $('#cal-list li, #sub-list li').removeClass('active');
     $('#cal-list li[data-id="' + cal.id + '"], #sub-list li[data-id="' + cal.id + '"]').addClass('active');
-    updateRulesLink();
+    updateTabs();
     updateCalendarVisibility();
     // Category colors on a subscription's events come pre-attached per-event
     // by the server (its owner's registry) — the client-side registry is
@@ -167,6 +228,8 @@
     } else {
       $('#calendar').bsCalendar('refresh');
     }
+    refreshActivePane();
+    setUrl();
   }
 
   function initCalendarWidget() {
@@ -206,12 +269,46 @@
     startAmPmObserver();
   }
 
-  $('#add-cal-btn').on('click', function () {
-    promptDialog('New calendar name:').done(function (name) {
-      if (!name) { return; }
+  // ============ calendar create/edit ============
+  // One modal for both: name + component set (ADR-015). The Journals/Tasks
+  // pages are unusable until a calendar carries VJOURNAL/VTODO, so the
+  // component checkboxes are part of the calendar editor, not a settings
+  // page. All three default on for new calendars.
+  var editingCal = null;
+
+  function openCalendarModal(cal) {
+    editingCal = cal || null;
+    $('#calendar-modal-title').text(cal ? 'Edit calendar' : 'New calendar');
+    $('#cal-name').val(cal ? cal.name : '');
+    ['vevent', 'vtodo', 'vjournal'].forEach(function (kind) {
+      var wanted = cal ? cal.components.indexOf(kind.toUpperCase()) !== -1 : true;
+      $('#cal-comp-' + kind).prop('checked', wanted);
+    });
+    modal('calendar-modal').show();
+  }
+
+  $('#add-cal-btn').on('click', function () { openCalendarModal(null); });
+
+  $('#calendar-form').on('submit', function (ev) {
+    ev.preventDefault();
+    var name = $('#cal-name').val().trim();
+    if (!name) { return; }
+    var components = ['vevent', 'vtodo', 'vjournal'].map(function (kind) {
+      return $('#cal-comp-' + kind).prop('checked') ? kind.toUpperCase() : null;
+    }).filter(Boolean);
+    if (!components.length) { errorDialog('Pick at least one content type.'); return; }
+    var req;
+    if (editingCal) {
+      req = api('PATCH', '/api/calendars/' + editingCal.id, { name: name, components: components });
+    } else {
       var slug = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-      if (!slug) { window.alert('Enter a valid calendar name.'); return; }
-      api('POST', '/api/calendars', { slug: slug, name: name }).done(loadCalendars);
+      if (!slug) { errorDialog('Enter a valid calendar name.'); return; }
+      req = api('POST', '/api/calendars', { slug: slug, name: name, components: components });
+    }
+    req.done(function () {
+      toast(editingCal ? 'Calendar updated.' : 'Calendar created.');
+      modal('calendar-modal').hide();
+      loadCalendars();
     });
   });
 
@@ -219,15 +316,23 @@
     return api('GET', '/api/calendars').done(function (list) {
       state.calendars = list;
       renderCalList(list);
-      updateRulesLink();
       updateCalendarVisibility();
-    });
-  }
-
-  function renameCalendar(cal) {
-    promptDialog('Calendar name:', cal.name).done(function (name) {
-      if (!name || name === cal.name) { return; }
-      api('PATCH', '/api/calendars/' + cal.id, { name: name }).done(loadCalendars);
+      // First load: honor ?calendar= from the URL, else open the first
+      // calendar so the tab bar has a selection. Later reloads (after
+      // create/rename/delete) leave the current selection alone.
+      if (!state.calendarChosen) {
+        state.calendarChosen = true;
+        var want = state.wantCalendar
+          ? list.find(function (c) { return c.id === state.wantCalendar; })
+          : null;
+        state.wantCalendar = null;
+        if (want || list.length) { selectCalendar(want || list[0]); }
+        if (state.wantTab) {
+          var t = state.wantTab;
+          state.wantTab = null;
+          showTab(t);
+        }
+      }
     });
   }
 
@@ -235,6 +340,7 @@
     confirmDialog('Delete calendar "' + cal.name + '"? This cannot be undone.').done(function () {
       api('DELETE', '/api/calendars/' + cal.id).done(function () {
         if (state.currentCalendar && state.currentCalendar.id === cal.id) { state.currentCalendar = null; }
+        toast('Calendar deleted.');
         loadCalendars();
       });
     });
@@ -247,7 +353,7 @@
         .attr('data-id', cal.id);
       var dot = calColorHex(cal.color);
       if (dot) { item.append($('<span class="cal-dot" aria-hidden="true">').css('background-color', dot)); }
-      item.append($('<span>').text(cal.name + ' (' + cal.my_capability + ')'));
+      item.append($('<span>').text(cal.name + (capText(cal.my_capability) ? ' (' + capText(cal.my_capability) + ')' : '')));
       item.on('click', function () { selectCalendar(cal); });
       var btns = $('<span class="btn-group btn-group-sm">');
       btns.append(
@@ -256,8 +362,8 @@
       );
       if (cal.my_capability === 'owner' || cal.my_capability === 'read_write') {
         btns.append(
-          $('<button class="btn btn-outline-secondary" type="button" title="Rename"><i class="bi bi-pencil"></i></button>')
-            .on('click', function (e) { e.stopPropagation(); renameCalendar(cal); })
+          $('<button class="btn btn-outline-secondary" type="button" title="Edit (name and content types)"><i class="bi bi-pencil"></i></button>')
+            .on('click', function (e) { e.stopPropagation(); openCalendarModal(cal); })
         );
         if (cal.my_capability === 'owner') {
           btns.append(
@@ -479,18 +585,24 @@
         '<i class="bi bi-info-circle"></i></button>');
       infoBtn.on('click', function () {
         api('GET', '/api/attachments/' + a.id + '/meta').done(function (meta) {
-          window.alert(
-            meta.filename + '\n' +
-            'Type: ' + meta.content_type + '\n' +
-            'Size: ' + formatBytes(meta.byte_size) + '\n' +
-            'SHA-256: ' + meta.sha256 + '\n' +
-            'Uploaded: ' + meta.created_at
-          );
+          Swal.fire({
+            icon: 'info',
+            title: meta.filename,
+            html: 'Type: ' + $('<span>').text(meta.content_type).html() + '<br>'
+              + 'Size: ' + formatBytes(meta.byte_size) + '<br>'
+              + 'SHA-256: <code>' + $('<span>').text(meta.sha256).html() + '</code><br>'
+              + 'Uploaded: ' + $('<span>').text(meta.created_at).html(),
+          });
         });
       });
       var btn = $('<button class="btn btn-sm btn-outline-danger" type="button">Delete</button>');
       btn.on('click', function () {
-        api('DELETE', '/api/attachments/' + a.id).done(function () { loadAttachments(); });
+        confirmDialog('Delete attachment "' + a.filename + '"?').done(function () {
+          api('DELETE', '/api/attachments/' + a.id).done(function () {
+            toast('Attachment deleted.');
+            loadAttachments();
+          });
+        });
       });
       btnGroup.append(infoBtn).append(btn);
       item.append(btnGroup);
@@ -516,6 +628,7 @@
         data: base64,
       }).done(function () {
         $('#ev-attach-file').val('');
+        toast('Attachment uploaded.');
         loadAttachments();
       });
     };
@@ -795,14 +908,18 @@
     req.done(function () {
       state.eventDirty = false;
       modal('event-modal').hide();
+      toast('Event saved.');
       $('#calendar').bsCalendar('refresh');
     });
   }
 
   function deleteEvent(id, etag) {
     api('DELETE', '/api/events/' + id, null, etag ? { 'If-Match': etag } : {}).done(function () {
+      // Clear before hide so the dirty-check guard doesn't re-prompt after
+      // the delete was already confirmed.
       state.eventDirty = false;
       modal('event-modal').hide();
+      toast('Event deleted.');
       $('#calendar').bsCalendar('refresh');
     });
   }
@@ -814,7 +931,13 @@
     state.eventDirty = true;
   });
   $('#event-modal').on('hide.bs.modal', function (e) {
-    if (state.eventDirty && !window.confirm('Discard unsaved changes?')) { e.preventDefault(); }
+    if (state.eventDirty) {
+      e.preventDefault();
+      confirmDialog('Discard unsaved changes?').done(function () {
+        state.eventDirty = false;
+        modal('event-modal').hide();
+      });
+    }
   });
   $('#event-form').on('submit', saveEvent);
   $('#ev-delete').on('click', function () {
@@ -830,7 +953,7 @@
     state.currentAcl.forEach(function (entry) {
       var row = $('<tr>');
       row.append($('<td>').text(entry.user_id));
-      row.append($('<td>').text(entry.capability));
+      row.append($('<td>').text(capText(entry.capability) || entry.capability));
       var btn = $('<button class="btn btn-sm btn-outline-danger" type="button">Remove</button>');
       btn.on('click', function () {
         state.currentAcl = state.currentAcl.filter(function (e) { return e.user_id !== entry.user_id; });
@@ -850,14 +973,56 @@
 
   function saveAcl() {
     return api('PUT', '/api/calendars/' + state.currentCalendar.id + '/acl', { entries: state.currentAcl })
-      .done(function () { loadAcl(); });
+      .done(function () {
+        toast('Access updated.');
+        loadAcl();
+      });
   }
 
+  // ACL additions go through the tenant directory, not a raw user UUID: the
+  // same autocomplete the attendee search uses, filtered to directory rows
+  // (their ids are user ids).
+  var aclUserId = null;
+  var aclUserTimer = null;
+  function hideAclResults() {
+    $('#acl-user-results').empty().prop('hidden', true);
+  }
+  $('#acl-user').on('input', function () {
+    aclUserId = null;
+    var q = $(this).val().trim();
+    window.clearTimeout(aclUserTimer);
+    if (q.length < 2) { hideAclResults(); return; }
+    aclUserTimer = window.setTimeout(function () {
+      api('GET', '/api/contacts/autocomplete?q=' + encodeURIComponent(q)).done(function (list) {
+        var $results = $('#acl-user-results').empty();
+        (list || []).filter(function (c) { return c.directory; }).forEach(function (c) {
+          var reach = (c.emails && c.emails[0] && c.emails[0].email) || c.id;
+          $('<button type="button" class="list-group-item list-group-item-action py-1"></button>')
+            .append($('<div>').text(c.full_name || reach))
+            .append($('<small class="text-body-secondary d-block">').text(reach + ' · directory'))
+            .on('click', function () {
+              aclUserId = c.id;
+              $('#acl-user').val(c.full_name || reach);
+              hideAclResults();
+            })
+            .appendTo($results);
+        });
+        if (!$results.children().length) {
+          $results.append('<div class="list-group-item text-body-secondary py-1">No directory users match.</div>');
+        }
+        $results.prop('hidden', false);
+      });
+    }, 200);
+  });
+  $(document).on('click', function (e) {
+    if (!$(e.target).closest('#acl-user, #acl-user-results').length) { hideAclResults(); }
+  });
+
   $('#acl-add').on('click', function () {
-    var userId = $('#acl-user').val().trim();
-    if (!userId) { return; }
-    state.currentAcl.push({ user_id: userId, capability: $('#acl-cap').val(), can_manage_acl: false });
+    if (!aclUserId) { return; }
+    state.currentAcl.push({ user_id: aclUserId, capability: $('#acl-cap').val(), can_manage_acl: false });
     saveAcl();
+    aclUserId = null;
     $('#acl-user').val('');
   });
 
@@ -889,7 +1054,13 @@
     api('POST', '/api/calendars/' + state.currentCalendar.id + '/shares', { allows_caldav: allowsCaldav })
       .done(function (share) {
         var url = window.location.origin + '/share/' + share.token + '/calendar.ics';
-        window.prompt('Share link (copy now, shown only once):', url);
+        Swal.fire({
+          icon: 'info',
+          title: 'Copy the link now — shown only once',
+          input: 'text',
+          inputValue: url,
+          didOpen: function (popup) { popup.querySelector('input').select(); },
+        });
         loadShares();
       });
   }
@@ -996,7 +1167,10 @@
     api('POST', '/api/auth/password', { current_password: current, new_password: next })
       .done(function () {
         modal('account-modal').hide();
-        window.alert('Password changed. Your other sessions have been signed out.');
+        Swal.fire({
+          icon: 'success',
+          title: 'Password changed. Your other sessions have been signed out.',
+        });
       });
   });
 
@@ -1035,9 +1209,10 @@
         api('DELETE', '/api/subscriptions/' + s.id).done(function () {
           if (state.currentCalendar && state.currentCalendar.subscriptionId === s.id) {
             state.currentCalendar = null;
-            updateRulesLink();
+            updateTabs();
             updateCalendarVisibility();
           }
+          toast('Unsubscribed.');
           loadSubscriptions();
         });
       });
@@ -1055,6 +1230,7 @@
     if (!token) { return; }
     api('POST', '/api/subscriptions', { share_token: token }).done(function () {
       $('#sub-token').val('');
+      toast('Subscribed.');
       loadSubscriptions();
     });
   });
@@ -1063,13 +1239,19 @@
   // ponytail: results are read-only (summary/time only); opening a hit in the
   // editor would need switching the selected calendar first — add if search
   // needs to jump straight into editing.
+  // Search hits are read-only; dates render in the browser's locale.
+  function fmtSearchWhen(e) {
+    if (e.starts_at) { return new Date(e.starts_at).toLocaleString(); }
+    if (e.start_date) { return new Date(e.start_date + 'T00:00:00').toLocaleDateString(); }
+    return '';
+  }
+
   function renderSearchResults(rows) {
     var list = $('#search-results').empty();
     if (!rows.length) { list.append($('<li class="list-group-item text-body-secondary">').text('No matches.')); }
     rows.forEach(function (e) {
-      var when = e.starts_at || e.start_date || '';
       list.append(
-        $('<li class="list-group-item">').text((e.summary || '(untitled)') + ' — ' + when)
+        $('<li class="list-group-item">').text((e.summary || '(untitled)') + ' — ' + fmtSearchWhen(e))
       );
     });
   }
@@ -1161,20 +1343,17 @@
     if (!window.jQuery) { return; }
     $('#ev-desc').summernote({ height: 150 });
 
-    // Mark the current page in the top nav.
-    $('.navbar-nav .nav-link').filter(function () {
-      return this.getAttribute('href') === location.pathname;
-    }).addClass('active');
-
     api('GET', '/api/auth/me').done(function (user) {
       state.username = user.username || '';
+      state.userIsAdmin = !!user.is_admin;
       state.userPrefs = {
         notify_email: user.notify_email !== false,
         notify_sms: user.notify_sms !== false,
         notify_push: user.notify_push !== false,
       };
-      // Rules/Providers/Credentials/Admin are admin-only (pages redirect, APIs 403).
-      if (user.is_admin) { $('#admin-nav-link, #rules-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
+      // Providers/Credentials/Admin are admin-only (pages redirect, APIs 403).
+      if (state.userIsAdmin) { $('#admin-nav-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
+      updateTabs();
     });
     loadSubscriptions();
     loadCalendars();

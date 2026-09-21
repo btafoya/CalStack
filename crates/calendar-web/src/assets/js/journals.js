@@ -4,7 +4,6 @@
 (function () {
   'use strict';
 
-  var calendars = [];
   var calId = null;
   var journals = [];
   var editing = null; // journal loaded into the editor modal, or null
@@ -12,25 +11,6 @@
   function dateKey(j) {
     // lexical sort key; undated sorts into the undated section anyway
     return j.starts_at ? j.starts_at.slice(0, 10) : (j.start_date || '');
-  }
-
-  function loadCalendars() {
-    return api('GET', '/api/calendars').done(function (cals) {
-      calendars = cals.filter(function (c) {
-        return (c.components || []).indexOf('VJOURNAL') !== -1;
-      });
-      var $sel = $('#journal-calendar-select').empty();
-      calendars.forEach(function (c) {
-        $sel.append($('<option>').val(c.id).text(c.name));
-      });
-      if (!calendars.length) {
-        $('#journal-empty').prop('hidden', false)
-          .text('No calendar accepts journals. Add the VJOURNAL component to a calendar first.');
-        return;
-      }
-      calId = calendars[0].id;
-      loadJournals();
-    });
   }
 
   function loadJournals() {
@@ -41,6 +21,25 @@
       render();
     });
   }
+
+  // Tab pane on the index page: app.js calls load() on tab show and
+  // calendar switch; the sidebar selection is the calendar selector.
+  window.JournalsPane = {
+    _cal: null,
+    load: function (cal) {
+      if (this._cal === cal.id) { return; }
+      this._cal = cal.id;
+      if ((cal.components || []).indexOf('VJOURNAL') === -1) {
+        calId = null;
+        $('#journal-list').empty();
+        $('#journal-empty').prop('hidden', false)
+          .text('This calendar does not accept journals. Edit the calendar (pencil button in the sidebar) and enable Journals.');
+        return;
+      }
+      calId = cal.id;
+      loadJournals();
+    },
+  };
 
   function monthLabel(key) {
     var parts = key.split('-');
@@ -138,12 +137,6 @@
   }
 
   $(function () {
-    loadCalendars();
-
-    $('#journal-calendar-select').on('change', function () {
-      calId = $(this).val();
-      loadJournals();
-    });
     $('#journal-search').on('input', render);
 
     $('#journal-new-btn').on('click', function () { openEditor(null); });
@@ -154,10 +147,11 @@
       if ($form.data('busy')) { return; }
       $form.data('busy', true);
       save().always(function () { $form.data('busy', false); })
-        .done(function () {
-          bootstrap.Modal.getOrCreateInstance($('#journal-modal')[0]).hide();
-          loadJournals();
-        });
+      .done(function () {
+        bootstrap.Modal.getOrCreateInstance($('#journal-modal')[0]).hide();
+        toast('Journal saved.');
+        loadJournals();
+      });
     });
 
     $('#jv-delete').on('click', function () {
@@ -165,17 +159,11 @@
       confirmDialog('Delete journal "' + (editing.summary || '') + '"?').done(function () {
         api('DELETE', '/api/journals/' + editing.id).done(function () {
           bootstrap.Modal.getOrCreateInstance($('#journal-modal')[0]).hide();
+          toast('Journal deleted.');
           loadJournals();
         });
       });
     });
 
-    api('GET', '/api/auth/me').done(function (user) {
-      if (user.is_admin) { $('#admin-nav-link, #rules-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
-    });
-    $('#account-btn').on('click', function () { window.location.href = '/'; });
-    $('#logout-btn').on('click', function () {
-      api('POST', '/api/auth/logout').done(function () { window.location.href = '/login'; });
-    });
   });
 })();
