@@ -34,14 +34,14 @@
 **Goal**: Largest group converted first, to prove the annotation pattern on session/CSRF/TOTP/passkey routes including their untyped ceremony bodies.
 **Success Criteria**: All `/api/auth/*` paths generated from annotations; legacy auth paths removed from the fragment; response views (`me`, login session, token list, TOTP status, passkey list) are typed structs passing the compatibility fixture test.
 **Tests**: compatibility fixture test for each converted view; completeness test pinning the auth path inventory.
-**Status**: Complete (auth + mfa annotated; legacy fragment's `/api/auth/*` entries deleted; also fixed the legacy doc's broken `json_response`/`ok["200"]` responses, which were invalid JSON Schema. Docker compose smoke test skipped by user; interop verified against `calstack-test-pg` after recreating `caltest` — the suite assumes a fresh DB, it does not reset one)
+**Status**: Complete (auth + mfa annotated; legacy fragment's `/api/auth/*` entries deleted; also fixed the legacy doc's broken `json_response`/`ok["200"]` responses, which were invalid JSON Schema. Interop verified against `calstack-test-pg` after recreating `caltest` — the suite assumes a fresh DB, it does not reset one)
 
 ## Stage 3: Calendaring core (calendars, ACL, events, occurrences, tasks, journals)
 
 **Goal**: The heart of the API: `calendars_api`, `events_api`, `tasks_api`, `journals_api`.
 **Success Criteria**: Calendar/event/occurrence/task/journal routes generated; `calendar_view`, task/journal views, occurrence overlay responses typed; legacy paths removed.
 **Tests**: compatibility fixture tests (calendar_view is the critical one — every field incl. nulls); completeness test updated.
-**Status**: Not Started
+**Status**: Complete (all four modules annotated; calendar/event/occurrence/task/journal views are typed structs; the events/tasks/journals existing shape tests now verify struct serialization. Legacy fragment is down to sharing/attachments/categories/rules/addressbook/contacts/providers/push/webhooks/audit/admin. Discovered during conversion: /api/search, /api/changes, /api/notifications, /api/places and /api/attachments/{id}/meta were never in the legacy doc at all — they get documented in stage 4)
 
 ## Stage 4: Everything else (contacts/addressbook, categories, rules, subscriptions/shares, push, webhooks, notification providers, audit, search, changes, attachments, places, admin, mfa, extras)
 

@@ -13,187 +13,17 @@ fn param(name: &str, path: bool) -> serde_json::Value {
     })
 }
 
-fn json_response(description: &str, schema: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        description: {
-            "description": description,
-            "content": {"application/json": {"schema": schema}},
-        }
-    })
-}
-
-/// Builds the complete OpenAPI document.
+/// Builds the complete OpenAPI document (the shrinking legacy fragment; the
+/// auth and calendaring-core paths are utoipa-generated in calendar-server).
 pub fn openapi_document() -> serde_json::Value {
-    let calendar = || serde_json::json!({"$ref": "#/components/schemas/Calendar"});
     let category = || serde_json::json!({"$ref": "#/components/schemas/Category"});
     let contact = || serde_json::json!({"$ref": "#/components/schemas/Contact"});
-    let event = || serde_json::json!({"$ref": "#/components/schemas/Event"});
-    let task = || serde_json::json!({"$ref": "#/components/schemas/Task"});
-    let journal = || serde_json::json!({"$ref": "#/components/schemas/Journal"});
 
     let mut paths = serde_json::Map::new();
     let mut put = |route: &str, methods: serde_json::Value| {
         paths.insert(route.into(), methods);
     };
 
-    put(
-        "/api/calendars",
-        json!({
-            "post": {"summary": "Create a calendar in the caller's personal tenant",
-                "requestBody": {"content": {"application/json": {"schema": {
-                    "type": "object", "required": ["slug", "name"],
-                    "properties": {"slug": {"type": "string"}, "name": {"type": "string"},
-                        "description": {"type": ["string", "null"]}, "color": {"type": ["string", "null"]},
-                        "timezone": {"type": ["string", "null"]}}}}}},
-                "responses": json_response("created", calendar())},
-            "get": {"summary": "List readable calendars",
-                "responses": json_response("list", json!({"type": "array", "items": calendar()}))},
-        }),
-    );
-    put(
-        "/api/calendars/{id}",
-        json!({
-            "get": {"summary": "Get a calendar", "parameters": [param("id", true)],
-                "responses": {"200": {"description": "calendar", "content": {"application/json": {"schema": calendar()}}},
-                    "404": {"description": "absent"}}},
-            "patch": {"summary": "Update calendar properties",
-                "requestBody": {"content": {"application/json": {"schema": {
-                    "type": "object", "properties": {"name": {"type": ["string", "null"]},
-                        "description": {"type": ["string", "null"]}, "color": {"type": ["string", "null"]},
-                        "timezone": {"type": ["string", "null"]}, "order_index": {"type": ["integer", "null"]},
-                        "components": {"type": "array", "items": {"type": "string",
-                            "enum": ["VEVENT", "VTODO", "VJOURNAL"]},
-                            "description": "1-3 distinct kinds; removal is refused with 409 plus per-type counts while live items of a removed kind exist"}}}}}},
-                "responses": json_response("updated", calendar())},
-            "delete": {"summary": "Soft-delete a calendar (retention before purge)",
-                "responses": {"200": {"description": "deleted"}}},
-        }),
-    );
-    put(
-        "/api/calendars/{id}/acl",
-        json!({
-            "get": {"summary": "Read the ACL (owner only)", "responses": {"200": {"description": "entries"}}},
-            "put": {"summary": "Replace the ACL; requires at least one owner",
-                "requestBody": {"content": {"application/json": {"schema": {"type": "object",
-                    "properties": {"entries": {"type": "array", "items": {"type": "object"}}}}}}},
-                "responses": {"200": {"description": "replaced"}}},
-        }),
-    );
-    put(
-        "/api/calendars/{id}/events",
-        json!({
-            "post": {"summary": "Create an event (master or RECURRENCE-ID exception)",
-                "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EventCreate"}}}},
-                "responses": json_response("created", event())},
-            "get": {"summary": "List events in a window", "parameters": [param("id", true),
-                {"name": "from", "in": "query", "schema": {"type": "string", "format": "date-time"}},
-                {"name": "to", "in": "query", "schema": {"type": "string", "format": "date-time"}}],
-                "responses": json_response("events", json!({"type": "array", "items": event()}))},
-        }),
-    );
-    put(
-        "/api/calendars/{id}/occurrences",
-        json!({"get": {
-            "summary": "Expanded occurrences with exception overlay",
-            "parameters": [param("id", true),
-                {"name": "from", "in": "query", "schema": {"type": "string", "format": "date-time"}},
-                {"name": "to", "in": "query", "schema": {"type": "string", "format": "date-time"}},
-                {"name": "include", "in": "query", "schema": {"type": "string"},
-                    "description": "comma-separated extras: tasks,journals append dated markers (type: task/journal) to the event entries"}],
-            "responses": {"200": {"description": "occurrences"}}}
-        }),
-    );
-    put(
-        "/api/calendars/{id}/tasks",
-        json!({
-            "post": {"summary": "Create a task (VTODO master)",
-                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TaskWrite"}}}},
-                "responses": json_response("created", task())},
-            "get": {"summary": "List task masters (undated included)",
-                "parameters": [param("id", true),
-                    {"name": "status", "in": "query", "schema": {"type": "string"}},
-                    {"name": "due_before", "in": "query", "schema": {"type": "string", "format": "date-time"}},
-                    {"name": "due_after", "in": "query", "schema": {"type": "string", "format": "date-time"}},
-                    {"name": "category", "in": "query", "schema": {"type": "string"}},
-                    {"name": "parent_id", "in": "query", "schema": {"type": "string"},
-                        "description": "the parent task's uid (subtasks chain by parent_uid)"},
-                    {"name": "q", "in": "query", "schema": {"type": "string"},
-                        "description": "case-insensitive substring over the summary"}],
-                "responses": json_response("tasks", json!({"type": "array", "items": task()}))},
-        }),
-    );
-    put(
-        "/api/tasks/{id}",
-        json!({
-            "get": {"summary": "Get a task with its ETag", "parameters": [param("id", true)],
-                "responses": {"200": {"description": "task", "content": {"application/json": {"schema": task()}}},
-                    "404": {"description": "absent"}}},
-            "patch": {"summary": "Update a task with If-Match optimistic concurrency",
-                "parameters": [param("id", true)],
-                "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/TaskWrite"}}}},
-                "responses": json_response("updated", task())},
-            "delete": {"summary": "Soft delete; subtasks cascade (deleted count returned)",
-                "parameters": [param("id", true)],
-                "responses": {"200": {"description": "deleted"}}},
-        }),
-    );
-    put(
-        "/api/tasks/{id}/complete",
-        json!({"post": {
-            "summary": "Complete a task; a recurring task needs the occurrence (writes a RECURRENCE-ID override)",
-            "parameters": [param("id", true)],
-            "requestBody": {"content": {"application/json": {"schema": {
-                "type": "object", "properties": {"occurrence": {
-                    "oneOf": [{"type": "object", "properties": {"timed": {"type": "string", "format": "date-time"}}, "required": ["timed"]},
-                              {"type": "object", "properties": {"all_day": {"type": "string", "format": "date"}}, "required": ["all_day"]}]}}}}}},
-            "responses": json_response("completed", task())},
-        }),
-    );
-    put(
-        "/api/tasks/{id}/reopen",
-        json!({"post": {
-            "summary": "Clear a completion (resets the override for recurring occurrences)",
-            "parameters": [param("id", true)],
-            "requestBody": {"content": {"application/json": {"schema": {
-                "type": "object", "properties": {"occurrence": {
-                    "oneOf": [{"type": "object", "properties": {"timed": {"type": "string", "format": "date-time"}}, "required": ["timed"]},
-                              {"type": "object", "properties": {"all_day": {"type": "string", "format": "date"}}, "required": ["all_day"]}]}}}}}},
-            "responses": json_response("reopened", task())},
-        }),
-    );
-    put(
-        "/api/calendars/{id}/journals",
-        json!({
-            "post": {"summary": "Create a journal (VJOURNAL); an undated one is a note",
-                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JournalWrite"}}}},
-                "responses": json_response("created", journal())},
-            "get": {"summary": "List journals, newest first",
-                "parameters": [param("id", true),
-                    {"name": "from", "in": "query", "schema": {"type": "string", "format": "date-time"}},
-                    {"name": "to", "in": "query", "schema": {"type": "string", "format": "date-time"}},
-                    {"name": "undated", "in": "query", "schema": {"type": "boolean"},
-                        "description": "true = only journals without a DTSTART (notes)"},
-                    {"name": "category", "in": "query", "schema": {"type": "string"}},
-                    {"name": "q", "in": "query", "schema": {"type": "string"},
-                        "description": "case-insensitive substring over the summary"}],
-                "responses": json_response("journals", json!({"type": "array", "items": journal()}))},
-        }),
-    );
-    put(
-        "/api/journals/{id}",
-        json!({
-            "get": {"summary": "Get a journal with its ETag", "parameters": [param("id", true)],
-                "responses": {"200": {"description": "journal", "content": {"application/json": {"schema": journal()}}},
-                    "404": {"description": "absent"}}},
-            "patch": {"summary": "Update a journal with If-Match optimistic concurrency",
-                "parameters": [param("id", true)],
-                "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/JournalWrite"}}}},
-                "responses": json_response("updated", journal())},
-            "delete": {"summary": "Soft delete (sync-visible tombstone)",
-                "parameters": [param("id", true)],
-                "responses": {"200": {"description": "deleted"}}},
-        }),
-    );
     put(
         "/api/calendars/{id}/shares",
         json!({
@@ -222,97 +52,6 @@ pub fn openapi_document() -> serde_json::Value {
         }),
     );
     put(
-        "/api/events/{id}",
-        json!({
-            "get": {"summary": "Get an event with its ETag", "responses": {
-                "200": {"description": "event", "content": {"application/json": {"schema": event()}}},
-                "404": {"description": "absent"}}},
-            "patch": {"summary": "Update with If-Match optimistic concurrency",
-                "responses": {"200": {"description": "updated", "content": {"application/json": {"schema": event()}}},
-                    "409": {"description": "stale etag"}}},
-            "delete": {"summary": "Soft delete (sync-visible tombstone)",
-                "responses": {"200": {"description": "deleted"}}},
-        }),
-    );
-    put(
-        "/api/attachments/{id}",
-        json!({
-            "get": {"summary": "Download an attachment", "responses": {"200": {"description": "bytes"}}},
-            "delete": {"summary": "Delete an attachment", "responses": {"200": {"description": "deleted"}}},
-        }),
-    );
-    put(
-        "/api/attachments/{id}/meta",
-        json!({"get": {
-            "summary": "Attachment metadata only (no bytes)",
-            "responses": {"200": {"description": "metadata"}, "404": {"description": "absent"}},
-        }}),
-    );
-    put(
-        "/api/places/autocomplete",
-        json!({"get": {
-            "summary": "Google Places autocomplete proxy (requires GOOGLE_MAPS_API_KEY)",
-            "parameters": [{"name": "q", "in": "query", "required": true, "schema": {"type": "string"}}],
-            "responses": {"200": {"description": "suggestions: [{label, place_id}]"}}
-        }}),
-    );
-    put(
-        "/api/places/{place_id}",
-        json!({"get": {
-            "summary": "Resolve a Google place into the structured event location shape",
-            "parameters": [param("place_id", true)],
-            "responses": {"200": {"description": "location fields"}}
-        }}),
-    );
-    put(
-        "/api/search",
-        json!({"get": {
-            "summary": "Search over summary, description, attendees, locations, categories",
-            "parameters": [
-                {"name": "q", "in": "query", "schema": {"type": "string"}},
-                {"name": "attendee", "in": "query", "schema": {"type": "string"}},
-                {"name": "limit", "in": "query", "schema": {"type": "integer"}}],
-            "responses": {"200": {"description": "hits"}}
-        }}),
-    );
-    put(
-        "/api/changes",
-        json!({"get": {
-            "summary": "Change stream since a sequence (transport adapters: SSE/WebSocket)",
-            "parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}],
-            "responses": {"200": {"description": "changes"}}
-        }}),
-    );
-    put(
-        "/api/changes/stream",
-        json!({"get": {
-            "summary": "SSE transport adapter for the change stream (sync/change/done frames, ~15s comment pings, 30-minute cap)",
-            "parameters": [{"name": "since", "in": "query", "schema": {"type": "integer"}}],
-            "responses": {"200": {"description": "text/event-stream"}}
-        }}),
-    );
-    put(
-        "/api/events/{id}/attendees/self",
-        json!({"patch": {"summary": "Update the caller's own RSVP on an event they attend",
-            "parameters": [param("id", true)],
-            "requestBody": {"required": true, "content": {"application/json": {"schema": {
-                "type": "object", "required": ["partstat"],
-                "properties": {"partstat": {"type": "string", "enum": ["NEEDS-ACTION", "ACCEPTED", "DECLINED", "TENTATIVE"]}}}}}},
-            "responses": {"200": {"description": "rsvp recorded"}, "403": {"description": "caller is not an attendee"}}}}),
-    );
-    put(
-        "/api/notifications",
-        json!({"get": {
-            "summary": "In-app notifications", "responses": {"200": {"description": "list"}}
-        }}),
-    );
-    put(
-        "/api/notifications/{id}/read",
-        json!({"post": {
-            "summary": "Mark a notification read", "responses": {"200": {"description": "read"}}
-        }}),
-    );
-    put(
         "/api/subscriptions",
         json!({
             "post": {"summary": "Subscribe to a public share",
@@ -327,14 +66,6 @@ pub fn openapi_document() -> serde_json::Value {
         json!({"delete": {
             "summary": "Unsubscribe", "responses": {"200": {"description": "removed"}}
         }}),
-    );
-    put(
-        "/api/subscriptions/{id}/occurrences",
-        json!({"get": {"summary": "Expanded occurrences of a subscribed calendar (PUBLIC events only)",
-            "parameters": [param("id", true),
-                {"name": "from", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}},
-                {"name": "to", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}],
-            "responses": {"200": {"description": "expanded occurrences with exception overlay"}}}}),
     );
     put(
         "/api/push/subscriptions",
@@ -819,22 +550,29 @@ mod tests {
         assert_eq!(doc["openapi"], "3.1.0");
         assert!(doc["paths"].is_object());
         assert!(doc["components"]["schemas"].is_object());
-        assert!(doc["paths"]["/api/calendars/{id}/events"]["post"].is_object());
         assert!(doc["paths"]["/api/addressbooks"]["post"].is_object());
         assert!(doc["paths"]["/api/contacts/autocomplete"]["get"].is_object());
         // Routes that drifted out of the document once already stay pinned:
-        // Auth routes (/api/auth/*) are now generated by utoipa annotations in
+        // Auth routes and the calendaring core (calendars/events/tasks/
+        // journals/occurrences) are generated by utoipa annotations in
         // calendar-server (see IMPLEMENTATION_PLAN.md) and pinned there.
         for (path, method) in [
+            ("/api/calendars/{id}/shares", "post"),
+            ("/api/calendars/{id}/events/{event_id}/attachments", "post"),
             ("/api/notification-providers/{id}", "get"),
             ("/api/notification-providers/{id}", "patch"),
             ("/api/notification-providers/{id}/test", "post"),
             ("/api/push/public-key", "get"),
             ("/api/push/subscriptions", "post"),
             ("/api/push/subscriptions", "delete"),
-            ("/api/subscriptions/{id}/occurrences", "get"),
+            ("/api/subscriptions", "post"),
+            ("/api/subscriptions/{id}", "delete"),
             ("/api/webhooks", "post"),
             ("/api/webhooks/{id}/deliveries", "get"),
+            ("/api/audit", "get"),
+            ("/api/admin/users", "get"),
+            ("/api/categories", "post"),
+            ("/api/rules", "post"),
         ] {
             assert!(
                 doc["paths"][path][method].is_object(),
@@ -847,33 +585,5 @@ mod tests {
             doc["components"]["schemas"]["ContactWrite"]["properties"]["member_contact_ids"]
                 .is_object()
         );
-        // Tasks and journals (ADR-015): routes, schemas and calendar components.
-        for (path, method) in [
-            ("/api/calendars/{id}/tasks", "post"),
-            ("/api/calendars/{id}/tasks", "get"),
-            ("/api/tasks/{id}", "get"),
-            ("/api/tasks/{id}", "patch"),
-            ("/api/tasks/{id}", "delete"),
-            ("/api/tasks/{id}/complete", "post"),
-            ("/api/tasks/{id}/reopen", "post"),
-            ("/api/calendars/{id}/journals", "post"),
-            ("/api/calendars/{id}/journals", "get"),
-            ("/api/journals/{id}", "get"),
-            ("/api/journals/{id}", "patch"),
-            ("/api/journals/{id}", "delete"),
-            ("/api/calendars/{id}/occurrences", "get"),
-        ] {
-            assert!(
-                doc["paths"][path][method].is_object(),
-                "{method} {path} missing from the OpenAPI document"
-            );
-        }
-        for schema in ["Task", "TaskWrite", "Journal", "JournalWrite"] {
-            assert!(
-                doc["components"]["schemas"][schema].is_object(),
-                "{schema} missing"
-            );
-        }
-        assert!(doc["components"]["schemas"]["Calendar"]["properties"]["components"].is_object());
     }
 }

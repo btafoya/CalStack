@@ -12,7 +12,7 @@ use calendar_db::{self as db};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct CalendarBody {
     slug: String,
     name: String,
@@ -23,45 +23,69 @@ struct CalendarBody {
     components: Option<Vec<String>>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct CalendarPatchBody {
     name: Option<String>,
     description: Option<String>,
     color: Option<String>,
     timezone: Option<String>,
     order_index: Option<i32>,
+    /// 1-3 distinct kinds; removal is refused with 409 plus per-type counts
+    /// while live items of a removed kind exist.
     components: Option<Vec<String>>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct AclEntryBody {
     user_id: Uuid,
     capability: String,
     can_manage_acl: bool,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct AclBody {
     entries: Vec<AclEntryBody>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct CalendarView {
+    id: Uuid,
+    slug: String,
+    name: String,
+    description: Option<String>,
+    color: Option<String>,
+    timezone: Option<String>,
+    order_index: i32,
+    components: Vec<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    my_capability: &'static str,
 }
 
 fn calendar_view(
     calendar: &db::CalendarRow,
     capability: calendar_core::CalendarCapability,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": calendar.id,
-        "slug": calendar.slug,
-        "name": calendar.name,
-        "description": calendar.description,
-        "color": calendar.color,
-        "timezone": calendar.timezone,
-        "order_index": calendar.order_index,
-        "components": calendar.components,
-        "created_at": calendar.created_at,
-        "updated_at": calendar.updated_at,
-        "my_capability": capability.as_db_str(),
-    })
+) -> CalendarView {
+    CalendarView {
+        id: calendar.id,
+        slug: calendar.slug.clone(),
+        name: calendar.name.clone(),
+        description: calendar.description.clone(),
+        color: calendar.color.clone(),
+        timezone: calendar.timezone.clone(),
+        order_index: calendar.order_index,
+        components: calendar.components.clone(),
+        created_at: calendar.created_at,
+        updated_at: calendar.updated_at,
+        my_capability: capability.as_db_str(),
+    }
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct AclEntryView {
+    user_id: Uuid,
+    capability: &'static str,
+    can_manage_acl: bool,
 }
 
 fn parse_acl(
@@ -107,6 +131,15 @@ pub(crate) async fn require_capability(
     Ok(db::get_calendar(pool, calendar_id).await?)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/calendars",
+    request_body = CalendarBody,
+    responses(
+        (status = 201, description = "created", body = CalendarView),
+        (status = 400, description = "validation error or slug conflict"),
+    )
+)]
 async fn create_calendar(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -165,19 +198,35 @@ async fn create_calendar(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/calendars",
+    responses(
+        (status = 200, description = "list", body = Vec<CalendarView>),
+    )
+)]
 async fn list_calendars(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = resolve_auth(&pool, &headers).await?;
     let rows = db::list_calendars_for_user(&pool, auth.user.id).await?;
-    Ok(Json(serde_json::json!(
+    Ok(Json(
         rows.iter()
             .map(|(cal, cap)| calendar_view(cal, *cap))
-            .collect::<Vec<_>>()
-    )))
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/calendars/{id}",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    responses(
+        (status = 200, description = "calendar", body = CalendarView),
+        (status = 404, description = "absent"),
+    )
+)]
 async fn get_calendar(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -197,6 +246,18 @@ async fn get_calendar(
     Ok(Json(calendar_view(&calendar, cap)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/calendars/{id}",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    request_body = CalendarPatchBody,
+    responses(
+        (status = 200, description = "updated", body = CalendarView),
+        (status = 400, description = "validation error"),
+        (status = 404, description = "absent"),
+        (status = 409, description = "component removal blocked by live items"),
+    )
+)]
 async fn patch_calendar(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -274,6 +335,12 @@ async fn patch_calendar(
     Ok(Json(calendar_view(&calendar, cap)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/calendars/{id}",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    responses((status = 200, description = "deleted (soft, retention before purge)", body = crate::OkView))
+)]
 async fn delete_calendar(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -289,9 +356,17 @@ async fn delete_calendar(
     )
     .await?;
     db::soft_delete_calendar(&pool, calendar_id).await?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(Json(crate::OkView { ok: true }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/calendars/{id}/acl",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    responses(
+        (status = 200, description = "entries", body = Vec<AclEntryView>),
+    )
+)]
 async fn get_calendar_acl(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -306,15 +381,24 @@ async fn get_calendar_acl(
     )
     .await?;
     let acl = db::list_calendar_acl(&pool, calendar_id).await?;
-    Ok(Json(serde_json::json!(
+    Ok(Json(
         acl.iter()
-            .map(|(user, cap, manage)| serde_json::json!({
-                "user_id": user, "capability": cap.as_db_str(), "can_manage_acl": manage,
-            }))
-            .collect::<Vec<_>>()
-    )))
+            .map(|(user, cap, manage)| AclEntryView {
+                user_id: *user,
+                capability: cap.as_db_str(),
+                can_manage_acl: *manage,
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/calendars/{id}/acl",
+    params(("id" = Uuid, Path, description = "calendar id")),
+    request_body = AclBody,
+    responses((status = 200, description = "replaced", body = crate::OkView))
+)]
 async fn put_calendar_acl(
     State(AppState { pool, .. }): State<AppState>,
     headers: HeaderMap,
@@ -332,8 +416,32 @@ async fn put_calendar_acl(
     .await?;
     let acl = parse_acl(&body)?;
     db::replace_calendar_acl(&pool, calendar_id, &acl).await?;
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(Json(crate::OkView { ok: true }))
 }
+
+/// OpenAPI for the calendar module; merged into the served document in `main.rs`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        create_calendar,
+        list_calendars,
+        get_calendar,
+        patch_calendar,
+        delete_calendar,
+        get_calendar_acl,
+        put_calendar_acl,
+    ),
+    components(schemas(
+        CalendarBody,
+        CalendarPatchBody,
+        AclBody,
+        AclEntryBody,
+        CalendarView,
+        AclEntryView,
+        crate::OkView,
+    ))
+)]
+pub(crate) struct CalendarsApi;
 
 pub fn router() -> axum::Router<crate::AppState> {
     axum::Router::new()
