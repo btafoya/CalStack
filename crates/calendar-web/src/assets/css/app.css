@@ -165,12 +165,8 @@ header.navbar::after {
   background: linear-gradient(90deg, #0B2670 0%, #1554C0 50%, #12AEE8 100%);
 }
 
-/* The nav band below the header sits on the secondary surface, distinct from
-   both header and page. */
-.navbar-collapse .navbar.bg-body {
-  background-color: var(--bs-secondary-bg) !important;
-}
-
+/* The nav links (Providers/Credentials/Admin) live inside the navbar's
+   collapse; the active one gets the brand accent underline. */
 .navbar-collapse .nav-link {
   border-bottom: 2px solid transparent;
 }

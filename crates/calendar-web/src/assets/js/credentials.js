@@ -74,13 +74,17 @@ $(function () {
       $('#totp-recovery-codes').val(resp.recovery_codes.join('\n'));
       $('#totp-recovery-panel').removeClass('d-none');
       $('#totp-recovery-panel')[0].scrollIntoView({ block: 'center' });
+      toast('Two-factor authentication enabled.');
       loadTotp();
     });
   });
 
   $('#totp-disable-btn').on('click', function () {
     confirmDialog('Disable two-factor authentication? Your recovery codes will stop working.').done(function () {
-      api('DELETE', '/api/auth/totp').done(loadTotp);
+      api('DELETE', '/api/auth/totp').done(function () {
+        toast('Two-factor authentication disabled.');
+        loadTotp();
+      });
     });
   });
 
@@ -194,7 +198,10 @@ $(function () {
       : 'Revoke this credential? Apps using it will stop working.';
     confirmDialog(message).done(function () {
       var url = kind === 'passkey' ? '/api/auth/webauthn/' + id : '/api/auth/' + kind + 's/' + id;
-      api('DELETE', url).done(load);
+      api('DELETE', url).done(function () {
+        toast(kind === 'passkey' ? 'Passkey removed.' : 'Credential revoked.');
+        load();
+      });
     });
   });
 

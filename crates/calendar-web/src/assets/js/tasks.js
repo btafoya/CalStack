@@ -6,7 +6,6 @@
 (function () {
   'use strict';
 
-  var calendars = [];
   var calId = null;
   var tasks = [];
   var editing = null; // task loaded into the edit modal, or null
@@ -30,25 +29,6 @@
     return dueKey(a).localeCompare(dueKey(b));
   }
 
-  function loadCalendars() {
-    return api('GET', '/api/calendars').done(function (cals) {
-      calendars = cals.filter(function (c) {
-        return (c.components || []).indexOf('VTODO') !== -1;
-      });
-      var $sel = $('#task-calendar-select').empty();
-      calendars.forEach(function (c) {
-        $sel.append($('<option>').val(c.id).text(c.name));
-      });
-      if (!calendars.length) {
-        $('#task-empty').prop('hidden', false)
-          .text('No calendar accepts tasks. Add the VTODO component to a calendar first.');
-        return;
-      }
-      calId = calendars[0].id;
-      loadTasks();
-    });
-  }
-
   function loadTasks() {
     if (!calId) { return $.Deferred().resolve(); }
     $('#task-empty').prop('hidden', true);
@@ -57,6 +37,25 @@
       render();
     });
   }
+
+  // Tab pane on the index page: the sidebar selection is the calendar
+  // selector; app.js calls load() on tab show and calendar switch.
+  window.TasksPane = {
+    _cal: null,
+    load: function (cal) {
+      if (this._cal === cal.id) { return; }
+      this._cal = cal.id;
+      if ((cal.components || []).indexOf('VTODO') === -1) {
+        calId = null;
+        $('#task-list').empty();
+        $('#task-empty').prop('hidden', false)
+          .text('This calendar does not accept tasks. Edit the calendar (pencil button in the sidebar) and enable Tasks.');
+        return;
+      }
+      calId = cal.id;
+      loadTasks();
+    },
+  };
 
   function render() {
     var q = $('#task-search').val().trim().toLowerCase();
@@ -159,9 +158,42 @@
     $('#tk-status').val(t && t.status || '');
     $('#tk-percent').val(t && t.percent_complete != null ? t.percent_complete : '');
     $('#tk-categories').val(t && (t.categories || []).join(', ') || '');
-    $('#tk-parent-uid').val(t && t.parent_uid || '');
+    fillParentPicker(t);
     $('#tk-delete').prop('hidden', !t);
     bootstrap.Modal.getOrCreateInstance($('#task-modal')[0]).show();
+  }
+
+  // UIDs in this calendar that sit under the given task (itself included) —
+  // none of them may become its parent, or the tree gets a cycle.
+  function descendantsOf(t) {
+    var blocked = {};
+    blocked[t.uid] = true;
+    var frontier = [t.uid];
+    while (frontier.length) {
+      var uid = frontier.pop();
+      tasks.forEach(function (x) {
+        if (x.parent_uid === uid && !blocked[x.uid]) {
+          blocked[x.uid] = true;
+          frontier.push(x.uid);
+        }
+      });
+    }
+    return blocked;
+  }
+
+  function fillParentPicker(t) {
+    var blocked = t ? descendantsOf(t) : {};
+    var $sel = $('#tk-parent-uid').empty().append('<option value="">(no parent)</option>');
+    tasks.forEach(function (x) {
+      if (blocked[x.uid]) { return; }
+      $sel.append($('<option>').val(x.uid).text(x.summary || '(no summary)'));
+    });
+    if (t && t.parent_uid && !tasks.some(function (x) { return x.uid === t.parent_uid; })) {
+      // Parent lives in another calendar (or was filtered out); keep it
+      // selectable so saving doesn't silently detach it.
+      $sel.append($('<option>').val(t.parent_uid).text(t.parent_uid));
+    }
+    $sel.val(t && t.parent_uid || '');
   }
 
   function readNumber($el, max) {
@@ -192,17 +224,12 @@
     }
     api('PATCH', '/api/tasks/' + editing.id, body).done(function () {
       bootstrap.Modal.getOrCreateInstance($('#task-modal')[0]).hide();
+      toast('Task saved.');
       loadTasks();
     });
   }
 
   $(function () {
-    loadCalendars();
-
-    $('#task-calendar-select').on('change', function () {
-      calId = $(this).val();
-      loadTasks();
-    });
     $('#task-search').on('input', render);
     $('#task-status-filter').on('change', render);
     $('#tk-all-day').on('change', syncDueMode);
@@ -219,6 +246,7 @@
         .always(function () { $form.data('busy', false); })
         .done(function () {
           $('#task-quick-summary').val('');
+          toast('Task added.');
           loadTasks();
         });
     });
@@ -236,17 +264,10 @@
       confirmDialog('Delete task "' + (editing.summary || '') + '"? Its subtasks go with it.').done(function () {
         api('DELETE', '/api/tasks/' + editing.id).done(function () {
           bootstrap.Modal.getOrCreateInstance($('#task-modal')[0]).hide();
+          toast('Task deleted.');
           loadTasks();
         });
       });
-    });
-
-    api('GET', '/api/auth/me').done(function (user) {
-      if (user.is_admin) { $('#admin-nav-link, #rules-link, #providers-nav-link, #credentials-nav-link').prop('hidden', false); }
-    });
-    $('#account-btn').on('click', function () { window.location.href = '/'; });
-    $('#logout-btn').on('click', function () {
-      api('POST', '/api/auth/logout').done(function () { window.location.href = '/login'; });
     });
   });
 })();

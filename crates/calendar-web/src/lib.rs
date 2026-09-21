@@ -103,6 +103,11 @@ static ASSETS: &[(&str, &[u8], &str)] = &[
         "text/javascript; charset=utf-8",
     ),
     (
+        "js/sweetalert2.min.js",
+        asset!("js/sweetalert2.min.js"),
+        "text/javascript; charset=utf-8",
+    ),
+    (
         "js/dialogs.js",
         asset!("js/dialogs.js"),
         "text/javascript; charset=utf-8",
@@ -250,12 +255,21 @@ macro_rules! footer_html {
 
 macro_rules! subpage_header {
     () => {
+        // Single merged navbar: brand + admin page links + theme/user menu.
+        // Used by the admin-only pages, so the links stay visible there.
         r##"<header class="navbar navbar-expand-md d-print-none bg-body border-bottom">
   <div class="container-fluid">
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
     <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="CalStack"></a>
+    <div class="collapse navbar-collapse" id="navbar-menu">
+      <ul class="navbar-nav">
+        <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers"><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
+        <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials"><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
+        <li class="nav-item"><a class="nav-link" id="admin-nav-link" href="/admin"><span class="nav-link-icon me-1"><i class="bi bi-shield-lock"></i></span><span class="nav-link-title">Admin</span></a></li>
+      </ul>
+    </div>
     <div class="navbar-nav flex-row order-md-last">
       <div class="nav-item me-2">
         <button type="button" id="theme-toggle" class="nav-link px-0" aria-label="Toggle dark mode" title="Toggle dark mode"><i class="bi bi-circle-half"></i></button>
@@ -271,56 +285,6 @@ macro_rules! subpage_header {
   </div>
 </header>
 "##
-    };
-}
-
-macro_rules! nav_menu_gated {
-    () => {
-        r#"<div class="navbar-expand-md flex-shrink-0">
-  <div class="collapse navbar-collapse" id="navbar-menu">
-    <div class="navbar w-100 bg-body border-bottom">
-      <div class="container-fluid">
-        <ul class="navbar-nav">
-          <li class="nav-item"><a class="nav-link" href="/"><span class="nav-link-icon me-1"><i class="bi bi-calendar3"></i></span><span class="nav-link-title">Calendar</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/categories"><span class="nav-link-icon me-1"><i class="bi bi-tags"></i></span><span class="nav-link-title">Categories</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/tasks"><span class="nav-link-icon me-1"><i class="bi bi-check2-square"></i></span><span class="nav-link-title">Tasks</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/journals"><span class="nav-link-icon me-1"><i class="bi bi-journal-text"></i></span><span class="nav-link-title">Journals</span></a></li>
-          <li class="nav-item"><a class="nav-link" id="rules-link" href="/rules" hidden><span class="nav-link-icon me-1"><i class="bi bi-sliders"></i></span><span class="nav-link-title">Rules</span></a></li>
-          <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers" hidden><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
-          <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials" hidden><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
-          <li class="nav-item"><a class="nav-link" id="admin-nav-link" href="/admin" hidden><span class="nav-link-icon me-1"><i class="bi bi-shield-lock"></i></span><span class="nav-link-title">Admin</span></a></li>
-        </ul>
-      </div>
-    </div>
-  </div>
-</div>
-"#
-    };
-}
-
-macro_rules! nav_menu_open {
-    () => {
-        r#"<div class="navbar-expand-md flex-shrink-0">
-  <div class="collapse navbar-collapse" id="navbar-menu">
-    <div class="navbar w-100 bg-body border-bottom">
-      <div class="container-fluid">
-        <ul class="navbar-nav">
-          <li class="nav-item"><a class="nav-link" href="/"><span class="nav-link-icon me-1"><i class="bi bi-calendar3"></i></span><span class="nav-link-title">Calendar</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/categories"><span class="nav-link-icon me-1"><i class="bi bi-tags"></i></span><span class="nav-link-title">Categories</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/tasks"><span class="nav-link-icon me-1"><i class="bi bi-check2-square"></i></span><span class="nav-link-title">Tasks</span></a></li>
-          <li class="nav-item"><a class="nav-link" href="/journals"><span class="nav-link-icon me-1"><i class="bi bi-journal-text"></i></span><span class="nav-link-title">Journals</span></a></li>
-          <li class="nav-item"><a class="nav-link" id="rules-link" href="/rules"><span class="nav-link-icon me-1"><i class="bi bi-sliders"></i></span><span class="nav-link-title">Rules</span></a></li>
-          <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers"><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
-          <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials"><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
-          <li class="nav-item"><a class="nav-link" id="admin-nav-link" href="/admin"><span class="nav-link-icon me-1"><i class="bi bi-shield-lock"></i></span><span class="nav-link-title">Admin</span></a></li>
-        </ul>
-      </div>
-    </div>
-  </div>
-</div>
-"#
     };
 }
 
@@ -418,6 +382,13 @@ const APP_PAGE_HEAD: &str = concat!(
       <span class="navbar-toggler-icon"></span>
     </button>
     <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="CalStack"></a>
+    <div class="collapse navbar-collapse" id="navbar-menu">
+      <ul class="navbar-nav">
+        <li class="nav-item"><a class="nav-link" id="providers-nav-link" href="/providers" hidden><span class="nav-link-icon me-1"><i class="bi bi-bell"></i></span><span class="nav-link-title">Providers</span></a></li>
+        <li class="nav-item"><a class="nav-link" id="credentials-nav-link" href="/credentials" hidden><span class="nav-link-icon me-1"><i class="bi bi-key"></i></span><span class="nav-link-title">Credentials</span></a></li>
+        <li class="nav-item"><a class="nav-link" id="admin-nav-link" href="/admin" hidden><span class="nav-link-icon me-1"><i class="bi bi-shield-lock"></i></span><span class="nav-link-title">Admin</span></a></li>
+      </ul>
+    </div>
     <div class="navbar-nav flex-row order-md-last">
       <div class="nav-item me-2 d-none d-md-flex">
         <button id="search-btn" class="nav-link px-2" type="button" aria-label="Search"><i class="bi bi-search"></i></button>
@@ -440,15 +411,14 @@ const APP_PAGE_HEAD: &str = concat!(
   </div>
 </header>
 "##,
-    nav_menu_gated!(),
-    r#"<div class="container-fluid">
+    r##"<div class="container-fluid">
   <div class="row">
     <aside class="col-md-3 col-lg-2 p-3 border-end">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <span class="fw-semibold">Calendars</span>
         <button id="add-cal-btn" class="btn btn-outline-primary" style="width:2.75rem;height:2.75rem" type="button" aria-label="Add calendar">+</button>
       </div>
-      <ul id="cal-list" class="list-group list-group-flush"></ul>
+      <ul id="cal-list" class="list-group list-group-flush"><li class="list-group-item text-body-secondary">Loading…</li></ul>
       <div class="d-flex justify-content-between align-items-center mb-2 mt-4">
         <span class="fw-semibold">Subscriptions</span>
       </div>
@@ -456,17 +426,263 @@ const APP_PAGE_HEAD: &str = concat!(
         <input id="sub-token" class="form-control" placeholder="Share token">
         <button id="sub-add-btn" class="btn btn-outline-primary" type="button">Add</button>
       </div>
-      <ul id="sub-list" class="list-group list-group-flush small"></ul>
+      <ul id="sub-list" class="list-group list-group-flush small"><li class="list-group-item text-body-secondary">Loading…</li></ul>
     </aside>
     <main class="col-md-9 col-lg-10 p-3">
-      <div id="calendar" hidden></div>
-      <p id="calendar-empty" class="text-body-secondary text-center mt-5">Select a calendar to view its events.</p>
+      <ul class="nav nav-tabs mb-3" id="cal-tabs" hidden role="tablist">
+        <li class="nav-item"><button class="nav-link active" id="tab-btn-calendar" data-tab="calendar" data-bs-toggle="tab" data-bs-target="#tab-calendar" type="button" role="tab" aria-selected="true">Calendar</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-btn-categories" data-tab="categories" data-bs-toggle="tab" data-bs-target="#tab-categories" type="button" role="tab">Categories</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-btn-contacts" data-tab="contacts" data-bs-toggle="tab" data-bs-target="#tab-contacts" type="button" role="tab">Contacts</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-btn-tasks" data-tab="tasks" data-bs-toggle="tab" data-bs-target="#tab-tasks" type="button" role="tab">Tasks</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-btn-journals" data-tab="journals" data-bs-toggle="tab" data-bs-target="#tab-journals" type="button" role="tab">Journals</button></li>
+        <li class="nav-item"><button class="nav-link" id="tab-btn-rules" data-tab="rules" data-bs-toggle="tab" data-bs-target="#tab-rules" type="button" role="tab" hidden>Rules</button></li>
+      </ul>
+      <div class="tab-content">
+        <div class="tab-pane fade show active" id="tab-calendar" role="tabpanel">
+          <div id="calendar" hidden></div>
+          <p id="calendar-empty" class="text-body-secondary text-center mt-5">Select a calendar to view its events.</p>
+        </div>
+        <div class="tab-pane fade" id="tab-categories" role="tabpanel">
+          <p id="cat-scope-note" class="text-body-secondary small"></p>
+          <form id="cat-form" class="card p-3 mb-4">
+            <div class="row g-2 align-items-end">
+              <div class="col"><label class="form-label" for="cat-name">Name</label>
+                <input class="form-control" id="cat-name" required></div>
+              <div class="col"><label class="form-label" for="cat-slug">Slug</label>
+                <input class="form-control" id="cat-slug" pattern="[a-z0-9][a-z0-9-]*" required></div>
+              <div class="col-auto"><label class="form-label" for="cat-color">Color</label>
+                <select class="form-select" id="cat-color"></select></div>
+              <div class="col-auto form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="cat-global">
+                <label class="form-check-label" for="cat-global">Apply to all calendars</label></div>
+              <div class="col-auto d-flex align-items-end">
+                <button class="btn btn-primary" type="submit">Add category</button></div>
+            </div>
+          </form>
+          <table class="table table-sm bg-body">
+            <thead><tr><th>Preview</th><th>Name</th><th>Slug</th><th>Scope</th><th></th></tr></thead>
+            <tbody id="cat-rows"><tr><td colspan="5" class="text-body-secondary">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="tab-pane fade" id="tab-contacts" role="tabpanel">
+          <div class="row">
+            <div class="col-md-3 mb-3">
+              <div class="d-flex align-items-center justify-content-between mb-2">
+                <h1 class="h5 mb-0">Address books</h1>
+                <button id="ab-new" class="btn btn-sm btn-outline-primary" type="button" title="New address book"><i class="bi bi-plus-lg"></i></button>
+              </div>
+              <div class="list-group" id="ab-list"><div class="list-group-item text-body-secondary">Loading…</div></div>
+              <p class="text-body-secondary small mt-2">Personal books sync via CardDAV at <code>/contacts/</code>. The directory book lists every user in your tenant and is read-only.</p>
+            </div>
+            <div class="col-md-9">
+              <div class="d-flex align-items-center gap-2 mb-2">
+                <h1 class="h5 mb-0" id="ab-current-name">Contacts</h1>
+                <input class="form-control form-control-sm w-auto ms-auto" id="ct-search" placeholder="Search">
+              </div>
+              <form id="ct-form" class="card p-3 mb-3">
+                <div class="row g-2 align-items-end">
+                  <div class="col"><label class="form-label" for="ct-name">Name</label>
+                    <input class="form-control" id="ct-name" required></div>
+                  <div class="col"><label class="form-label" for="ct-org">Organization</label>
+                    <input class="form-control" id="ct-org"></div>
+                  <div class="col"><label class="form-label" for="ct-email">Email</label>
+                    <input class="form-control" id="ct-email" type="email"></div>
+                  <div class="col"><label class="form-label" for="ct-tel">Phone</label>
+                    <input class="form-control" id="ct-tel" type="tel"></div>
+                  <div class="col-auto form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="ct-mobile" checked>
+                    <label class="form-check-label" for="ct-mobile">Mobile</label></div>
+                  <div class="col-auto d-flex align-items-end">
+                    <button class="btn btn-primary" type="submit">Add contact</button></div>
+                </div>
+              </form>
+              <table class="table table-sm bg-body">
+                <thead><tr><th>Name</th><th>Org</th><th>Email</th><th>Phone</th><th></th></tr></thead>
+                <tbody id="ct-rows"><tr><td colspan="5" class="text-body-secondary">Loading…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="tab-pane fade" id="tab-tasks" role="tabpanel">
+          <div class="row g-2 mb-3">
+            <div class="col-auto">
+              <select class="form-select form-select-sm" id="task-status-filter" aria-label="Filter by status">
+                <option value="">All</option>
+                <option value="open">Open</option>
+                <option value="done">Completed</option>
+              </select></div>
+            <div class="col-auto flex-grow-1">
+              <input class="form-control form-control-sm" id="task-search" placeholder="Search tasks" aria-label="Search tasks"></div>
+          </div>
+          <form id="task-quick-add" class="input-group input-group-sm mb-3">
+            <input class="form-control" id="task-quick-summary" placeholder="Quick add a task…" aria-label="New task summary">
+            <button class="btn btn-primary" type="submit">Add</button>
+          </form>
+          <p id="task-empty" class="text-body-secondary" hidden></p>
+          <ul id="task-list" class="list-group"><li class="list-group-item text-body-secondary">Loading…</li></ul>
+        </div>
+        <div class="tab-pane fade" id="tab-journals" role="tabpanel">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <input class="form-control form-control-sm w-auto" id="journal-search" placeholder="Search" aria-label="Search journals">
+            <button class="btn btn-primary btn-sm" type="button" id="journal-new-btn">New journal</button>
+          </div>
+          <p id="journal-empty" class="text-body-secondary" hidden></p>
+          <ul id="journal-list" class="list-group"><li class="list-group-item text-body-secondary">Loading…</li></ul>
+        </div>
+        <div class="tab-pane fade" id="tab-rules" role="tabpanel">
+          <p id="rules-scope-note" class="text-body-secondary small"></p>
+          <form id="rule-form" class="card p-3 mb-4">
+            <div class="row g-2 align-items-end">
+              <div class="col"><label class="form-label" for="rule-name">Name</label>
+                <input class="form-control" id="rule-name" required></div>
+              <div class="col-auto"><label class="form-label" for="rule-trigger">Trigger</label>
+                <select class="form-select" id="rule-trigger">
+                  <option value="event_created">Event created</option>
+                  <option value="event_updated">Event updated</option>
+                  <option value="event_deleted">Event deleted</option>
+                  <option value="task_created">Task created</option>
+                  <option value="task_updated">Task updated</option>
+                  <option value="task_deleted">Task deleted</option>
+                  <option value="task_completed">Task completed</option>
+                  <option value="task_due">Task due</option>
+                  <option value="journal_created">Journal created</option>
+                  <option value="journal_updated">Journal updated</option>
+                  <option value="journal_deleted">Journal deleted</option>
+                </select></div>
+              <div class="col-auto form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="rule-enabled" checked>
+                <label class="form-check-label" for="rule-enabled">Enabled</label></div>
+              <div class="col-auto form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="rule-global">
+                <label class="form-check-label" for="rule-global">Apply to all calendars</label></div>
+            </div>
+            <div class="row g-2 mt-1">
+              <div class="col-auto"><label class="form-label" for="rule-action-type">Action</label>
+                <select class="form-select" id="rule-action-type">
+                  <option value="create_notification">In-app notification</option>
+                  <option value="sms">SMS (requires a Twilio provider)</option>
+                  <option value="webhook">Webhook (delivers to the tenant's webhooks)</option>
+                </select></div>
+              <div id="rule-title-row" class="col"><label class="form-label" for="rule-title">Notification title</label>
+                <input class="form-control" id="rule-title" required></div>
+              <div id="rule-to-row" class="col" hidden><label class="form-label" for="rule-to">To (phone number)</label>
+                <input class="form-control" id="rule-to"></div>
+              <div class="col"><label class="form-label" for="rule-body">Message</label>
+                <input class="form-control" id="rule-body"></div>
+              <div class="col-auto d-flex align-items-end">
+                <button class="btn btn-primary" type="submit">Add rule</button></div>
+            </div>
+          </form>
+          <table class="table table-sm bg-body">
+            <thead><tr><th>Name</th><th>Trigger</th><th>Scope</th><th>Actions</th><th>Enabled</th><th></th></tr></thead>
+            <tbody id="rules-rows"><tr><td colspan="6" class="text-body-secondary">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </main>
   </div>
 </div>
-"#,
+"##,
     footer_html!(),
-    r#"<!-- event editor -->
+    r#"<!-- calendar create/edit -->
+<div class="modal fade" id="calendar-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog"><form id="calendar-form" class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5" id="calendar-modal-title">New calendar</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <div class="mb-3"><label class="form-label" for="cal-name">Name</label>
+        <input class="form-control" id="cal-name" required></div>
+      <div class="mb-3"><span class="form-label d-block">Content types</span>
+        <div class="form-check"><input class="form-check-input" type="checkbox" id="cal-comp-vevent" value="VEVENT" checked>
+          <label class="form-check-label" for="cal-comp-vevent">Events</label></div>
+        <div class="form-check"><input class="form-check-input" type="checkbox" id="cal-comp-vtodo" value="VTODO">
+          <label class="form-check-label" for="cal-comp-vtodo">Tasks</label></div>
+        <div class="form-check"><input class="form-check-input" type="checkbox" id="cal-comp-vjournal" value="VJOURNAL">
+          <label class="form-check-label" for="cal-comp-vjournal">Journals</label></div>
+        <p class="text-body-secondary small mb-0 mt-1">Removing a type that still has items is refused by the server.</p>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
+      <button class="btn btn-primary" type="submit" id="cal-save">Save</button>
+    </div>
+  </form></div>
+</div>
+<!-- task editor -->
+<div class="modal fade" id="task-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog"><form id="task-form" class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5" id="task-modal-title">Edit task</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <div class="mb-3"><label class="form-label" for="tk-summary">Summary</label>
+        <input class="form-control" id="tk-summary" required></div>
+      <div class="mb-3"><label class="form-label" for="tk-desc">Description</label>
+        <textarea class="form-control" id="tk-desc" rows="4"></textarea></div>
+      <div class="row mb-3">
+        <div class="col"><span class="form-label d-block">Due</span>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="tk-all-day">
+            <label class="form-check-label" for="tk-all-day">All day</label>
+          </div>
+          <input class="form-control" id="tk-due-date" type="date" hidden>
+          <input class="form-control" id="tk-due-at" type="datetime-local" hidden></div>
+        <div class="col"><label class="form-label" for="tk-priority">Priority (0–9)</label>
+          <input class="form-control" id="tk-priority" type="number" min="0" max="9"></div>
+      </div>
+      <div class="row mb-3">
+        <div class="col"><label class="form-label" for="tk-status">Status</label>
+          <select class="form-select" id="tk-status">
+            <option value="">(none)</option>
+            <option value="NEEDS-ACTION">Needs action</option>
+            <option value="IN-PROCESS">In process</option>
+            <option value="COMPLETED">Completed</option>
+            <option value="CANCELLED">Cancelled</option>
+          </select></div>
+        <div class="col"><label class="form-label" for="tk-percent">Percent complete</label>
+          <input class="form-control" id="tk-percent" type="number" min="0" max="100"></div>
+      </div>
+      <div class="mb-3"><label class="form-label" for="tk-categories">Categories (comma-separated)</label>
+        <input class="form-control" id="tk-categories"></div>
+      <div class="mb-3"><label class="form-label" for="tk-parent-uid">Parent task</label>
+        <select class="form-select" id="tk-parent-uid"><option value="">(no parent)</option></select></div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-danger me-auto" id="tk-delete" hidden>Delete</button>
+      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
+      <button class="btn btn-primary" type="submit">Save</button>
+    </div>
+  </form></div>
+</div>
+<!-- journal editor -->
+<div class="modal fade" id="journal-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog"><form id="journal-form" class="modal-content">
+    <div class="modal-header"><h2 class="modal-title h5" id="journal-modal-title">Edit journal</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <div class="mb-3"><label class="form-label" for="jv-summary">Summary</label>
+        <input class="form-control" id="jv-summary" required></div>
+      <div class="mb-3"><label class="form-label" for="jv-desc">Notes</label>
+        <textarea class="form-control" id="jv-desc" rows="8"></textarea></div>
+      <div class="row mb-3">
+        <div class="col"><label class="form-label" for="jv-date">Date (optional)</label>
+          <input class="form-control" id="jv-date" type="date"></div>
+        <div class="col"><label class="form-label" for="jv-status">Status</label>
+          <select class="form-select" id="jv-status">
+            <option value="">(none)</option>
+            <option value="DRAFT">Draft</option>
+            <option value="FINAL">Final</option>
+            <option value="CANCELLED">Cancelled</option>
+          </select></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-danger me-auto" id="jv-delete" hidden>Delete</button>
+      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
+      <button class="btn btn-primary" type="submit">Save</button>
+    </div>
+  </form></div>
+</div>
+<!-- event editor -->
 <div class="modal fade" id="event-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
   <div class="modal-dialog"><form id="event-form" class="modal-content">
     <div class="modal-header"><h2 class="modal-title h5">Event</h2>
@@ -578,9 +794,10 @@ const APP_PAGE_HEAD: &str = concat!(
       <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
     <div class="modal-body">
       <div class="row g-2 mb-3">
-        <div class="col"><input id="acl-user" class="form-control" placeholder="User UUID"></div>
+        <div class="col position-relative"><input id="acl-user" class="form-control" placeholder="Search directory users…" autocomplete="off">
+          <div id="acl-user-results" class="list-group position-absolute w-100 shadow-sm" style="top:100%;left:0;right:0;z-index:1060" hidden></div></div>
         <div class="col-auto"><select id="acl-cap" class="form-select">
-          <option>read_only</option><option>read_write</option><option>owner</option><option>free_busy</option>
+          <option value="read_only">Read only</option><option value="read_write">Read / write</option><option value="owner">Owner</option><option value="free_busy">See free/busy only</option>
         </select></div>
         <div class="col-auto"><button id="acl-add" class="btn btn-primary" type="button">Add</button></div>
       </div>
@@ -674,217 +891,16 @@ const APP_PAGE_HEAD: &str = concat!(
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/bs-calendar.min.js"></script>
 <script src="/assets/js/summernote-bs5.min.js"></script>
-<script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/app.js?v=16"></script>
+<script src="/assets/js/sweetalert2.min.js"></script>
+<script src="/assets/js/dialogs.js?v=17"></script>
+<script src="/assets/js/api.js?v=17"></script>
+<script src="/assets/js/tasks.js?v=17"></script>
+<script src="/assets/js/journals.js?v=17"></script>
+<script src="/assets/js/rules.js?v=17"></script>
+<script src="/assets/js/categories.js?v=17"></script>
+<script src="/assets/js/contacts.js?v=17"></script>
+<script src="/assets/js/app.js?v=17"></script>
 </body></html>"#
-);
-
-const RULES_PAGE: &str = concat!(
-    r#"<!doctype html>
-<html lang="en" data-bs-theme="light">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Rules</title>
-<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
-<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
-<link rel="stylesheet" href="/assets/css/app.css">
-<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
-<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
-<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
-<script src="/assets/js/theme.js"></script>
-</head>
-<body class="bg-body-tertiary">
-"#,
-    subpage_header!(),
-    nav_menu_open!(),
-    r#"<div class="container p-3">
-  <div class="d-flex align-items-center gap-2 mb-1">
-    <h1 class="h4 mb-0">Rules</h1>
-    <select class="form-select form-select-sm w-auto" id="rule-calendar-select">
-      <option value="">All calendars</option>
-    </select>
-  </div>
-  <p id="rules-scope-note" class="text-body-secondary small"></p>
-  <form id="rule-form" class="card p-3 mb-4">
-    <div class="row g-2 align-items-end">
-      <div class="col"><label class="form-label" for="rule-name">Name</label>
-        <input class="form-control" id="rule-name" required></div>
-      <div class="col-auto"><label class="form-label" for="rule-trigger">Trigger</label>
-        <select class="form-select" id="rule-trigger">
-          <option value="event_created">event_created</option>
-          <option value="event_updated">event_updated</option>
-          <option value="event_deleted">event_deleted</option>
-          <option value="task_created">task_created</option>
-          <option value="task_updated">task_updated</option>
-          <option value="task_deleted">task_deleted</option>
-          <option value="task_completed">task_completed</option>
-          <option value="task_due">task_due</option>
-          <option value="journal_created">journal_created</option>
-          <option value="journal_updated">journal_updated</option>
-          <option value="journal_deleted">journal_deleted</option>
-        </select></div>
-      <div class="col-auto form-check mb-2">
-        <input class="form-check-input" type="checkbox" id="rule-enabled" checked>
-        <label class="form-check-label" for="rule-enabled">Enabled</label></div>
-      <div id="rule-global-row" class="col-auto form-check mb-2">
-        <input class="form-check-input" type="checkbox" id="rule-global">
-        <label class="form-check-label" for="rule-global">Apply to all calendars</label></div>
-    </div>
-    <div class="row g-2 mt-1">
-      <div class="col-auto"><label class="form-label" for="rule-action-type">Action</label>
-        <select class="form-select" id="rule-action-type">
-          <option value="create_notification">In-app notification</option>
-          <option value="sms">SMS (requires a Twilio provider)</option>
-          <option value="webhook">Webhook (delivers to the tenant's webhooks)</option>
-        </select></div>
-      <div id="rule-title-row" class="col"><label class="form-label" for="rule-title">Notification title</label>
-        <input class="form-control" id="rule-title" required></div>
-      <div id="rule-to-row" class="col" hidden><label class="form-label" for="rule-to">To (phone number)</label>
-        <input class="form-control" id="rule-to"></div>
-      <div class="col"><label class="form-label" for="rule-body">Message</label>
-        <input class="form-control" id="rule-body"></div>
-      <div class="col-auto d-flex align-items-end">
-        <button class="btn btn-primary" type="submit">Add rule</button></div>
-    </div>
-  </form>
-  <table class="table table-sm bg-body">
-    <thead><tr><th>Name</th><th>Trigger</th><th>Scope</th><th>Actions</th><th>Enabled</th><th></th></tr></thead>
-    <tbody id="rules-rows"></tbody>
-  </table>
-</div>
-<script src="/assets/js/jquery.min.js"></script>
-<script src="/assets/js/jquery-migrate.min.js"></script>
-<script src="/assets/js/api.js"></script>
-<script src="/assets/js/bootstrap.bundle.min.js"></script>
-<script src="/assets/js/rules.js"></script>
-"#,
-    footer_html!(),
-    r#"</body></html>"#
-);
-
-const CATEGORIES_PAGE: &str = concat!(
-    r#"<!doctype html>
-<html lang="en" data-bs-theme="light">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Categories</title>
-<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
-<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
-<link rel="stylesheet" href="/assets/css/app.css">
-<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
-<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
-<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
-<script src="/assets/js/theme.js"></script>
-</head>
-<body class="bg-body-tertiary">
-"#,
-    subpage_header!(),
-    nav_menu_gated!(),
-    r#"<div class="container p-3">
-  <div class="d-flex align-items-center gap-2 mb-1">
-    <h1 class="h4 mb-0">Categories</h1>
-    <select class="form-select form-select-sm w-auto" id="cat-calendar-select">
-      <option value="">All calendars</option>
-    </select>
-  </div>
-  <p id="cat-scope-note" class="text-body-secondary small"></p>
-  <form id="cat-form" class="card p-3 mb-4">
-    <div class="row g-2 align-items-end">
-      <div class="col"><label class="form-label" for="cat-name">Name</label>
-        <input class="form-control" id="cat-name" required></div>
-      <div class="col"><label class="form-label" for="cat-slug">Slug</label>
-        <input class="form-control" id="cat-slug" pattern="[a-z0-9][a-z0-9-]*" required></div>
-      <div class="col-auto"><label class="form-label" for="cat-color">Color</label>
-        <select class="form-select" id="cat-color"></select></div>
-      <div class="col-auto form-check mb-2">
-        <input class="form-check-input" type="checkbox" id="cat-global">
-        <label class="form-check-label" for="cat-global">Apply to all calendars</label></div>
-      <div class="col-auto d-flex align-items-end">
-        <button class="btn btn-primary" type="submit">Add category</button></div>
-    </div>
-  </form>
-  <table class="table table-sm bg-body">
-    <thead><tr><th>Preview</th><th>Name</th><th>Slug</th><th>Scope</th><th></th></tr></thead>
-    <tbody id="cat-rows"></tbody>
-  </table>
-</div>
-<script src="/assets/js/jquery.min.js"></script>
-<script src="/assets/js/jquery-migrate.min.js"></script>
-<script src="/assets/js/api.js"></script>
-<script src="/assets/js/bootstrap.bundle.min.js"></script>
-<script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/categories.js"></script>
-"#,
-    footer_html!(),
-    r#"</body></html>"#
-);
-
-const CONTACTS_PAGE: &str = concat!(
-    r#"<!doctype html>
-<html lang="en" data-bs-theme="light">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Contacts</title>
-<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
-<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
-<link rel="stylesheet" href="/assets/css/app.css">
-<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
-<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
-<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
-<script src="/assets/js/theme.js"></script>
-</head>
-<body class="bg-body-tertiary">
-"#,
-    subpage_header!(),
-    nav_menu_gated!(),
-    r#"<div class="container-fluid p-3">
-  <div class="row">
-    <div class="col-md-3 mb-3">
-      <div class="d-flex align-items-center justify-content-between mb-2">
-        <h1 class="h5 mb-0">Address books</h1>
-        <button id="ab-new" class="btn btn-sm btn-outline-primary" type="button" title="New address book"><i class="bi bi-plus-lg"></i></button>
-      </div>
-      <div class="list-group" id="ab-list"></div>
-      <p class="text-body-secondary small mt-2">Personal books sync via CardDAV at <code>/contacts/</code>. The directory book lists every user in your tenant and is read-only.</p>
-    </div>
-    <div class="col-md-9">
-      <div class="d-flex align-items-center gap-2 mb-2">
-        <h1 class="h5 mb-0" id="ab-current-name">Contacts</h1>
-        <input class="form-control form-control-sm w-auto ms-auto" id="ct-search" placeholder="Search">
-      </div>
-      <form id="ct-form" class="card p-3 mb-3">
-        <div class="row g-2 align-items-end">
-          <div class="col"><label class="form-label" for="ct-name">Name</label>
-            <input class="form-control" id="ct-name" required></div>
-          <div class="col"><label class="form-label" for="ct-org">Organization</label>
-            <input class="form-control" id="ct-org"></div>
-          <div class="col"><label class="form-label" for="ct-email">Email</label>
-            <input class="form-control" id="ct-email" type="email"></div>
-          <div class="col"><label class="form-label" for="ct-tel">Phone</label>
-            <input class="form-control" id="ct-tel" type="tel"></div>
-          <div class="col-auto form-check mb-2">
-            <input class="form-check-input" type="checkbox" id="ct-mobile" checked>
-            <label class="form-check-label" for="ct-mobile">Mobile</label></div>
-          <div class="col-auto d-flex align-items-end">
-            <button class="btn btn-primary" type="submit">Add contact</button></div>
-        </div>
-      </form>
-      <table class="table table-sm bg-body">
-        <thead><tr><th>Name</th><th>Org</th><th>Email</th><th>Phone</th><th></th></tr></thead>
-        <tbody id="ct-rows"></tbody>
-      </table>
-    </div>
-  </div>
-</div>
-<script src="/assets/js/jquery.min.js"></script>
-<script src="/assets/js/jquery-migrate.min.js"></script>
-<script src="/assets/js/api.js"></script>
-<script src="/assets/js/bootstrap.bundle.min.js"></script>
-<script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/contacts.js"></script>
-"#,
-    footer_html!(),
-    r#"</body></html>"#
 );
 
 const ADMIN_PAGE: &str = concat!(
@@ -904,7 +920,6 @@ const ADMIN_PAGE: &str = concat!(
 <body class="bg-body-tertiary">
 "#,
     subpage_header!(),
-    nav_menu_open!(),
     r#"<div class="container p-3">
   <h1 class="h4 mb-3">Users</h1>
   <form id="user-form" class="card p-3 mb-4">
@@ -923,18 +938,20 @@ const ADMIN_PAGE: &str = concat!(
   </form>
   <table class="table table-sm bg-body">
     <thead><tr><th>Username</th><th>Email</th><th>Admin</th><th>Disabled</th></tr></thead>
-    <tbody id="user-rows"></tbody>
+    <tbody id="user-rows"><tr><td colspan="4" class="text-body-secondary">Loading…</td></tr></tbody>
   </table>
   <h1 class="h4 mb-3 mt-4">Audit log</h1>
   <table class="table table-sm bg-body">
     <thead><tr><th>When</th><th>Action</th><th>Object</th><th>Summary</th></tr></thead>
-    <tbody id="audit-rows"></tbody>
+    <tbody id="audit-rows"><tr><td colspan="4" class="text-body-secondary">Loading…</td></tr></tbody>
   </table>
 </div>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/sweetalert2.min.js"></script>
+<script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/admin.js"></script>
 "#,
     footer_html!(),
@@ -958,7 +975,6 @@ const PROVIDERS_PAGE: &str = concat!(
 <body class="bg-body-tertiary">
 "#,
     subpage_header!(),
-    nav_menu_open!(),
     r#"<div class="container p-3">
   <h1 class="h4 mb-3">Notification providers</h1>
   <form id="provider-form" class="card p-3 mb-4">
@@ -978,7 +994,7 @@ const PROVIDERS_PAGE: &str = concat!(
   </form>
   <table class="table table-sm bg-body">
     <thead><tr><th>Kind</th><th>Name</th><th>Enabled</th><th></th></tr></thead>
-    <tbody id="provider-rows"></tbody>
+    <tbody id="provider-rows"><tr><td colspan="4" class="text-body-secondary">Loading…</td></tr></tbody>
   </table>
 </div>
 <div class="modal fade" id="provider-edit-modal" aria-hidden="true">
@@ -1029,11 +1045,31 @@ const PROVIDERS_PAGE: &str = concat!(
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/sweetalert2.min.js"></script>
+<script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/providers.js"></script>
 "#,
     footer_html!(),
     r#"</body></html>"#
 );
+
+// Legacy per-view pages now live as tabs on the index page; keep the routes
+// alive as redirects (preserving a legacy calendar_id parameter).
+async fn redirect_to_tab(
+    tab: &'static str,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> impl IntoResponse {
+    let mut target = format!("/?tab={tab}");
+    if let Some(q) = query {
+        for pair in q.split('&') {
+            if let Some(rest) = pair.strip_prefix("calendar_id=") {
+                target.push_str("&calendar=");
+                target.push_str(rest);
+            }
+        }
+    }
+    (StatusCode::SEE_OTHER, [(header::LOCATION, target)]).into_response()
+}
 
 async fn providers_page() -> impl IntoResponse {
     (
@@ -1046,37 +1082,16 @@ async fn providers_page() -> impl IntoResponse {
     )
 }
 
-async fn rules_page() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/html; charset=utf-8"),
-        )],
-        RULES_PAGE,
-    )
+async fn rules_page(query: axum::extract::RawQuery) -> impl IntoResponse {
+    redirect_to_tab("rules", query).await
 }
 
-async fn categories_page() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/html; charset=utf-8"),
-        )],
-        CATEGORIES_PAGE,
-    )
+async fn categories_page(query: axum::extract::RawQuery) -> impl IntoResponse {
+    redirect_to_tab("categories", query).await
 }
 
 async fn contacts_page() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/html; charset=utf-8"),
-        )],
-        CONTACTS_PAGE,
-    )
+    redirect_to_tab("contacts", axum::extract::RawQuery(None)).await
 }
 
 async fn admin_page() -> impl IntoResponse {
@@ -1107,7 +1122,6 @@ const CREDENTIALS_PAGE: &str = concat!(
 <body class="bg-body-tertiary">
 "#,
     subpage_header!(),
-    nav_menu_open!(),
     r#"<div class="container p-3">
   <div id="secret-banner" class="alert alert-warning d-none" role="alert">
     <div class="fw-bold mb-1">Copy it now — it will not be shown again.</div>
@@ -1134,7 +1148,7 @@ const CREDENTIALS_PAGE: &str = concat!(
   </form>
   <table class="table table-sm bg-body">
     <thead><tr><th>Name</th><th>Scopes</th><th>Created</th><th>Expires</th><th></th></tr></thead>
-    <tbody id="token-rows"></tbody>
+    <tbody id="token-rows"><tr><td colspan="5" class="text-body-secondary">Loading…</td></tr></tbody>
   </table>
 
   <h1 class="h4 mb-3 mt-4">App passwords</h1>
@@ -1151,7 +1165,7 @@ const CREDENTIALS_PAGE: &str = concat!(
   </form>
   <table class="table table-sm bg-body">
     <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>
-    <tbody id="ap-rows"></tbody>
+    <tbody id="ap-rows"><tr><td colspan="5" class="text-body-secondary">Loading…</td></tr></tbody>
   </table>
 
   <h1 class="h4 mb-3 mt-4">Two-factor authentication</h1>
@@ -1187,177 +1201,16 @@ const CREDENTIALS_PAGE: &str = concat!(
   </form>
   <table class="table table-sm bg-body">
     <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
-    <tbody id="pk-rows"></tbody>
+    <tbody id="pk-rows"><tr><td colspan="4" class="text-body-secondary">Loading…</td></tr></tbody>
   </table>
 </div>
 <script src="/assets/js/jquery.min.js"></script>
 <script src="/assets/js/jquery-migrate.min.js"></script>
 <script src="/assets/js/api.js"></script>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/sweetalert2.min.js"></script>
 <script src="/assets/js/dialogs.js"></script>
 <script src="/assets/js/credentials.js"></script>
-"#,
-    footer_html!(),
-    r#"</body></html>"#
-);
-
-const TASKS_PAGE: &str = concat!(
-    r#"<!doctype html>
-<html lang="en" data-bs-theme="light">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Tasks</title>
-<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
-<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
-<link rel="stylesheet" href="/assets/css/app.css">
-<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
-<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
-<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
-<script src="/assets/js/theme.js"></script>
-</head>
-<body class="bg-body-tertiary">
-"#,
-    subpage_header!(),
-    nav_menu_open!(),
-    r#"<div class="container p-3">
-  <div class="d-flex align-items-center gap-2 mb-2">
-    <h1 class="h4 mb-0">Tasks</h1>
-    <select class="form-select form-select-sm w-auto" id="task-calendar-select"></select>
-  </div>
-  <div class="row g-2 mb-3">
-    <div class="col-auto">
-      <select class="form-select form-select-sm" id="task-status-filter" aria-label="Filter by status">
-        <option value="">All</option>
-        <option value="open">Open</option>
-        <option value="done">Completed</option>
-      </select></div>
-    <div class="col-auto flex-grow-1">
-      <input class="form-control form-control-sm" id="task-search" placeholder="Search tasks" aria-label="Search tasks"></div>
-  </div>
-  <form id="task-quick-add" class="input-group input-group-sm mb-3">
-    <input class="form-control" id="task-quick-summary" placeholder="Quick add a task…" aria-label="New task summary">
-    <button class="btn btn-primary" type="submit">Add</button>
-  </form>
-  <p id="task-empty" class="text-body-secondary" hidden></p>
-  <ul id="task-list" class="list-group"></ul>
-</div>
-<div class="modal fade" id="task-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
-  <div class="modal-dialog"><form id="task-form" class="modal-content">
-    <div class="modal-header"><h2 class="modal-title h5" id="task-modal-title">Edit task</h2>
-      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
-    <div class="modal-body">
-      <div class="mb-3"><label class="form-label" for="tk-summary">Summary</label>
-        <input class="form-control" id="tk-summary" required></div>
-      <div class="mb-3"><label class="form-label" for="tk-desc">Description</label>
-        <textarea class="form-control" id="tk-desc" rows="4"></textarea></div>
-      <div class="row mb-3">
-        <div class="col"><span class="form-label d-block">Due</span>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="tk-all-day">
-            <label class="form-check-label" for="tk-all-day">All day</label>
-          </div>
-          <input class="form-control" id="tk-due-date" type="date" hidden>
-          <input class="form-control" id="tk-due-at" type="datetime-local" hidden></div>
-        <div class="col"><label class="form-label" for="tk-priority">Priority (0–9)</label>
-          <input class="form-control" id="tk-priority" type="number" min="0" max="9"></div>
-      </div>
-      <div class="row mb-3">
-        <div class="col"><label class="form-label" for="tk-status">Status</label>
-          <select class="form-select" id="tk-status">
-            <option value="">(none)</option>
-            <option value="NEEDS-ACTION">Needs action</option>
-            <option value="IN-PROCESS">In process</option>
-            <option value="COMPLETED">Completed</option>
-            <option value="CANCELLED">Cancelled</option>
-          </select></div>
-        <div class="col"><label class="form-label" for="tk-percent">Percent complete</label>
-          <input class="form-control" id="tk-percent" type="number" min="0" max="100"></div>
-      </div>
-      <div class="mb-3"><label class="form-label" for="tk-categories">Categories (comma-separated)</label>
-        <input class="form-control" id="tk-categories"></div>
-      <div class="mb-3"><label class="form-label" for="tk-parent-uid">Parent UID (subtask of)</label>
-        <input class="form-control" id="tk-parent-uid" placeholder="UID of the parent task"></div>
-    </div>
-    <div class="modal-footer">
-      <button type="button" class="btn btn-outline-danger me-auto" id="tk-delete" hidden>Delete</button>
-      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
-      <button class="btn btn-primary" type="submit">Save</button>
-    </div>
-  </form></div>
-</div>
-<script src="/assets/js/jquery.min.js"></script>
-<script src="/assets/js/jquery-migrate.min.js"></script>
-<script src="/assets/js/api.js"></script>
-<script src="/assets/js/bootstrap.bundle.min.js"></script>
-<script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/tasks.js"></script>
-"#,
-    footer_html!(),
-    r#"</body></html>"#
-);
-
-const JOURNALS_PAGE: &str = concat!(
-    r#"<!doctype html>
-<html lang="en" data-bs-theme="light">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Journals</title>
-<link rel="stylesheet" href="/assets/css/bootstrap.min.css">
-<link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
-<link rel="stylesheet" href="/assets/css/app.css">
-<link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
-<link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
-<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
-<script src="/assets/js/theme.js"></script>
-</head>
-<body class="bg-body-tertiary">
-"#,
-    subpage_header!(),
-    nav_menu_open!(),
-    r#"<div class="container p-3">
-  <div class="d-flex align-items-center gap-2 mb-2">
-    <h1 class="h4 mb-0">Journals</h1>
-    <select class="form-select form-select-sm w-auto" id="journal-calendar-select"></select>
-    <input class="form-control form-control-sm w-auto ms-auto" id="journal-search" placeholder="Search" aria-label="Search journals">
-    <button class="btn btn-primary btn-sm" type="button" id="journal-new-btn">New journal</button>
-  </div>
-  <p id="journal-empty" class="text-body-secondary" hidden></p>
-  <ul id="journal-list" class="list-group"></ul>
-</div>
-<div class="modal fade" id="journal-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
-  <div class="modal-dialog"><form id="journal-form" class="modal-content">
-    <div class="modal-header"><h2 class="modal-title h5" id="journal-modal-title">Edit journal</h2>
-      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
-    <div class="modal-body">
-      <div class="mb-3"><label class="form-label" for="jv-summary">Summary</label>
-        <input class="form-control" id="jv-summary" required></div>
-      <div class="mb-3"><label class="form-label" for="jv-desc">Notes</label>
-        <textarea class="form-control" id="jv-desc" rows="8"></textarea></div>
-      <div class="row mb-3">
-        <div class="col"><label class="form-label" for="jv-date">Date (optional)</label>
-          <input class="form-control" id="jv-date" type="date"></div>
-        <div class="col"><label class="form-label" for="jv-status">Status</label>
-          <select class="form-select" id="jv-status">
-            <option value="">(none)</option>
-            <option value="DRAFT">Draft</option>
-            <option value="FINAL">Final</option>
-            <option value="CANCELLED">Cancelled</option>
-          </select></div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button type="button" class="btn btn-outline-danger me-auto" id="jv-delete" hidden>Delete</button>
-      <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
-      <button class="btn btn-primary" type="submit">Save</button>
-    </div>
-  </form></div>
-</div>
-<script src="/assets/js/jquery.min.js"></script>
-<script src="/assets/js/jquery-migrate.min.js"></script>
-<script src="/assets/js/api.js"></script>
-<script src="/assets/js/bootstrap.bundle.min.js"></script>
-<script src="/assets/js/dialogs.js"></script>
-<script src="/assets/js/journals.js"></script>
 "#,
     footer_html!(),
     r#"</body></html>"#
@@ -1408,25 +1261,11 @@ async fn credentials_page() -> impl IntoResponse {
 }
 
 async fn tasks_page() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/html; charset=utf-8"),
-        )],
-        TASKS_PAGE,
-    )
+    redirect_to_tab("tasks", axum::extract::RawQuery(None)).await
 }
 
 async fn journals_page() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/html; charset=utf-8"),
-        )],
-        JOURNALS_PAGE,
-    )
+    redirect_to_tab("journals", axum::extract::RawQuery(None)).await
 }
 
 async fn index() -> impl IntoResponse {
