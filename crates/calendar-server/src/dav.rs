@@ -63,25 +63,15 @@ pub(crate) async fn entry(
     };
 
     // A PUT may only carry components its collection allows (RFC 4791
-    // supported-calendar-component precondition).
+    // supported-calendar-component precondition). The kinds are the wire
+    // component names, checked against the calendar's stored set; a VTODO
+    // into a VEVENT-only collection is rejected here, and anything within
+    // the set goes through to the adapter, which parses and stores it
+    // (ADR-015 supersedes ADR-011's blanket VTODO rejection).
     if method == axum::http::Method::PUT
         && let Some((calendar, _)) = calendar_at(&pool, &creds, collection_of(&path)).await
         && body_components(&String::from_utf8_lossy(&bytes))
             .any(|kind| !calendar.components.iter().any(|c| c == kind))
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
-            COMPONENT_ERROR_BODY,
-        )
-            .into_response();
-    }
-
-    // ADR-011: PUT of a VTODO is rejected with a CalDAV error body.
-    if method == axum::http::Method::PUT
-        && !bytes.is_empty()
-        && let Err(calendar_caldav::IcsError::TodoUnsupported) =
-            calendar_caldav::parse_ics(String::from_utf8_lossy(&bytes).as_ref())
     {
         return (
             StatusCode::FORBIDDEN,
@@ -593,12 +583,20 @@ async fn sync_collection(
         .bind(&calendar_ids)
         .fetch_one(&mut *tx)
         .await?;
+        // calendar_objects resolves kind and href for all three component
+        // kinds (ADR-015 D5); class comes from the owning table so share
+        // principals keep their PUBLIC-only filter across kinds.
         let rows = sqlx::query_as::<_, ChangeRow>(
-            "SELECT cl.seq, cl.resource_id, cl.operation, e.etag, e.deleted_at, e.class,
-                    COALESCE(e.href, cl.resource_id::text || '.ics') AS href, c.slug AS slug
+            "SELECT cl.seq, cl.resource_id, cl.operation, o.etag, o.deleted_at,
+                    COALESCE(e.class, t.class, j.class) AS class,
+                    COALESCE(o.kind, '') AS kind,
+                    COALESCE(o.href, cl.resource_id::text || '.ics') AS href, c.slug AS slug
              FROM change_log cl
              JOIN calendars c ON c.id = cl.calendar_id
+             LEFT JOIN calendar_objects o ON o.id = cl.resource_id
              LEFT JOIN events e ON e.id = cl.resource_id
+             LEFT JOIN tasks t ON t.id = cl.resource_id
+             LEFT JOIN journals j ON j.id = cl.resource_id
              WHERE cl.calendar_id = ANY($1) AND cl.seq > $2
              ORDER BY cl.seq",
         )
@@ -636,10 +634,24 @@ async fn sync_collection(
             .filter(|r| !r.is_delete())
             .map(|r| r.resource_id)
             .collect();
+        let by_kind: std::collections::HashMap<Uuid, String> = changes
+            .iter()
+            .map(|r| (r.resource_id, r.kind.clone()))
+            .collect();
+        // Event masters render their series; tasks and journals render with
+        // the same renderers the GET path uses.
+        let event_ids: Vec<Uuid> = ids
+            .iter()
+            .filter(|id| {
+                by_kind.get(*id).map(String::as_str) != Some("VTODO")
+                    && by_kind.get(*id).map(String::as_str) != Some("VJOURNAL")
+            })
+            .copied()
+            .collect();
         let masters = sqlx::query_as::<_, db::EventRow>(
             "SELECT * FROM events WHERE id = ANY($1) AND deleted_at IS NULL",
         )
-        .bind(&ids)
+        .bind(&event_ids)
         .fetch_all(pool)
         .await
         .unwrap_or_default();
@@ -654,6 +666,29 @@ async fn sync_collection(
                 .unwrap_or_default();
             let ics = resource_ics(pool, &master, share, &vtimezones).await;
             data.insert(master.id, ics);
+        }
+        for id in ids
+            .iter()
+            .filter(|id| by_kind.get(*id).map(String::as_str) == Some("VTODO"))
+            .copied()
+        {
+            if let Ok((task, _)) = db::tasks::get_task(pool, id).await
+                && (!share || task.class.as_deref() == Some("PUBLIC"))
+            {
+                let ics = task_series_ics(pool, &task, share).await;
+                data.insert(id, ics);
+            }
+        }
+        for id in ids
+            .iter()
+            .filter(|id| by_kind.get(*id).map(String::as_str) == Some("VJOURNAL"))
+            .copied()
+        {
+            if let Ok((journal, _)) = db::journals::get_journal(pool, id).await
+                && (!share || journal.class.as_deref() == Some("PUBLIC"))
+            {
+                data.insert(id, calendar_caldav::journal_to_ics(&journal));
+            }
         }
     }
     let out: Vec<calendar_caldav::store::SyncChange> = changes
@@ -693,6 +728,9 @@ struct ChangeRow {
     etag: Option<String>,
     deleted_at: Option<chrono::DateTime<Utc>>,
     class: Option<String>,
+    /// VEVENT / VTODO / VJOURNAL from calendar_objects (empty when the row no
+    /// longer resolves — a purged or non-object resource).
+    kind: String,
     href: String,
     slug: String,
 }
@@ -785,7 +823,41 @@ async fn resource_ics(
     calendar_caldav::events_to_ics(&rows)
 }
 
+/// One task series' VCALENDAR: the master plus its RECURRENCE-ID overrides,
+/// with attendees and alarms — the adapter's task_ics, as inline queries.
+/// A share principal gets no alarm data.
+async fn task_series_ics(pool: &sqlx::PgPool, master: &db::tasks::TaskRow, share: bool) -> String {
+    let mut tasks = vec![master.clone()];
+    tasks.extend(
+        db::tasks::list_overrides(pool, master.id)
+            .await
+            .unwrap_or_default(),
+    );
+    let mut rows = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        rows.push(calendar_caldav::TaskExportRow {
+            attendees: db::tasks::list_task_attendees(pool, task.id)
+                .await
+                .unwrap_or_default(),
+            alarms: if share {
+                Vec::new()
+            } else {
+                db::tasks::list_task_alarms(pool, task.id)
+                    .await
+                    .unwrap_or_default()
+            },
+            vtimezones: Vec::new(),
+            task,
+        });
+    }
+    calendar_caldav::todos_to_ics(&rows)
+}
+
 // ============ free-busy-query REPORT (RFC 4791 section 9.3) ============
+//
+// Free-busy stays events-only (ADR-015 section 6): it reads `events` only,
+// so tasks and journals can never contribute busy time. A task's busy span
+// is not even well-defined (a due date is not an occupancy).
 
 fn parse_ics_time(value: &str) -> Option<DateTime<Utc>> {
     let value = value.trim();
@@ -1025,6 +1097,10 @@ fn json_to_points(value: &serde_json::Value) -> Vec<calendar_core::DateOrDateTim
 }
 
 // ============ calendar-query REPORT (RFC 4791 section 9.5) ============
+//
+// VEVENT-shaped only (ADR-015 section 5): a comp-filter for VTODO/VJOURNAL
+// matches nothing here. Extending the filter to tasks and journals arrives
+// with the per-kind query push-down.
 
 #[derive(Debug, Clone, Default)]
 struct TextMatch {
@@ -1952,6 +2028,7 @@ mod tests {
             etag: Some(format!("\"{seq}\"")),
             deleted_at: None,
             class: Some("PUBLIC".into()),
+            kind: "VEVENT".into(),
             href: format!("{seq}.ics"),
             slug: "work".into(),
         }

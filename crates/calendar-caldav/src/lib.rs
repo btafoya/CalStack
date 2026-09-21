@@ -3,10 +3,14 @@
 //! filesystem adapter, and CalDAV REPORT helpers dav-server lacks.
 
 pub mod adapter;
+pub mod journal;
 pub mod store;
+pub mod todo;
 
 pub use adapter::{DavAuth, PgDavFs};
+pub use journal::{ParsedJournal, journal_to_ics};
 pub(crate) use store::upsert_data;
+pub use todo::{ParsedTodo, ParsedTodoSeries, TaskExportRow, todos_to_ics};
 
 use calendar_core::DateOrDateTime;
 use calendar_db::{AttendeeRow, EventRow};
@@ -16,8 +20,10 @@ use icalendar::{Calendar, Component, DatePerhapsTime, Event, EventLike};
 
 #[derive(Debug, thiserror::Error)]
 pub enum IcsError {
-    #[error("VTODO is not supported (ADR-011)")]
-    TodoUnsupported,
+    #[error("a resource must hold only one component kind (VEVENT/VTODO/VJOURNAL)")]
+    MixedComponents,
+    #[error("a resource must hold only one UID")]
+    UidMismatch,
     #[error("VTIMEZONE {0} is not compilable: {1}")]
     UnsupportedTimezone(String, String),
     #[error("parse error: {0}")]
@@ -28,11 +34,120 @@ pub enum IcsError {
     MissingDtstart,
 }
 
+/// Injection-safety cap on one row's `extra_props` (design section 4): the
+/// JSON encoding of every unmodelled property together must stay at or under
+/// the attachment cap. Constant because calendar-caldav sees no config; keep
+/// in sync with the server's ATTACHMENT_MAX_BYTES default (50 MiB).
+pub const EXTRA_PROPS_MAX_BYTES: usize = 50 * 1024 * 1024;
+
+/// One unmodelled property preserved verbatim (D2): X-*, ATTACH, GEO,
+/// COMMENT, RELATED-TO with a non-PARENT RELTYPE, ...
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtraProp {
+    pub name: String,
+    pub params: Vec<(String, String)>,
+    pub value: String,
+}
+
+/// Accepts an extra-props list only per the injection-safety rules: name is
+/// an ICS token (`^[A-Za-z0-9-]+$`), no CR/LF anywhere (the parser has
+/// already unfolded), and the row's total encoded size within
+/// [`EXTRA_PROPS_MAX_BYTES`] — the `max-resource-size` precondition.
+pub(crate) fn extra_props_json(props: &[ExtraProp]) -> Result<serde_json::Value, IcsError> {
+    let mut total = 0usize;
+    let entries: Vec<serde_json::Value> = props
+        .iter()
+        .map(|p| {
+            if p.name.is_empty()
+                || !p
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                return Err(IcsError::Parse(format!(
+                    "unmodelled property name {p:?} is not a valid ICS token"
+                )));
+            }
+            if p.value.contains(['\r', '\n'])
+                || p.params
+                    .iter()
+                    .any(|(k, v)| k.contains(['\r', '\n']) || v.contains(['\r', '\n']))
+            {
+                return Err(IcsError::Parse(format!(
+                    "property {p:?} carries a line break"
+                )));
+            }
+            total += p.name.len()
+                + p.value.len()
+                + p.params
+                    .iter()
+                    .map(|(k, v)| k.len() + v.len() + 8)
+                    .sum::<usize>();
+            Ok(serde_json::json!({
+                "name": p.name,
+                "params": p
+                    .params
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+                "value": p.value,
+            }))
+        })
+        .collect::<Result<_, _>>()?;
+    if total > EXTRA_PROPS_MAX_BYTES {
+        return Err(IcsError::Parse(
+            "unmodelled properties exceed max-resource-size".into(),
+        ));
+    }
+    Ok(serde_json::Value::Array(entries))
+}
+
+/// Reads stored `extra_props` back, dropping any entry that no longer
+/// satisfies the injection-safety rules (guards hand-written rows).
+pub(crate) fn extra_props_from_json(value: &serde_json::Value) -> Vec<ExtraProp> {
+    value
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|e| {
+                    let name = e.get("name")?.as_str()?.to_string();
+                    let value = e.get("value")?.as_str()?.to_string();
+                    let params = e
+                        .get("params")
+                        .and_then(|p| p.as_object())
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let prop = ExtraProp {
+                        name,
+                        params,
+                        value,
+                    };
+                    (prop
+                        .name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                        && !prop.value.contains(['\r', '\n'])
+                        && !prop
+                            .params
+                            .iter()
+                            .any(|(k, v)| k.contains(['\r', '\n']) || v.contains(['\r', '\n'])))
+                    .then_some(prop)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ============ serialization ============
 
 /// RFC 5545 unfolding: a line beginning with space or tab continues the
 /// previous line.
-fn unfold(text: &str) -> String {
+pub(crate) fn unfold(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
         if (line.starts_with(' ') || line.starts_with('\t')) && !out.is_empty() {
@@ -56,10 +171,10 @@ fn known_tz(tzid: Option<&str>) -> Option<Tz> {
     tzid.and_then(|tz| tz.parse::<Tz>().ok())
 }
 
-/// DTSTART/DTEND/RECURRENCE-ID property: `VALUE=DATE` for all-day, the bare
+/// DTSTART/DTEND/RECURRENCE-ID/DUE property: `VALUE=DATE` for all-day, the bare
 /// wall clock for floating, local wall-clock with TZID for known or
 /// custom-stored zones, UTC with `Z` otherwise.
-fn date_time_property(
+pub(crate) fn date_time_property(
     key: &str,
     tzid: Option<&str>,
     all_day: bool,
@@ -488,31 +603,35 @@ pub struct ParsedTimezone {
     pub rules: Vec<calendar_core::recurrence::ZoneRule>,
 }
 
-/// Parses one VCALENDAR into its VEVENTs and VTIMEZONEs. VTODO (or any
-/// unsupported component) is rejected per ADR-011; a non-tzdb VTIMEZONE that
-/// cannot be compiled is rejected with `UnsupportedTimezone` naming the tzid
-/// (ADR-012) — nothing that would later expand as UTC is ever stored.
+/// Parses one VCALENDAR into its VEVENTs and VTIMEZONEs. Non-VEVENT
+/// components are ignored (VTODO/VJOURNAL go through [`parse_resource`]); a
+/// non-tzdb VTIMEZONE that cannot be compiled is rejected with
+/// `UnsupportedTimezone` naming the tzid (ADR-012) — nothing that would
+/// later expand as UTC is ever stored.
 pub fn parse_calendar(text: &str) -> Result<ParsedCalendar, IcsError> {
     // The icalendar 0.17 parser rejects RFC 5545 line folding; unfold first.
     let unfolded = unfold(text);
     let calendar = icalendar::parser::read_calendar(&unfolded).map_err(IcsError::Parse)?;
+    parse_calendar_parts(&unfolded, &calendar)
+}
+
+fn parse_calendar_parts(
+    unfolded: &str,
+    calendar: &icalendar::parser::Calendar<'_>,
+) -> Result<ParsedCalendar, IcsError> {
     let method = calendar
         .properties
         .iter()
         .find(|prop| prop.name.as_ref() == "METHOD")
         .map(|prop| prop.val.as_str().trim().to_string())
         .filter(|m| !m.is_empty());
-    let timezones = parse_timezones(&unfolded, &calendar)?;
+    let timezones = parse_timezones(unfolded, calendar)?;
     // Custom zones compiled for event parsing: DTSTART with a custom TZID is
     // converted wall → instant via the zone the client supplied alongside it.
     let custom = compiled_zones(&timezones);
     let mut out = Vec::new();
-    for component in calendar.components {
-        let name = component.name.as_ref();
-        if name == "VTODO" {
-            return Err(IcsError::TodoUnsupported);
-        }
-        if name != "VEVENT" {
+    for component in &calendar.components {
+        if component.name.as_ref() != "VEVENT" {
             continue;
         }
         let alarms: Vec<ParsedAlarm> = component
@@ -521,7 +640,7 @@ pub fn parse_calendar(text: &str) -> Result<ParsedCalendar, IcsError> {
             .filter(|sub| sub.name.as_ref() == "VALARM")
             .map(|sub| parse_alarm(sub))
             .collect();
-        let event = to_owned_event(&component);
+        let event = to_owned_event(component);
         let mut parsed = parse_event(event, &custom)?;
         parsed.alarms = alarms;
         parsed.method = method.clone();
@@ -533,10 +652,101 @@ pub fn parse_calendar(text: &str) -> Result<ParsedCalendar, IcsError> {
     })
 }
 
+/// tzid → compiled zone, for custom (client-supplied VTIMEZONE) zones.
+pub(crate) type Zones = std::collections::HashMap<String, calendar_core::recurrence::Zone>;
+
+/// Parses one VCALENDAR into a PUT-ready resource: VEVENTs (a series), a
+/// VTODO series (master plus RECURRENCE-ID overrides, one UID), or a single
+/// VJOURNAL. Mixing component kinds is `MixedComponents`; VTODOs with more
+/// than one UID are `UidMismatch`. VTIMEZONEs are ignored for the event
+/// path's callers (`parse_ics`) but ride along on the task series for the
+/// calendar's stored-zone table (ADR-012).
+pub fn parse_resource(text: &str) -> Result<ParsedResource, IcsError> {
+    let unfolded = unfold(text);
+    let calendar = icalendar::parser::read_calendar(&unfolded).map_err(IcsError::Parse)?;
+    let mut events = 0usize;
+    let mut todos: Vec<&icalendar::parser::Component<'_>> = Vec::new();
+    let mut journals: Vec<&icalendar::parser::Component<'_>> = Vec::new();
+    for component in &calendar.components {
+        match component.name.as_ref() {
+            "VEVENT" => events += 1,
+            "VTODO" => todos.push(component),
+            "VJOURNAL" => journals.push(component),
+            _ => {}
+        }
+    }
+    if (events > 0 && (!todos.is_empty() || !journals.is_empty()))
+        || (!todos.is_empty() && !journals.is_empty())
+    {
+        return Err(IcsError::MixedComponents);
+    }
+    let parsed = parse_calendar_parts(&unfolded, &calendar)?;
+    if events > 0 || (todos.is_empty() && journals.is_empty()) {
+        return Ok(ParsedResource::Events(parsed));
+    }
+    if !todos.is_empty() {
+        let uid = todos[0]
+            .properties
+            .iter()
+            .find(|p| p.name.as_ref() == "UID")
+            .map(|p| p.val.as_str().trim().to_string());
+        for todo in &todos[1..] {
+            let other = todo
+                .properties
+                .iter()
+                .find(|p| p.name.as_ref() == "UID")
+                .map(|p| p.val.as_str().trim().to_string());
+            if other != uid {
+                return Err(IcsError::UidMismatch);
+            }
+        }
+        let custom = compiled_zones(&parsed.timezones);
+        let mut masters = Vec::new();
+        let mut overrides = Vec::new();
+        for component in todos {
+            let parsed = todo::parse_todo(component, &custom)?;
+            if parsed.recurrence_id.is_some() || parsed.recurrence_id_date.is_some() {
+                overrides.push(parsed);
+            } else {
+                masters.push(parsed);
+            }
+        }
+        if masters.len() != 1 {
+            return Err(IcsError::Parse(
+                "a VTODO resource needs exactly one master component".into(),
+            ));
+        }
+        let master = masters.swap_remove(0);
+        return Ok(ParsedResource::Todos(Box::new(ParsedTodoSeries {
+            master,
+            overrides,
+            timezones: parsed.timezones,
+        })));
+    }
+    let [journal] = journals.as_slice() else {
+        return Err(IcsError::Parse(
+            "a VJOURNAL resource holds exactly one component".into(),
+        ));
+    };
+    let custom = compiled_zones(&parsed.timezones);
+    Ok(ParsedResource::Journal(Box::new(journal::parse_journal(
+        journal, &custom,
+    )?)))
+}
+
+/// One PUT resource's parsed content.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // the boxed series already carries the big arm
+pub enum ParsedResource {
+    Events(ParsedCalendar),
+    Todos(Box<ParsedTodoSeries>),
+    Journal(Box<ParsedJournal>),
+}
+
 /// Compiles one VTIMEZONE's rules into a resolvable zone for wall-clock
 /// rendering. Failing zones are skipped — they were rejected at PUT, so this
 /// only guards against stale stored data.
-fn compiled_zone(
+pub(crate) fn compiled_zone(
     tzid: &str,
     rules: &[calendar_core::recurrence::ZoneRule],
 ) -> Option<calendar_core::recurrence::Zone> {
@@ -552,7 +762,7 @@ fn compiled_zone(
 }
 
 /// Compiles parsed VTIMEZONEs into tzid → zone lookups.
-fn compiled_zones(
+pub(crate) fn compiled_zones(
     timezones: &[ParsedTimezone],
 ) -> std::collections::HashMap<String, calendar_core::recurrence::Zone> {
     timezones
@@ -561,8 +771,9 @@ fn compiled_zones(
         .collect()
 }
 
-/// Parses one VCALENDAR into its VEVENTs. VTODO (or any unsupported
-/// component) is rejected per ADR-011. VTIMEZONEs are ignored here — callers
+/// Parses one VCALENDAR into its VEVENTs. Non-VEVENT components (VTODO,
+/// VJOURNAL) are ignored — those kinds go through [`parse_resource`].
+/// VTIMEZONEs are ignored here — callers
 /// that store them use [`parse_calendar`].
 pub fn parse_ics(text: &str) -> Result<Vec<ParsedEvent>, IcsError> {
     parse_calendar(text).map(|c| c.events)
@@ -813,72 +1024,14 @@ fn parse_event(
         if let Some(multi) = event.multi_properties().get(key) {
             props.extend(multi.iter().cloned());
         }
-        for prop in props {
-            for value in prop.value().split(',') {
-                if value.is_empty() {
-                    continue;
-                }
-                // TZID-qualified values are converted through the zone so the
-                // stored point is an absolute instant regardless of form.
-                // A custom tzid resolves through the calendar's VTIMEZONEs;
-                // an unresolvable tzid leaves the value as a UTC instant
-                // rather than guessing — put_series rejects the unknown tzid.
-                let tz_param = prop.params().get("TZID").map(|p| p.value().to_string());
-                let zone: Option<calendar_core::recurrence::Zone> =
-                    tz_param.as_deref().and_then(|t| match custom.get(t) {
-                        Some(zone) => Some(zone.clone()),
-                        None => t
-                            .parse::<Tz>()
-                            .ok()
-                            .map(calendar_core::recurrence::Zone::Tz),
-                    });
-                let point = if value.len() == 8 && value.chars().all(|c| c.is_ascii_digit()) {
-                    NaiveDate::parse_from_str(value, "%Y%m%d")
-                        .ok()
-                        .map(DateOrDateTime::AllDay)
-                } else if let Some(zone) = zone {
-                    NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
-                        .ok()
-                        .and_then(|naive| zone.from_local(naive))
-                        .map(DateOrDateTime::Timed)
-                } else {
-                    parse_ics_datetime(value).map(DateOrDateTime::Timed)
-                };
-                match point {
-                    Some(DateOrDateTime::Timed(at)) if key == "RDATE" => {
-                        parsed.rdate.push(DateOrDateTime::Timed(at))
-                    }
-                    Some(DateOrDateTime::AllDay(date)) if key == "RDATE" => {
-                        parsed.rdate.push(DateOrDateTime::AllDay(date))
-                    }
-                    Some(DateOrDateTime::Timed(at)) => {
-                        parsed.exdate.push(DateOrDateTime::Timed(at))
-                    }
-                    Some(DateOrDateTime::AllDay(date)) => {
-                        parsed.exdate.push(DateOrDateTime::AllDay(date))
-                    }
-                    None => {}
-                }
-            }
+        let points = parse_recurrence_points(props, custom);
+        if key == "RDATE" {
+            parsed.rdate = points;
+        } else {
+            parsed.exdate = points;
         }
     }
-    let mut categories: Vec<String> = Vec::new();
-    if let Some(value) = event.property_value("CATEGORIES") {
-        categories.push(value.to_string());
-    }
-    if let Some(props) = event.multi_properties().get("CATEGORIES") {
-        for prop in props {
-            categories.push(prop.value().to_string());
-        }
-    }
-    for joined in categories {
-        for category in joined.split(',') {
-            let category = category.trim();
-            if !category.is_empty() && !parsed.categories.iter().any(|c| c == category) {
-                parsed.categories.push(category.to_string());
-            }
-        }
-    }
+    parsed.categories = collect_categories(&event);
     if let Some(prop) = event.properties().get("ATTENDEE") {
         parsed.attendees.push(attendee_from_prop(prop));
     }
@@ -910,7 +1063,8 @@ fn parse_event(
 }
 
 /// VALARM subset: ACTION, TRIGGER, RELATED, DESCRIPTION, SUMMARY, ATTENDEE.
-fn parse_alarm(component: &icalendar::parser::Component<'_>) -> ParsedAlarm {
+/// Shared by the event and task parse paths.
+pub(crate) fn parse_alarm(component: &icalendar::parser::Component<'_>) -> ParsedAlarm {
     let mut parsed = ParsedAlarm::default();
     for prop in &component.properties {
         match prop.name.as_ref() {
@@ -951,7 +1105,7 @@ fn parse_alarm(component: &icalendar::parser::Component<'_>) -> ParsedAlarm {
 }
 
 /// ISO 8601 duration subset: [+-]P[nW][nD][T[nH][nM][nS]] → seconds.
-fn parse_ics_duration(value: &str) -> Option<i64> {
+pub(crate) fn parse_ics_duration(value: &str) -> Option<i64> {
     let (negative, value) = match value.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, value.trim_start_matches('+')),
@@ -1007,7 +1161,129 @@ fn parse_ics_datetime(value: &str) -> Option<DateTime<Utc>> {
         .map(|naive| Utc.from_utc_datetime(&naive))
 }
 
-fn attendee_from_prop(prop: &icalendar::Property) -> ParsedAttendee {
+/// RDATE/EXDATE values to points. TZID-qualified values are converted
+/// through the zone so the stored point is an absolute instant regardless of
+/// form. A custom tzid resolves through the calendar's VTIMEZONEs; an
+/// unresolvable tzid leaves the value as a UTC instant rather than guessing —
+/// put_series rejects the unknown tzid.
+pub(crate) fn parse_recurrence_points(
+    props: Vec<icalendar::Property>,
+    custom: &Zones,
+) -> Vec<DateOrDateTime> {
+    let mut out = Vec::new();
+    for prop in props {
+        for value in prop.value().split(',') {
+            if value.is_empty() {
+                continue;
+            }
+            let tz_param = prop.params().get("TZID").map(|p| p.value().to_string());
+            let zone: Option<calendar_core::recurrence::Zone> =
+                tz_param.as_deref().and_then(|t| match custom.get(t) {
+                    Some(zone) => Some(zone.clone()),
+                    None => t
+                        .parse::<Tz>()
+                        .ok()
+                        .map(calendar_core::recurrence::Zone::Tz),
+                });
+            let point = if value.len() == 8 && value.chars().all(|c| c.is_ascii_digit()) {
+                NaiveDate::parse_from_str(value, "%Y%m%d")
+                    .ok()
+                    .map(DateOrDateTime::AllDay)
+            } else if let Some(zone) = zone {
+                NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
+                    .ok()
+                    .and_then(|naive| zone.from_local(naive))
+                    .map(DateOrDateTime::Timed)
+            } else {
+                parse_ics_datetime(value).map(DateOrDateTime::Timed)
+            };
+            out.extend(point);
+        }
+    }
+    out
+}
+
+/// One date-or-date-time property (DTSTART/DUE) as it sat on the wire,
+/// resolved to the storage shapes shared by tasks and journals: `date` for
+/// VALUE=DATE, `at` otherwise, with `floating` marking a bare wall clock
+/// (stored as if UTC) and `tzid` keeping the client's zone identity.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct WirePoint {
+    pub date: Option<NaiveDate>,
+    pub at: Option<DateTime<Utc>>,
+    pub tzid: Option<String>,
+    pub floating: bool,
+}
+
+/// Parses DTSTART/DUE/COMPLETED-style values: VALUE=DATE (or 8 digits),
+/// UTC (`Z`), TZID-qualified local time (custom zones resolve through the
+/// calendar's VTIMEZONEs), or floating (no zone marker).
+pub(crate) fn parse_wire_point(prop: &icalendar::Property, custom: &Zones) -> Option<WirePoint> {
+    let value = prop.value().trim();
+    if value.len() == 8 && value.chars().all(|c| c.is_ascii_digit()) {
+        return NaiveDate::parse_from_str(value, "%Y%m%d")
+            .ok()
+            .map(|date| WirePoint {
+                date: Some(date),
+                ..Default::default()
+            });
+    }
+    if let Some(utc) = value.strip_suffix('Z') {
+        let naive = NaiveDateTime::parse_from_str(utc, "%Y%m%dT%H%M%S").ok()?;
+        return Some(WirePoint {
+            at: Some(Utc.from_utc_datetime(&naive)),
+            ..Default::default()
+        });
+    }
+    let naive = NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").ok()?;
+    match prop.params().get("TZID").map(|p| p.value().to_string()) {
+        Some(tzid) => {
+            let zone = custom.get(&tzid).cloned().or_else(|| {
+                tzid.parse::<Tz>()
+                    .ok()
+                    .map(calendar_core::recurrence::Zone::Tz)
+            });
+            Some(WirePoint {
+                at: zone.and_then(|zone| zone.from_local(naive)),
+                tzid: Some(tzid),
+                floating: false,
+                date: None,
+            })
+        }
+        // Floating: the wall clock is stored as if it were UTC.
+        None => Some(WirePoint {
+            at: Some(naive.and_utc()),
+            floating: true,
+            tzid: None,
+            date: None,
+        }),
+    }
+}
+
+/// CATEGORIES across the single and multi property forms, split on commas.
+pub(crate) fn collect_categories<C: icalendar::Component>(component: &C) -> Vec<String> {
+    let mut raw: Vec<String> = Vec::new();
+    if let Some(value) = component.property_value("CATEGORIES") {
+        raw.push(value.to_string());
+    }
+    if let Some(props) = component.multi_properties().get("CATEGORIES") {
+        for prop in props {
+            raw.push(prop.value().to_string());
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for joined in raw {
+        for category in joined.split(',') {
+            let category = category.trim();
+            if !category.is_empty() && !out.iter().any(|c| c == category) {
+                out.push(category.to_string());
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn attendee_from_prop(prop: &icalendar::Property) -> ParsedAttendee {
     // CAL-ADDRESS is a URI: mailto: for email attendees, sms: for SMS-only.
     let value = prop.value();
     let (scheme, rest) = match value.split_once(':') {
@@ -1301,10 +1577,13 @@ SUMMARY:Moved\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
     }
 
     #[test]
-    fn vtodo_rejected() {
+    fn vtodo_is_ignored_by_parse_ics_and_parsed_by_parse_resource() {
         let todo = "BEGIN:VCALENDAR\r\nPRODID:-//x//EN\r\nVERSION:2.0\r\n\
 BEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260911T120000Z\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
-        assert!(matches!(parse_ics(todo), Err(IcsError::TodoUnsupported)));
+        // parse_ics keeps its event-only contract (free-busy, iMIP readers).
+        assert!(parse_ics(todo).unwrap().is_empty());
+        // The PUT path dispatches on the parsed kind instead of rejecting.
+        assert!(matches!(parse_resource(todo), Ok(ParsedResource::Todos(_))));
     }
 
     fn sample_event_row() -> calendar_db::EventRow {

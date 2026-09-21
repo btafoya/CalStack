@@ -19,7 +19,7 @@ mkdir -p "$SOCK"
 cleanup() {
   [[ -n "${SRV_PID:-}" ]] && kill "$SRV_PID" 2>/dev/null || true
   /usr/lib/postgresql/16/bin/pg_ctl -D "$DATA/pg" stop -m fast >/dev/null 2>&1 || true
-  rm -rf "$DATA"
+  : keep artifacts
 }
 trap cleanup EXIT
 
@@ -506,6 +506,66 @@ curl -s -b "$DATA/admin.jar" -H "X-CSRF-Token: $(csrf admin)" -H 'content-type: 
   -X PATCH "$BASE/api/admin/users/$ALICE_ID" -d '{"is_admin":false}' >/dev/null
 
 # ============ 5b. categories ============
+# ============ 5b. tasks + journals (ADR-015) ============
+step "Tasks: API create/list/complete/reopen round-trip"
+TASKCAL=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars" -d '{"slug":"todo","name":"To-Do","components":["VEVENT","VTODO"]}' \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+[ -n "$TASKCAL" ] || fail "task calendar create"
+TASK=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$TASKCAL/tasks" \
+  -d '{"summary":"Interoperability task","due_at":"2026-10-01T17:00:00Z","priority":5,"percent_complete":0}')
+TASK_ID=$(echo "$TASK" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+[ -n "$TASK_ID" ] || fail "task create failed: $TASK"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/tasks/$TASK_ID/complete" -o /dev/null
+STATUS=$(curl -s -b "$DATA/alice.jar" "$BASE/api/tasks/$TASK_ID" | python3 -c "import json,sys;print(json.load(sys.stdin)['status'])")
+[ "$STATUS" = "COMPLETED" ] || fail "complete did not set COMPLETED, got $STATUS"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/tasks/$TASK_ID/reopen" -o /dev/null
+STATUS=$(curl -s -b "$DATA/alice.jar" "$BASE/api/tasks/$TASK_ID" | python3 -c "import json,sys;print(json.load(sys.stdin)['status'])")
+[ "$STATUS" = "NEEDS-ACTION" ] || fail "reopen did not restore NEEDS-ACTION, got $STATUS"
+
+step "CalDAV: VTODO PUT/GET round-trips on a VTODO-capable collection"
+UUIDT=$(uuidgen)
+printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//interop//EN\r\nBEGIN:VTODO\r\nUID:task-wire@interop\r\nDTSTAMP:20260911T120000Z\r\nSUMMARY:Wired task\r\nDUE;VALUE=DATE:20261002\r\nEND:VTODO\r\nEND:VCALENDAR\r\n' > "$DATA/task.ics"
+curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/todo/$UUIDT.ics" -H 'content-type: text/calendar' \
+  --data-binary @"$DATA/task.ics" -o /dev/null
+curl -s -u "$AUTH" "$BASE/calendars/alice/todo/$UUIDT.ics" | grep -q "BEGIN:VTODO" \
+  || fail "VTODO GET round-trip"
+curl -s -u "$AUTH" "$BASE/calendars/alice/todo/$UUIDT.ics" | grep -q "SUMMARY:Wired task" \
+  || fail "VTODO summary round-trip"
+
+step "VTODO PUT still rejected with the CalDAV body on a VEVENT-only calendar"
+CODE=$(curl -sS -u "$AUTH" -X PUT "$BASE/calendars/alice/work/$UUIDT.ics" -H 'content-type: text/calendar' \
+  --data-binary @"$DATA/task.ics" -o /dev/null -w '%{http_code}' 2>&1)
+[ "$CODE" = 403 ] || fail "component gate should refuse VTODO outside its set, got [$CODE]"
+
+step "Journals: API create/get round-trip"
+JRN=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/journals" \
+  -d '{"summary":"Interop journal","status":"FINAL","description_text":"a note"}')
+JRN_ID=$(echo "$JRN" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+[ -n "$JRN_ID" ] || fail "journal create failed: $JRN"
+
+step "Search returns tasks and journals"
+curl -s -b "$DATA/alice.jar" "$BASE/api/search?q=Interoperability" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+assert any(t['summary'] == 'Interoperability task' for t in d.get('tasks', [])), d
+" || fail "search did not return the task"
+
+step "Change stream (SSE) delivers a change frame"
+curl -s -N -m 6 -b "$DATA/alice.jar" "$BASE/api/changes/stream?since=0" > "$DATA/stream.out" 2>/dev/null &
+STREAM_PID=$!
+sleep 1
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
+  -X POST "$BASE/api/calendars/$CAL/events" \
+  -d '{"summary":"stream probe","starts_at":"2026-09-25T10:00:00Z","ends_at":"2026-09-25T11:00:00Z"}' >/dev/null
+for _ in $(seq 1 12); do grep -q "event: change" "$DATA/stream.out" 2>/dev/null && break; sleep 0.5; done
+kill $STREAM_PID 2>/dev/null || true
+grep -q "event: change" "$DATA/stream.out" || fail "SSE stream produced no change frame: $(head -c 200 "$DATA/stream.out")"
+
 step "Categories: create calendar-scoped row as owner, enriches event responses"
 CAT=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \
   -X POST "$BASE/api/categories" \

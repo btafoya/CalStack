@@ -2,6 +2,9 @@
 //! stream, audit (docs/PRD.md sections 12-13, 22; docs/IMPLEMENTATION_CHECKLIST.md
 //! stages 12, 13, 19).
 
+use std::collections::VecDeque;
+use std::time::Duration;
+
 use crate::{AppError, AppState, require_capability, require_csrf, resolve_auth};
 use axum::{
     Json,
@@ -215,19 +218,19 @@ async fn search(
     if params.q.is_none() && params.attendee.is_none() {
         return Err(AppError::bad_request("q or attendee is required"));
     }
-    let hits = db::search::search_events(
-        &pool,
-        auth.user.id,
-        &db::search::SearchQuery {
-            text: params.q.unwrap_or_default(),
-            attendee: params.attendee,
-            limit: params.limit.unwrap_or(50),
-        },
-    )
-    .await?;
-    Ok(Json(json!(
-        hits.iter()
-            .map(|hit| {
+    let query = db::search::SearchQuery {
+        text: params.q.unwrap_or_default(),
+        attendee: params.attendee,
+        limit: params.limit.unwrap_or(50),
+    };
+    let hits = db::search::search_events(&pool, auth.user.id, &query).await?;
+    let task_hits = db::search::search_tasks(&pool, auth.user.id, &query).await?;
+    let journal_hits = db::search::search_journals(&pool, auth.user.id, &query).await?;
+    // JSON arrays cannot carry keys, so "add tasks/journals beside the existing
+    // top-level array" lands as an object: the event hits keep their exact
+    // item shape under "events", "tasks"/"journals" are additive keys.
+    Ok(Json(json!({
+        "events": hits.iter().map(|hit| {
                 let e = &hit.event;
                 json!({
                     "id": e.id, "calendar_id": e.calendar_id, "uid": e.uid,
@@ -236,8 +239,29 @@ async fn search(
                     "categories": e.categories, "rank": hit.rank,
                 })
             })
-            .collect::<Vec<_>>()
-    )))
+            .collect::<Vec<_>>(),
+        "tasks": task_hits.iter().map(|hit| {
+                let t = &hit.task;
+                json!({
+                    "id": t.id, "calendar_id": t.calendar_id, "uid": t.uid,
+                    "summary": t.summary, "starts_at": t.starts_at, "start_date": t.start_date,
+                    "due_at": t.due_at, "due_date": t.due_date,
+                    "status": t.status, "parent_uid": t.parent_uid, "url": t.url,
+                    "categories": t.categories, "rank": hit.rank,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "journals": journal_hits.iter().map(|hit| {
+                let j = &hit.journal;
+                json!({
+                    "id": j.id, "calendar_id": j.calendar_id, "uid": j.uid,
+                    "summary": j.summary, "starts_at": j.starts_at, "start_date": j.start_date,
+                    "status": j.status, "url": j.url,
+                    "categories": j.categories, "rank": hit.rank,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })))
 }
 
 /// Application change stream (docs/PRD.md section 11): change_log entries
@@ -267,6 +291,152 @@ async fn list_changes(
             "operation": c.operation, "changed_at": c.changed_at,
         })).collect::<Vec<_>>(),
     })))
+}
+
+// ============ change stream: SSE adapter ============
+
+/// How often the SSE adapter polls `change_log` for new entries.
+const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Connection cap; the terminal `done` frame tells the client to reconnect.
+const STREAM_MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
+
+/// Current head of the change log — the cursor handed to fresh SSE clients.
+async fn max_change_seq(pool: &sqlx::PgPool) -> Result<i64, db::DbError> {
+    let (seq,): (Option<i64>,) = sqlx::query_as("SELECT MAX(seq) FROM change_log")
+        .fetch_one(pool)
+        .await?;
+    Ok(seq.unwrap_or(0))
+}
+
+/// Same shape as the `changes` array of the JSON poll (`GET /api/changes`).
+fn change_frame(row: &db::search::ChangeRow) -> serde_json::Value {
+    json!({
+        "seq": row.seq, "calendar_id": row.calendar_id, "resource_id": row.resource_id,
+        "operation": row.operation, "changed_at": row.changed_at,
+    })
+}
+
+/// Cursor-only payload of the `sync` and `done` frames.
+fn cursor_frame(seq: i64) -> serde_json::Value {
+    json!({"seq": seq})
+}
+
+/// Frames pending on an SSE connection: a one-shot sync cursor, then changes.
+enum Frame {
+    Sync(i64),
+    Change(db::search::ChangeRow),
+}
+
+fn frame_event(frame: Frame) -> axum::response::sse::Event {
+    use axum::response::sse::Event;
+    match frame {
+        Frame::Sync(seq) => Event::default()
+            .event("sync")
+            .json_data(cursor_frame(seq))
+            .expect("sync frame is valid JSON"),
+        Frame::Change(row) => Event::default()
+            .event("change")
+            .json_data(change_frame(&row))
+            .expect("change frame is valid JSON"),
+    }
+}
+
+fn done_event(seq: i64) -> axum::response::sse::Event {
+    use axum::response::sse::Event;
+    Event::default()
+        .event("done")
+        .json_data(cursor_frame(seq))
+        .expect("done frame is valid JSON")
+}
+
+/// Per-connection state for `GET /api/changes/stream`.
+struct ChangeStreamState {
+    pool: sqlx::PgPool,
+    user_id: Uuid,
+    since: i64,
+    pending: VecDeque<Frame>,
+    deadline: tokio::time::Instant,
+    finished: bool,
+}
+
+/// Drains buffered frames, then polls for new changes until the 30-minute
+/// cap; ends after yielding the terminal `done` frame (client reconnects with
+/// its last `seq`). Dropped when the client disconnects.
+async fn next_change_stream_state(
+    mut st: ChangeStreamState,
+) -> Option<(
+    Result<axum::response::sse::Event, std::convert::Infallible>,
+    ChangeStreamState,
+)> {
+    if st.finished {
+        return None;
+    }
+    loop {
+        if let Some(frame) = st.pending.pop_front() {
+            if let Frame::Change(ref row) = frame {
+                st.since = row.seq;
+            }
+            return Some((Ok(frame_event(frame)), st));
+        }
+        if tokio::time::Instant::now() >= st.deadline {
+            st.finished = true;
+            return Some((Ok(done_event(st.since)), st));
+        }
+        // Same tenant/ACL scoping as the JSON poll (`list_changes_since`).
+        match db::search::list_changes_since(&st.pool, st.user_id, st.since, 500).await {
+            Ok(rows) => {
+                st.pending.extend(rows.into_iter().map(Frame::Change));
+                if st.pending.is_empty() {
+                    tokio::time::sleep(STREAM_POLL_INTERVAL).await;
+                }
+            }
+            Err(e) => {
+                // Transient DB errors keep the stream alive; the client still
+                // holds its cursor if the server dies outright.
+                tracing::warn!(error = %e, "change stream poll failed");
+                tokio::time::sleep(STREAM_POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
+/// SSE transport adapter for the application change stream (docs/PRD.md
+/// section 11). Cursor is `?since=N` with the same semantics as the JSON
+/// poll; a fresh connect (no `since`) starts from the current head.
+#[derive(Deserialize)]
+struct StreamChangesQuery {
+    since: Option<i64>,
+}
+
+async fn stream_changes(
+    State(AppState { pool, .. }): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<StreamChangesQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    use axum::response::sse::{KeepAlive, Sse};
+    let auth = resolve_auth(&pool, &headers).await?;
+    let mut pending = VecDeque::new();
+    let since = match params.since {
+        Some(s) => s,
+        None => {
+            let head = max_change_seq(&pool).await?;
+            pending.push_back(Frame::Sync(head));
+            head
+        }
+    };
+    let state = ChangeStreamState {
+        pool,
+        user_id: auth.user.id,
+        since,
+        pending,
+        deadline: tokio::time::Instant::now() + STREAM_MAX_LIFETIME,
+        finished: false,
+    };
+    Ok(Sse::new(futures_util::stream::unfold(
+        state,
+        next_change_stream_state,
+    ))
+    .keep_alive(KeepAlive::default()))
 }
 
 // ============ notifications ============
@@ -369,7 +539,52 @@ pub fn router() -> axum::Router<crate::AppState> {
         .route("/api/attachments/{id}/meta", get(get_attachment_meta))
         .route("/api/search", get(search))
         .route("/api/changes", get(list_changes))
+        .route("/api/changes/stream", get(stream_changes))
         .route("/api/notifications", get(list_notifications))
         .route("/api/notifications/{id}/read", post(mark_notification_read))
         .route("/api/audit", get(list_audit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_change(seq: i64) -> db::search::ChangeRow {
+        db::search::ChangeRow {
+            seq,
+            calendar_id: Uuid::nil(),
+            resource_id: Uuid::nil(),
+            operation: "upsert".to_string(),
+            changed_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn change_frame_matches_the_json_poll_shape() {
+        let frame = change_frame(&sample_change(7));
+        assert_eq!(frame["seq"], 7);
+        assert_eq!(frame["calendar_id"], json!(Uuid::nil()));
+        assert_eq!(frame["resource_id"], json!(Uuid::nil()));
+        assert_eq!(frame["operation"], "upsert");
+        assert!(frame["changed_at"].is_string());
+        assert_eq!(
+            frame.as_object().unwrap().len(),
+            5,
+            "frame keys must stay aligned with GET /api/changes"
+        );
+    }
+
+    #[test]
+    fn sync_and_done_frames_carry_only_the_cursor() {
+        assert_eq!(cursor_frame(12), json!({"seq": 12}));
+    }
+
+    #[test]
+    fn every_frame_serializes_through_the_sse_wire_path() {
+        // json_data is the actual encoding path; any failure is a panic at
+        // runtime, so prove the builders survive it.
+        let _ = frame_event(Frame::Sync(1));
+        let _ = frame_event(Frame::Change(sample_change(2)));
+        let _ = done_event(3);
+    }
 }

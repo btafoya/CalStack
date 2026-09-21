@@ -12,12 +12,14 @@ mod dav;
 mod events_api;
 mod extras;
 mod jobs;
+mod journals_api;
 mod mfa;
 mod places;
 mod push_api;
 mod rules_api;
 mod scheduling;
 mod sharing_api;
+mod tasks_api;
 mod webhooks_api;
 mod xml;
 
@@ -209,6 +211,8 @@ fn build_router(state: AppState) -> Router {
         .merge(places::router())
         .merge(calendars_api::router())
         .merge(events_api::router())
+        .merge(tasks_api::router())
+        .merge(journals_api::router())
         .merge(webhooks_api::router())
         .route(
             "/api/openapi.json",

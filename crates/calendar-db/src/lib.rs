@@ -8,9 +8,11 @@ pub mod categories;
 pub mod contacts;
 pub mod ics_upsert;
 pub mod jobs;
+pub mod journals;
 pub mod scheduling;
 pub mod search;
 pub mod sharing;
+pub mod tasks;
 pub mod timezones;
 pub mod webhooks;
 
@@ -171,6 +173,8 @@ pub struct NewCalendar {
     pub description: Option<String>,
     pub color: Option<String>,
     pub timezone: Option<String>,
+    /// Component set; None = the schema default (ADR-015 D6).
+    pub components: Option<Vec<String>>,
 }
 
 /// Creates a calendar with its ACL inside one transaction; the ACL set must
@@ -184,8 +188,8 @@ pub async fn create_calendar(
 ) -> Result<CalendarRow, DbError> {
     let mut tx = pool.begin().await?;
     let calendar = sqlx::query_as::<_, CalendarRow>(
-        "INSERT INTO calendars (id, tenant_id, slug, name, description, color, timezone, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+        "INSERT INTO calendars (id, tenant_id, slug, name, description, color, timezone, created_by, components)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, ARRAY['VEVENT'])) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(tenant_id)
@@ -195,6 +199,7 @@ pub async fn create_calendar(
     .bind(new_calendar.color.as_deref())
     .bind(new_calendar.timezone.as_deref())
     .bind(created_by)
+    .bind(new_calendar.components.as_deref())
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
@@ -781,6 +786,7 @@ async fn append_change(
     calendar_id: Uuid,
     resource_id: Uuid,
     operation: &str,
+    resource_type: &str,
 ) -> Result<(), DbError> {
     let master = sqlx::query_as::<_, EventRow>(
         "UPDATE events SET updated_at = now()
@@ -801,17 +807,55 @@ async fn append_change(
         }
         None => (resource_id, operation),
     };
-    sqlx::query("INSERT INTO change_log (calendar_id, resource_id, operation) VALUES ($1, $2, $3)")
-        .bind(calendar_id)
-        .bind(resource_id)
-        .bind(operation)
-        .execute(&mut *tx)
-        .await?;
+    record_change(tx, calendar_id, resource_id, resource_type, operation).await
+}
+
+/// The change-log + CTag tail shared by events, tasks and journals. Callers
+/// must have bumped the resource row itself first.
+pub(crate) async fn record_change(
+    tx: &mut sqlx::PgConnection,
+    calendar_id: Uuid,
+    resource_id: Uuid,
+    resource_type: &str,
+    operation: &str,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO change_log (calendar_id, resource_id, resource_type, operation)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(calendar_id)
+    .bind(resource_id)
+    .bind(resource_type)
+    .bind(operation)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("UPDATE calendars SET ctag = ctag + 1 WHERE id = $1")
         .bind(calendar_id)
         .execute(&mut *tx)
         .await?;
     Ok(())
+}
+
+/// Whether `href` is taken by any live resource of any component kind in the
+/// calendar (the calendar_objects view cannot carry a unique index, so this is
+/// checked in the insert transaction; the per-table unique indexes catch
+/// same-type races). docs/TASKS_JOURNALS_DESIGN.md section 3.
+pub(crate) async fn href_taken(
+    tx: &mut sqlx::PgConnection,
+    calendar_id: Uuid,
+    href: &str,
+) -> Result<bool, DbError> {
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM calendar_objects
+             WHERE calendar_id = $1 AND href = $2 AND deleted_at IS NULL
+         )",
+    )
+    .bind(calendar_id)
+    .bind(href)
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(taken)
 }
 
 #[derive(Debug, Default)]
@@ -845,7 +889,7 @@ pub struct NewEventData {
 }
 
 /// ETag: strong validator derived from the mutation counter and row timestamp.
-fn etag_for(calendar_id: Uuid, sequence: i32, updated_at: DateTime<Utc>) -> String {
+pub(crate) fn etag_for(calendar_id: Uuid, sequence: i32, updated_at: DateTime<Utc>) -> String {
     let digest = calendar_auth::sha256(
         format!("{calendar_id}-{sequence}-{}", updated_at.timestamp_millis()).as_bytes(),
     );
@@ -948,7 +992,7 @@ pub async fn create_event(
         .bind(&etag)
         .execute(&mut *tx)
         .await?;
-    append_change(&mut tx, calendar_id, event.id, "created").await?;
+    append_change(&mut tx, calendar_id, event.id, "created", "event").await?;
     tx.commit().await?;
     Ok((event, etag))
 }
@@ -1105,7 +1149,7 @@ pub async fn update_event(
         .bind(&new_etag)
         .execute(&mut *tx)
         .await?;
-    append_change(&mut tx, event.calendar_id, event.id, "updated").await?;
+    append_change(&mut tx, event.calendar_id, event.id, "updated", "event").await?;
     tx.commit().await?;
     let etag = etag_for(event.calendar_id, event.sequence, event.updated_at);
     Ok((event, etag))
@@ -1134,7 +1178,7 @@ pub async fn delete_event(
         .bind(event_id)
         .execute(&mut *tx)
         .await?;
-    append_change(&mut tx, current.calendar_id, current.id, "deleted").await?;
+    append_change(&mut tx, current.calendar_id, current.id, "deleted", "event").await?;
     tx.commit().await?;
     Ok(())
 }

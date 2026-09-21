@@ -9,10 +9,15 @@
 //!                                         calendar-home-set depth-1 PROPFIND
 //!                                         surfaces calendar collections
 //!   /calendars/{user}/{slug}            — calendar collection (MKCALENDAR)
-//!   /calendars/{user}/{slug}/{uuid}.ics — one VEVENT resource (master or
-//!                                         RECURRENCE-ID exception)
+//!   /calendars/{user}/{slug}/{name}.ics — one resource: a VEVENT series, a
+//!                                         VTODO series or a VJOURNAL,
+//!                                         addressed by its stored href
+//!                                         (ADR-015 D4)
 
-use crate::{ExportRow, events_to_ics};
+use crate::{
+    ExportRow, ParsedResource, TaskExportRow, events_to_ics, journal_to_ics, parse_resource,
+    todos_to_ics,
+};
 use calendar_core::CalendarCapability;
 use calendar_db::{self as db, CalendarRow, EventRow};
 use chrono::{DateTime, Utc};
@@ -70,6 +75,46 @@ pub(crate) fn parse_location(path: &DavPath) -> Option<Location> {
             .map(|name| Location::Object(slug.to_string(), name.to_string())),
         _ => None,
     }
+}
+
+/// Stored component kinds (ADR-015 D5): one resource per kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectKind {
+    Event,
+    Todo,
+    Journal,
+}
+
+fn kind_of(kind: &str) -> ObjectKind {
+    match kind {
+        "VTODO" => ObjectKind::Todo,
+        "VJOURNAL" => ObjectKind::Journal,
+        _ => ObjectKind::Event,
+    }
+}
+
+/// calendar_objects row as read from SQL.
+#[derive(Debug, sqlx::FromRow)]
+struct ObjectRow {
+    kind: String,
+    id: Uuid,
+    etag: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
+    class: Option<String>,
+}
+
+/// One row of the calendar_objects view.
+#[derive(Debug, Clone)]
+pub(crate) struct ObjectRef {
+    pub kind: ObjectKind,
+    pub id: Uuid,
+    pub etag: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub class: Option<String>,
 }
 
 /// Read-only DAV metadata snapshot.
@@ -184,15 +229,88 @@ impl PgDavFs {
             .ok_or(FsError::NotFound)
     }
 
-    /// The series master served under `name`.
-    async fn master_at(&self, calendar: &CalendarRow, name: &str) -> FsResult<EventRow> {
-        let (event, _) = db::get_event_by_href(&self.pool, calendar.id, name)
-            .await
-            .map_err(fs_err)?;
-        Ok(event)
+    /// The object (any kind) served under `name`, via the calendar_objects
+    /// view (ADR-015 D5). `class` drives share-principal filtering for all
+    /// three kinds alike.
+    async fn object_at(&self, calendar_id: Uuid, name: &str) -> FsResult<Option<ObjectRef>> {
+        let row: Option<ObjectRow> = sqlx::query_as::<_, ObjectRow>(
+            "SELECT o.kind, o.id, o.etag, o.created_at, o.updated_at, o.deleted_at,
+                    COALESCE(e.class, t.class, j.class) AS class
+             FROM calendar_objects o
+             LEFT JOIN events e ON e.id = o.id
+             LEFT JOIN tasks t ON t.id = o.id
+             LEFT JOIN journals j ON j.id = o.id
+             WHERE o.calendar_id = $1 AND o.href = $2",
+        )
+        .bind(calendar_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| FsError::GeneralFailure)?;
+        Ok(row.map(|row| ObjectRef {
+            kind: kind_of(&row.kind),
+            id: row.id,
+            etag: row.etag,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            deleted_at: row.deleted_at,
+            class: row.class,
+        }))
     }
 
-    /// The whole series as one VCALENDAR: the master, then its overrides,
+    /// The whole series or single component as one VCALENDAR, with the
+    /// calendar's stored VTIMEZONE definitions (ADR-012) where the kind uses
+    /// them.
+    async fn render_object(&self, object: &ObjectRef) -> FsResult<String> {
+        match object.kind {
+            ObjectKind::Event => {
+                let (event, _) = db::get_event(&self.pool, object.id).await.map_err(fs_err)?;
+                self.series_ics(&event).await
+            }
+            ObjectKind::Todo => {
+                let (task, _) = db::tasks::get_task(&self.pool, object.id)
+                    .await
+                    .map_err(fs_err)?;
+                self.task_ics(&task).await
+            }
+            ObjectKind::Journal => {
+                let (journal, _) = db::journals::get_journal(&self.pool, object.id)
+                    .await
+                    .map_err(fs_err)?;
+                Ok(journal_to_ics(&journal))
+            }
+        }
+    }
+
+    /// The whole task series as one VCALENDAR: the master, then its
+    /// RECURRENCE-ID overrides, with attendees and alarms.
+    async fn task_ics(&self, master: &db::tasks::TaskRow) -> FsResult<String> {
+        let mut tasks = vec![master.clone()];
+        tasks.extend(
+            db::tasks::list_overrides(&self.pool, master.id)
+                .await
+                .map_err(fs_err)?,
+        );
+        let zones = db::timezones::list_for_calendar(&self.pool, master.calendar_id)
+            .await
+            .unwrap_or_default();
+        let mut rows = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            rows.push(TaskExportRow {
+                attendees: db::tasks::list_task_attendees(&self.pool, task.id)
+                    .await
+                    .unwrap_or_default(),
+                alarms: db::tasks::list_task_alarms(&self.pool, task.id)
+                    .await
+                    .unwrap_or_default(),
+                vtimezones: zones.clone(),
+                task,
+            });
+        }
+        Ok(todos_to_ics(&rows))
+    }
+
+    /// The whole event series as one VCALENDAR: the master, then its overrides,
     /// plus the calendar's stored VTIMEZONE definitions (ADR-012).
     async fn series_ics(&self, master: &EventRow) -> FsResult<String> {
         let mut events = vec![master.clone()];
@@ -244,18 +362,20 @@ impl PgDavFs {
             Location::Object(slug, name) => {
                 let (cal, cap) = self.calendar_by_slug(creds, slug).await?;
                 capability_guard(cap, CalendarCapability::ReadOnly)?;
-                let event = self.master_at(&cal, name).await?;
-                if creds.share_calendar_id.is_some() && event.class.as_deref() != Some("PUBLIC") {
+                let Some(object) = self.object_at(cal.id, name).await? else {
+                    return Err(FsError::NotFound);
+                };
+                if creds.share_calendar_id.is_some() && object.class.as_deref() != Some("PUBLIC") {
                     return Err(FsError::NotFound);
                 }
-                let ics = self.series_ics(&event).await?;
+                let ics = self.render_object(&object).await?;
                 Ok((
                     location,
                     Meta {
                         len: ics.len() as u64,
-                        modified: event.updated_at.into(),
-                        created: event.created_at.into(),
-                        etag: event.etag.trim_matches('"').to_string(),
+                        modified: object.updated_at.into(),
+                        created: object.created_at.into(),
+                        etag: object.etag.trim_matches('"').to_string(),
                         dir: false,
                         calendar: false,
                     },
@@ -291,19 +411,21 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     let reading = options.read && !options.write;
                     if reading {
                         capability_guard(cap, CalendarCapability::ReadOnly)?;
-                        let event = self.master_at(&cal, &name).await?;
+                        let Some(object) = self.object_at(cal.id, &name).await? else {
+                            return Err(FsError::NotFound);
+                        };
                         if creds.share_calendar_id.is_some()
-                            && event.class.as_deref() != Some("PUBLIC")
+                            && object.class.as_deref() != Some("PUBLIC")
                         {
                             return Err(FsError::NotFound);
                         }
-                        let ics = self.series_ics(&event).await?;
-                        let modified: SystemTime = event.updated_at.into();
+                        let ics = self.render_object(&object).await?;
+                        let modified: SystemTime = object.updated_at.into();
                         let meta = Meta {
                             len: ics.len() as u64,
                             modified,
-                            created: event.created_at.into(),
-                            etag: event.etag.trim_matches('"').to_string(),
+                            created: object.created_at.into(),
+                            etag: object.etag.trim_matches('"').to_string(),
                             dir: false,
                             calendar: false,
                         };
@@ -315,10 +437,10 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     }
                     if options.write {
                         capability_guard(cap, CalendarCapability::ReadWrite)?;
-                        let existing = db::get_event_by_href(&self.pool, cal.id, &name).await;
+                        let existing = self.object_at(cal.id, &name).await;
                         let exists = match &existing {
-                            Ok(_) => true,
-                            Err(db::DbError::NotFound) => false,
+                            Ok(Some(object)) if object.deleted_at.is_none() => true,
+                            Ok(_) => false,
                             Err(_) => return Err(FsError::GeneralFailure),
                         };
                         if exists && options.create_new {
@@ -338,10 +460,10 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                             db::ics_upsert::PutPrecondition::NotExists
                         } else {
                             match existing {
-                                Ok((event, _)) => db::ics_upsert::PutPrecondition::MatchEtag(
-                                    event.etag.trim_matches('"').to_string(),
+                                Ok(Some(object)) => db::ics_upsert::PutPrecondition::MatchEtag(
+                                    object.etag.trim_matches('"').to_string(),
                                 ),
-                                Err(db::DbError::NotFound) => db::ics_upsert::PutPrecondition::None,
+                                Ok(None) => db::ics_upsert::PutPrecondition::None,
                                 Err(_) => return Err(FsError::GeneralFailure),
                             }
                         };
@@ -449,6 +571,56 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                             },
                         });
                     }
+                    // Tasks and journals are listed in full (no window):
+                    // undated items have no time to window on (ADR-015 D5).
+                    let share = creds.share_calendar_id.is_some();
+                    for task in
+                        db::tasks::list_tasks(&self.pool, cal.id, &db::tasks::TaskFilter::default())
+                            .await
+                            .map_err(fs_err)?
+                    {
+                        if share && task.class.as_deref() != Some("PUBLIC") {
+                            continue;
+                        }
+                        let ics = self.task_ics(&task).await?;
+                        entries.push(Entry {
+                            name: task.resource_name().into_bytes(),
+                            meta: Meta {
+                                len: ics.len() as u64,
+                                modified: task.updated_at.into(),
+                                created: task.created_at.into(),
+                                etag: task.etag.trim_matches('"').to_string(),
+                                dir: false,
+                                calendar: false,
+                            },
+                        });
+                    }
+                    for journal in db::journals::list_journals(
+                        &self.pool,
+                        cal.id,
+                        &db::journals::JournalFilter::default(),
+                    )
+                    .await
+                    .map_err(fs_err)?
+                    {
+                        if share && journal.class.as_deref() != Some("PUBLIC") {
+                            continue;
+                        }
+                        let ics = journal_to_ics(&journal);
+                        entries.push(Entry {
+                            name: journal.resource_name().into_bytes(),
+                            meta: Meta {
+                                len: ics.len() as u64,
+                                modified: journal.updated_at.into(),
+                                created: journal.created_at.into(),
+                                etag: journal.etag.trim_matches('"').to_string(),
+                                dir: false,
+                                calendar: false,
+                            },
+                        });
+                    }
+                    // ponytail: full-window scan per list; a calendar-query SQL
+                    // push-down arrives when a profiled calendar needs it.
                     entries
                 }
                 Location::Object(_, _) => return Err(FsError::NotFound),
@@ -522,28 +694,49 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                 Location::Object(slug, name) => {
                     let (cal, cap) = self.calendar_by_slug(creds, &slug).await?;
                     capability_guard(cap, CalendarCapability::ReadWrite)?;
-                    let (event, _) = db::get_event_by_href(&self.pool, cal.id, &name)
-                        .await
-                        .map_err(fs_err)?;
-                    db::delete_event(&self.pool, event.id, None)
-                        .await
-                        .map_err(fs_err)?;
-                    // Same as the JSON delete: attendees get METHOD:CANCEL.
-                    db::scheduling::schedule_cancels(&self.pool, event.id).await;
-                    // Webhook trigger, same as the JSON API path.
-                    if let Ok(webhooks) =
-                        db::webhooks::matching_webhooks(&self.pool, cal.tenant_id, "event_deleted")
-                            .await
-                    {
-                        for webhook in webhooks {
-                            db::webhooks::enqueue_delivery(
+                    let Some(object) = self.object_at(cal.id, &name).await? else {
+                        return Err(FsError::NotFound);
+                    };
+                    match object.kind {
+                        ObjectKind::Event => {
+                            db::delete_event(&self.pool, object.id, None)
+                                .await
+                                .map_err(fs_err)?;
+                            // Same as the JSON delete: attendees get METHOD:CANCEL.
+                            db::scheduling::schedule_cancels(&self.pool, object.id).await;
+                            // Webhook trigger, same as the JSON API path.
+                            if let Ok(webhooks) = db::webhooks::matching_webhooks(
                                 &self.pool,
-                                webhook.id,
-                                event.id,
+                                cal.tenant_id,
                                 "event_deleted",
                             )
                             .await
-                            .ok();
+                            {
+                                for webhook in webhooks {
+                                    db::webhooks::enqueue_delivery(
+                                        &self.pool,
+                                        webhook.id,
+                                        object.id,
+                                        "event_deleted",
+                                    )
+                                    .await
+                                    .ok();
+                                }
+                            }
+                        }
+                        // Task deletes cascade to overrides and the subtask
+                        // tree (one change_log row each); journal deletes are
+                        // flat. Webhook and scheduling dispatch for these
+                        // kinds land with stages 5/8.
+                        ObjectKind::Todo => {
+                            db::tasks::delete_task(&self.pool, object.id, None)
+                                .await
+                                .map_err(fs_err)?;
+                        }
+                        ObjectKind::Journal => {
+                            db::journals::delete_journal(&self.pool, object.id, None)
+                                .await
+                                .map_err(fs_err)?;
                         }
                     }
                     Ok(())
@@ -785,17 +978,127 @@ impl DavFile for WriteFile {
                     return Err(FsError::Forbidden);
                 }
             };
-            let parsed = match crate::parse_calendar(text) {
+            let parsed = match parse_resource(text) {
                 Ok(parsed) => parsed,
                 Err(e) => {
                     tracing::warn!(error = %e, "CalDAV PUT body is not valid iCalendar");
                     return Err(FsError::Forbidden);
                 }
             };
-            let events = parsed.events;
-            // Client-supplied VTIMEZONEs ride along to the store (ADR-012); a
-            // non-compilable one already failed parse_calendar above.
-            let zones: Vec<db::timezones::NewTimezone> = parsed
+            match parsed {
+                ParsedResource::Events(events) => self.flush_events(events).await,
+                ParsedResource::Todos(series) => self.flush_todo(*series).await,
+                ParsedResource::Journal(journal) => self.flush_journal(*journal).await,
+            }
+        })
+    }
+}
+
+impl WriteFile {
+    /// VEVENT PUT: one master plus its own overrides (parse_resource already
+    /// enforced one UID; an override-only resource was refused at parse).
+    async fn flush_events(
+        &mut self,
+        parsed: crate::ParsedCalendar,
+    ) -> std::result::Result<(), FsError> {
+        let events = parsed.events;
+        // Client-supplied VTIMEZONEs ride along to the store (ADR-012); a
+        // non-compilable one already failed parse_calendar above.
+        let zones: Vec<db::timezones::NewTimezone> = parsed
+            .timezones
+            .iter()
+            .map(|tz| db::timezones::NewTimezone {
+                tzid: tz.tzid.clone(),
+                definition: tz.definition.clone(),
+                rules: tz.rules.clone(),
+            })
+            .collect();
+        // One resource = one UID: a master VEVENT plus its own overrides.
+        // (An override without its master, e.g. an invitation to a single
+        // occurrence, is not supported.)
+        let (masters, overrides): (Vec<_>, Vec<_>) = events
+            .iter()
+            .partition(|e| e.recurrence_id.is_none() && e.recurrence_id_date.is_none());
+        if masters.len() != 1 || events.iter().any(|e| e.uid != masters[0].uid) {
+            tracing::warn!(
+                "CalDAV PUT resource must hold one master VEVENT and only its own overrides"
+            );
+            return Err(FsError::Forbidden);
+        }
+        // The ReadWrite capability was already enforced at open() time.
+        let master = upsert_for(&self.user, masters[0]);
+        let overrides: Vec<_> = overrides
+            .iter()
+            .map(|e| upsert_for(&self.user, e))
+            .collect();
+        let result = db::ics_upsert::put_series(
+            &self.pool,
+            self.calendar.id,
+            self.user.id,
+            &self.name,
+            &master,
+            &overrides,
+            &zones,
+            &self.precondition,
+        )
+        .await;
+        let (event, _) = result.map_err(|e| {
+            tracing::warn!(error = %e, "CalDAV PUT failed to store event");
+            match e {
+                db::DbError::NotFound => FsError::NotFound,
+                // A failed etag/create-only precondition aborts the write
+                // transaction. FsError has no 412-mapping variant (dav-server's
+                // FsError -> status table lacks PreconditionFailed), so 403
+                // Forbidden is the closest existing error: the client sees the
+                // write refused and must refetch and retry.
+                db::DbError::Conflict(_) => FsError::Forbidden,
+                _ => FsError::GeneralFailure,
+            }
+        })?;
+        // New scheduled events fan out invitations.
+        db::scheduling::schedule_requests(&self.pool, event.id).await;
+        // Webhook triggers, same as the JSON API path.
+        let trigger = if matches!(
+            self.precondition,
+            db::ics_upsert::PutPrecondition::MatchEtag(_)
+        ) {
+            "event_updated"
+        } else {
+            "event_created"
+        };
+        if let Ok(webhooks) =
+            db::webhooks::matching_webhooks(&self.pool, self.calendar.tenant_id, trigger).await
+        {
+            for webhook in webhooks {
+                db::webhooks::enqueue_delivery(&self.pool, webhook.id, event.id, trigger)
+                    .await
+                    .ok();
+            }
+        }
+        self.new_meta = Some(Meta {
+            len: 0,
+            modified: event.updated_at.into(),
+            created: event.created_at.into(),
+            etag: event.etag.trim_matches('"').to_string(),
+            dir: false,
+            calendar: false,
+        });
+        Ok(())
+    }
+
+    /// VTODO PUT (ADR-015 D3/D8): the master is created or fully replaced with
+    /// the same If-Match precondition re-verification pattern the event
+    /// put_series uses; overrides that already exist are updated, completed
+    /// ones are written through the completion path (D8), and overrides
+    /// absent from the PUT are removed.
+    async fn flush_todo(
+        &mut self,
+        series: crate::ParsedTodoSeries,
+    ) -> std::result::Result<(), FsError> {
+        // Client-supplied VTIMEZONEs ride along to the calendar's zone table
+        // (ADR-012) so custom-zone tasks expand like events do.
+        if !series.timezones.is_empty() {
+            let zones: Vec<db::timezones::NewTimezone> = series
                 .timezones
                 .iter()
                 .map(|tz| db::timezones::NewTimezone {
@@ -804,78 +1107,248 @@ impl DavFile for WriteFile {
                     rules: tz.rules.clone(),
                 })
                 .collect();
-            // One resource = one UID: a master VEVENT plus its own overrides.
-            // (An override without its master, e.g. an invitation to a single
-            // occurrence, is not supported.)
-            let (masters, overrides): (Vec<_>, Vec<_>) = events
-                .iter()
-                .partition(|e| e.recurrence_id.is_none() && e.recurrence_id_date.is_none());
-            if masters.len() != 1 || events.iter().any(|e| e.uid != masters[0].uid) {
-                tracing::warn!(
-                    "CalDAV PUT resource must hold one master VEVENT and only its own overrides"
-                );
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| FsError::GeneralFailure)?;
+            db::timezones::upsert_for_calendar(&mut tx, self.calendar.id, &zones)
+                .await
+                .map_err(|_| FsError::GeneralFailure)?;
+            tx.commit().await.map_err(|_| FsError::GeneralFailure)?;
+        }
+        // ADR-012 reject-at-write for the task's own tzid: it must be a tzdb
+        // zone or resolvable from this PUT's zones or the calendar's stored
+        // ones — no silent UTC fallback.
+        let stored_zones: Vec<(String,)> =
+            sqlx::query_as("SELECT tzid FROM timezones WHERE calendar_id = $1")
+                .bind(self.calendar.id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|_| FsError::GeneralFailure)?;
+        let known: std::collections::HashSet<String> = series
+            .timezones
+            .iter()
+            .map(|z| z.tzid.clone())
+            .chain(stored_zones.into_iter().map(|(s,)| s))
+            .collect();
+        for todo in std::iter::once(&series.master).chain(&series.overrides) {
+            if let Some(tzid) = &todo.tzid
+                && !calendar_core::recurrence::is_tzdb_tzid(tzid)
+                && !known.contains(tzid)
+            {
+                tracing::warn!(tzid = %tzid, "CalDAV PUT task references an unknown timezone");
                 return Err(FsError::Forbidden);
             }
-            // The ReadWrite capability was already enforced at open() time.
-            let master = upsert_for(&self.user, masters[0]);
-            let overrides: Vec<_> = overrides
-                .iter()
-                .map(|e| upsert_for(&self.user, e))
-                .collect();
-            let result = db::ics_upsert::put_series(
-                &self.pool,
-                self.calendar.id,
-                self.user.id,
-                &self.name,
-                &master,
-                &overrides,
-                &zones,
-                &self.precondition,
-            )
-            .await;
-            let (event, _) = result.map_err(|e| {
-                tracing::warn!(error = %e, "CalDAV PUT failed to store event");
-                match e {
-                    db::DbError::NotFound => FsError::NotFound,
-                    // A failed etag/create-only precondition aborts the write
-                    // transaction. FsError has no 412-mapping variant (dav-server's
-                    // FsError -> status table lacks PreconditionFailed), so 403
-                    // Forbidden is the closest existing error: the client sees the
-                    // write refused and must refetch and retry.
-                    db::DbError::Conflict(_) => FsError::Forbidden,
-                    _ => FsError::GeneralFailure,
+        }
+        let mut data = crate::todo::new_task_data(&series.master).map_err(|e| {
+            tracing::warn!(error = %e, "CalDAV PUT task rejected");
+            FsError::Forbidden
+        })?;
+        // The resource is addressed by the client-chosen filename (D4).
+        data.href = Some(self.name.clone());
+        let patch = crate::todo::task_patch(&series.master).map_err(|e| {
+            tracing::warn!(error = %e, "CalDAV PUT task rejected");
+            FsError::Forbidden
+        })?;
+        let attendees: Vec<db::NewAttendee> = series
+            .master
+            .attendees
+            .iter()
+            .map(crate::todo::attendee)
+            .collect();
+        let alarms: Vec<db::alarms::NewAlarm> = series
+            .master
+            .alarms
+            .iter()
+            .map(crate::todo::alarm_data)
+            .collect();
+        // Existing/new is decided by href lookup, not by URL uuid; the etag
+        // captured at open() is re-verified inside the write transaction.
+        let existing = db::tasks::get_task_by_href(&self.pool, self.calendar.id, &self.name)
+            .await
+            .ok();
+        let master_id = match (existing, &self.precondition) {
+            (Some((task, etag)), precondition) => {
+                if matches!(precondition, db::ics_upsert::PutPrecondition::NotExists)
+                    || !precondition_matches(precondition, &etag)
+                {
+                    // A failed etag/create-only precondition aborts the write;
+                    // 403 is the closest FsError (see the event path note).
+                    return Err(FsError::Forbidden);
                 }
-            })?;
-            // New scheduled events fan out invitations.
-            db::scheduling::schedule_requests(&self.pool, event.id).await;
-            // Webhook triggers, same as the JSON API path.
-            let trigger = if matches!(
-                self.precondition,
-                db::ics_upsert::PutPrecondition::MatchEtag(_)
-            ) {
-                "event_updated"
-            } else {
-                "event_created"
-            };
-            if let Ok(webhooks) =
-                db::webhooks::matching_webhooks(&self.pool, self.calendar.tenant_id, trigger).await
-            {
-                for webhook in webhooks {
-                    db::webhooks::enqueue_delivery(&self.pool, webhook.id, event.id, trigger)
+                // A PUT replaces the resource. ponytail: TaskPatch cannot
+                // carry rrule/rdate/exdate/extra_props/COMPLETED, so those
+                // keep their stored values on update (and optional properties
+                // absent from the PUT are not cleared); a db-level
+                // put_task_series replaces this call when the data layer
+                // grows one.
+                db::tasks::update_task(&self.pool, task.id, Some(etag.trim_matches('"')), &patch)
+                    .await
+                    .map_err(put_err)?;
+                task.id
+            }
+            (None, _) => {
+                let (task, _) = db::tasks::create_task(
+                    &self.pool,
+                    self.calendar.id,
+                    self.user.id,
+                    &attendees,
+                    &alarms,
+                    &data,
+                )
+                .await
+                .map_err(put_err)?;
+                task.id
+            }
+        };
+        self.apply_task_overrides(master_id, &series.overrides)
+            .await?;
+        // Override writes bump the master's etag; the resource validator is
+        // the master's final one.
+        let (task, _) = db::tasks::get_task(&self.pool, master_id)
+            .await
+            .map_err(fs_err)?;
+        self.new_meta = Some(Meta {
+            len: 0,
+            modified: task.updated_at.into(),
+            created: task.created_at.into(),
+            etag: task.etag.trim_matches('"').to_string(),
+            dir: false,
+            calendar: false,
+        });
+        Ok(())
+    }
+
+    /// Syncs the PUT's override set (D3: the resource is the series).
+    async fn apply_task_overrides(
+        &self,
+        master_id: Uuid,
+        overrides: &[crate::ParsedTodo],
+    ) -> std::result::Result<(), FsError> {
+        let existing = db::tasks::list_overrides(&self.pool, master_id)
+            .await
+            .map_err(fs_err)?;
+        for parsed in overrides {
+            let patch = crate::todo::task_patch(parsed).map_err(|_| FsError::Forbidden)?;
+            match existing.iter().find(|o| {
+                o.recurrence_id == parsed.recurrence_id
+                    && o.recurrence_id_date == parsed.recurrence_id_date
+            }) {
+                Some(row) => {
+                    db::tasks::update_task(&self.pool, row.id, None, &patch)
                         .await
-                        .ok();
+                        .map_err(put_err)?;
+                }
+                None if parsed.status.as_deref() == Some("COMPLETED") => {
+                    // D8 recurring completion on the wire: write through the
+                    // completion path, which creates the override.
+                    let occurrence = match (parsed.recurrence_id, parsed.recurrence_id_date) {
+                        (Some(at), _) => db::tasks::Occurrence::Timed(at),
+                        (None, Some(date)) => db::tasks::Occurrence::AllDay(date),
+                        (None, None) => continue,
+                    };
+                    db::tasks::complete_task(&self.pool, master_id, Some(occurrence), self.user.id)
+                        .await
+                        .map_err(put_err)?;
+                }
+                None => {
+                    // ponytail: NewTaskData has no master_task_id, so the db
+                    // layer cannot insert arbitrary overrides yet; non-completed
+                    // ones are dropped until it can.
+                    tracing::warn!(
+                        "CalDAV PUT task override could not be stored (no existing override row)"
+                    );
                 }
             }
-            self.new_meta = Some(Meta {
-                len: 0,
-                modified: event.updated_at.into(),
-                created: event.created_at.into(),
-                etag: event.etag.trim_matches('"').to_string(),
-                dir: false,
-                calendar: false,
-            });
-            Ok(())
-        })
+        }
+        // Overrides removed from the PUT disappear (resource-is-a-series).
+        for row in existing.iter().filter(|o| {
+            !overrides.iter().any(|p| {
+                p.recurrence_id == o.recurrence_id && p.recurrence_id_date == o.recurrence_id_date
+            })
+        }) {
+            db::tasks::delete_task(&self.pool, row.id, None)
+                .await
+                .map_err(put_err)?;
+        }
+        Ok(())
+    }
+
+    /// VJOURNAL PUT (D9): one component per resource, no overrides.
+    async fn flush_journal(
+        &mut self,
+        parsed: crate::ParsedJournal,
+    ) -> std::result::Result<(), FsError> {
+        let mut data = crate::journal::new_journal_data(&parsed).map_err(|e| {
+            tracing::warn!(error = %e, "CalDAV PUT journal rejected");
+            FsError::Forbidden
+        })?;
+        let patch = crate::journal::journal_patch(&parsed);
+        // The resource is addressed by the client-chosen filename (D4).
+        data.href = Some(self.name.clone());
+        let (journal, _) =
+            match db::journals::get_journal_by_href(&self.pool, self.calendar.id, &self.name).await
+            {
+                Ok((journal, etag)) => {
+                    if !precondition_matches(&self.precondition, &etag) {
+                        return Err(FsError::Forbidden);
+                    }
+                    db::journals::update_journal(
+                        &self.pool,
+                        journal.id,
+                        Some(etag.trim_matches('"')),
+                        &patch,
+                    )
+                    .await
+                    .map_err(put_err)?
+                }
+                Err(db::DbError::NotFound) => {
+                    db::journals::create_journal(&self.pool, self.calendar.id, self.user.id, &data)
+                        .await
+                        .map_err(put_err)?
+                }
+                Err(_) => return Err(FsError::GeneralFailure),
+            };
+        self.new_meta = Some(Meta {
+            len: 0,
+            modified: journal.updated_at.into(),
+            created: journal.created_at.into(),
+            etag: journal.etag.trim_matches('"').to_string(),
+            dir: false,
+            calendar: false,
+        });
+        Ok(())
+    }
+}
+
+/// True when the captured PUT precondition still holds for `etag` (None and
+/// MatchEtag both pass; NotExists was rejected before this check).
+fn precondition_matches(precondition: &db::ics_upsert::PutPrecondition, etag: &str) -> bool {
+    match precondition {
+        db::ics_upsert::PutPrecondition::MatchEtag(expected) => {
+            constant_time_eq(expected.trim_matches('"'), etag.trim_matches('"'))
+        }
+        _ => true,
+    }
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+fn put_err(e: db::DbError) -> FsError {
+    tracing::warn!(error = %e, "CalDAV PUT failed to store object");
+    match e {
+        db::DbError::NotFound => FsError::NotFound,
+        db::DbError::Conflict(_) => FsError::Forbidden,
+        _ => FsError::GeneralFailure,
     }
 }
 

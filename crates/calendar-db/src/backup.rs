@@ -1,7 +1,8 @@
 //! Portable application backup/restore (docs/PRD.md section 20): a JSON
 //! document covering tenants, users, memberships, calendars, ACLs, locations,
 //! events (masters and RECURRENCE-ID exceptions with their real organizer),
-//! attendees, alarms, attachments, public shares, subscriptions, rules,
+//! tasks (same shape) and journals, attendees and alarms for both,
+//! attachments, public shares, subscriptions, rules,
 //! notification providers (encrypted config as-is, never decrypted),
 //! notifications, the category registry, CardDAV address books and contacts,
 //! push subscriptions, and the user reminder opt-out columns.
@@ -312,6 +313,137 @@ const TABLES: &[TableSpec] = &[
         filter: "WHERE event_id IN (SELECT id FROM events WHERE deleted_at IS NULL)",
         defaults: &[],
     },
+    // Masters and RECURRENCE-ID exceptions share the tasks table; the importer
+    // inserts masters first so master_task_id FKs resolve. origin_id (the
+    // delivered-copy link, like events) is deliberately not carried: it is a
+    // scheduling-runtime pointer, not user data.
+    TableSpec {
+        table: "tasks",
+        columns: &[
+            "id",
+            "calendar_id",
+            "uid",
+            "master_task_id",
+            "recurrence_id",
+            "recurrence_id_date",
+            "starts_at",
+            "start_date",
+            "due_at",
+            "due_date",
+            "duration",
+            "tzid",
+            "floating",
+            "completed_at",
+            "rrule",
+            "rdate",
+            "exdate",
+            "summary",
+            "description_html",
+            "description_text",
+            "url",
+            "location",
+            "status",
+            "percent_complete",
+            "priority",
+            "class",
+            "categories",
+            "parent_uid",
+            "sort_order",
+            "extra_props",
+            "organizer_user_id",
+            "organizer_email",
+            "organizer_name",
+            "sequence",
+            "etag",
+            "created_by",
+            "href",
+        ],
+        filter: "WHERE deleted_at IS NULL",
+        defaults: &[
+            ("floating", JsonDefault::Bool(false)),
+            ("categories", JsonDefault::List(&[])),
+            ("rdate", JsonDefault::List(&[])),
+            ("exdate", JsonDefault::List(&[])),
+            ("summary", JsonDefault::Str("")),
+            ("sequence", JsonDefault::Int(0)),
+            ("etag", JsonDefault::Str("")),
+        ],
+    },
+    TableSpec {
+        table: "task_attendees",
+        columns: &[
+            "id",
+            "task_id",
+            "user_id",
+            "contact_id",
+            "email",
+            "display_name",
+            "telephone",
+            "role",
+            "partstat",
+            "rsvp",
+            "schedule_status",
+        ],
+        filter: "WHERE task_id IN (SELECT id FROM tasks WHERE deleted_at IS NULL)",
+        defaults: &[
+            ("role", JsonDefault::Str("REQ-PARTICIPANT")),
+            ("partstat", JsonDefault::Str("NEEDS-ACTION")),
+        ],
+    },
+    TableSpec {
+        table: "task_alarms",
+        columns: &[
+            "id",
+            "task_id",
+            "action",
+            "related",
+            "offset_interval",
+            "trigger_at",
+            "description",
+            "summary",
+            "recipient_emails",
+            "notify_channels",
+        ],
+        filter: "WHERE task_id IN (SELECT id FROM tasks WHERE deleted_at IS NULL)",
+        defaults: &[(
+            "notify_channels",
+            JsonDefault::List(&["in_app", "email", "sms", "push"]),
+        )],
+    },
+    // Journals: one row per resource; the floating/undated columns ride along
+    // (an undated journal is a note with no DTSTART at all).
+    TableSpec {
+        table: "journals",
+        columns: &[
+            "id",
+            "calendar_id",
+            "uid",
+            "href",
+            "starts_at",
+            "start_date",
+            "tzid",
+            "floating",
+            "summary",
+            "description_html",
+            "description_text",
+            "url",
+            "status",
+            "class",
+            "categories",
+            "extra_props",
+            "sequence",
+            "etag",
+            "created_by",
+        ],
+        filter: "WHERE deleted_at IS NULL",
+        defaults: &[
+            ("floating", JsonDefault::Bool(false)),
+            ("categories", JsonDefault::List(&[])),
+            ("summary", JsonDefault::Str("")),
+            ("sequence", JsonDefault::Int(0)),
+            ("etag", JsonDefault::Str("")),
+        ],
+    },
     TableSpec {
         table: "calendar_acl",
         columns: &[
@@ -448,13 +580,18 @@ pub async fn import(pool: &PgPool, document: &Value) -> Result<(), DbError> {
             .get(spec.table)
             .and_then(Value::as_array)
             .unwrap_or(&empty);
-        if spec.table == "events" {
+        if matches!(spec.table, "events" | "tasks") {
             // Masters first, then live RECURRENCE-ID exceptions, so the
-            // self-referencing master_event_id FK resolves within the batch.
+            // self-referencing master FK resolves within the batch.
+            let master_key = if spec.table == "events" {
+                "master_event_id"
+            } else {
+                "master_task_id"
+            };
             let (masters, exceptions): (Vec<Value>, Vec<Value>) = rows
                 .iter()
                 .cloned()
-                .partition(|row| row.get("master_event_id").is_none_or(Value::is_null));
+                .partition(|row| row.get(master_key).is_none_or(Value::is_null));
             restore_table(&mut tx, spec, &masters).await?;
             restore_table(&mut tx, spec, &exceptions).await?;
         } else {
@@ -551,6 +688,34 @@ mod backup_tests {
                  data) \
              VALUES ('{at}', '{e1}', 'notes.txt', 'text/plain', 5, '0123456789abcdef'::bytea, \
                  'hello'); \
+             INSERT INTO tasks (id, calendar_id, uid, href, due_at, summary, description_text, \
+                 status, percent_complete, priority, class, categories, extra_props, rrule, \
+                 organizer_email, sequence, etag) \
+             VALUES ('{tk1}', '{c}', 'write-report', 'write-report.ics', \
+                 '2026-09-22T17:00:00+00:00', 'Write the report', 'quarterly numbers', \
+                 'IN-PROCESS', 40, 5, 'PUBLIC', '{{work}}', \
+                 '[{{\"name\": \"X-TEST\", \"value\": \"1\"}}]', 'FREQ=WEEKLY', \
+                 'alice@example.com', 2, 'tetag-1'); \
+             INSERT INTO tasks (id, calendar_id, uid, master_task_id, recurrence_id, due_at, \
+                 summary) \
+             VALUES ('{tk2}', '{c}', 'write-report', '{tk1}', '2026-09-29 17:00:00', \
+                 '2026-09-29T18:00:00+00:00', 'Write the report (moved)'); \
+             INSERT INTO tasks (id, calendar_id, uid, summary, status, parent_uid, sort_order) \
+             VALUES ('{tk3}', '{c}', 'collect-numbers', 'Collect the numbers', 'NEEDS-ACTION', \
+                 'write-report', 1); \
+             INSERT INTO task_attendees (id, task_id, email, display_name, role, partstat, rsvp) \
+             VALUES ('{ta1}', '{tk1}', 'carol@example.com', 'Carol', 'REQ-PARTICIPANT', \
+                 'TENTATIVE', true); \
+             INSERT INTO task_alarms (id, task_id, action, related, offset_interval, description, \
+                 notify_channels) \
+             VALUES ('{tal}', '{tk1}', 'DISPLAY', 'END', '-01:00:00', 'Report due soon', \
+                 '{{email,sms}}'); \
+             INSERT INTO journals (id, calendar_id, uid, summary, description_text, status, \
+                 class, extra_props) \
+             VALUES ('{jn1}', '{c}', 'note-1', 'Meeting notes', 'discussed the budget', \
+                 'FINAL', 'PUBLIC', '[{{\"name\": \"X-NOTE\", \"value\": \"keep\"}}]'); \
+             INSERT INTO journals (id, calendar_id, uid, start_date, summary, status, categories) \
+             VALUES ('{jn2}', '{c}', 'note-2', '2026-09-20', 'Day one', 'DRAFT', '{{work}}'); \
              INSERT INTO public_shares (id, calendar_id, token_hash, allows_caldav, created_by) \
              VALUES ('{s}', '{c}', 'aabbcc'::bytea, true, '{u}'); \
              INSERT INTO subscriptions (id, user_id, share_id, color, order_index) \
@@ -590,7 +755,14 @@ mod backup_tests {
             b = uid(0x1f),
             ct = uid(0x20),
             ce = uid(0x21),
-            ct2 = uid(0x22)
+            ct2 = uid(0x22),
+            tk1 = uid(0x23),
+            tk2 = uid(0x24),
+            tk3 = uid(0x25),
+            ta1 = uid(0x26),
+            tal = uid(0x27),
+            jn1 = uid(0x28),
+            jn2 = uid(0x29)
         );
         for statement in sql.split(';').filter(|s| !s.trim().is_empty()) {
             sqlx::query(statement).execute(pool).await.unwrap();
@@ -641,6 +813,10 @@ mod backup_tests {
             document["notification_providers"].as_array().unwrap().len(),
             1
         );
+        assert_eq!(document["tasks"].as_array().unwrap().len(), 3);
+        assert_eq!(document["journals"].as_array().unwrap().len(), 2);
+        assert_eq!(document["task_attendees"].as_array().unwrap().len(), 1);
+        assert_eq!(document["task_alarms"].as_array().unwrap().len(), 1);
         import(&db_b, &document).await.unwrap();
 
         // (user, tenant, calendar, location, events, ...) ids from the seed.
@@ -750,6 +926,104 @@ mod backup_tests {
                 .unwrap();
         assert_eq!(config, b"cipherbytes");
 
+        // The task master keeps due, status, percent, categories and its
+        // extra_props verbatim (the private-data escape hatch).
+        let (due, status, percent, cats, extras): (
+            chrono::DateTime<chrono::Utc>,
+            String,
+            i16,
+            Vec<String>,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT due_at, status, percent_complete, categories, extra_props
+             FROM tasks WHERE id = $1",
+        )
+        .bind(uid(0x23))
+        .fetch_one(&db_b)
+        .await
+        .unwrap();
+        assert_eq!(due.to_rfc3339(), "2026-09-22T17:00:00+00:00");
+        assert_eq!(
+            (status.as_str(), percent, cats),
+            ("IN-PROCESS", 40, vec!["work".to_string()])
+        );
+        assert_eq!(
+            extras,
+            serde_json::json!([{"name": "X-TEST", "value": "1"}])
+        );
+
+        // The task's RECURRENCE-ID override reattaches to its master.
+        let (master, recurrence_id): (Uuid, chrono::NaiveDateTime) =
+            sqlx::query_as("SELECT master_task_id, recurrence_id FROM tasks WHERE id = $1")
+                .bind(uid(0x24))
+                .fetch_one(&db_b)
+                .await
+                .unwrap();
+        assert_eq!(master, uid(0x23));
+        assert_eq!(
+            recurrence_id,
+            chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 9, 29).unwrap(),
+                chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+            )
+        );
+
+        // The subtask keeps its raw parent_uid chain and manual order.
+        let (parent, sort_order): (String, i64) =
+            sqlx::query_as("SELECT parent_uid, sort_order FROM tasks WHERE id = $1")
+                .bind(uid(0x25))
+                .fetch_one(&db_b)
+                .await
+                .unwrap();
+        assert_eq!((parent.as_str(), sort_order), ("write-report", 1));
+
+        // Task attendee and alarm (related END = DUE) survive exactly.
+        let partstat: String = sqlx::query_scalar(
+            "SELECT partstat FROM task_attendees WHERE task_id = $1 AND email = 'carol@example.com'",
+        )
+        .bind(uid(0x23))
+        .fetch_one(&db_b)
+        .await
+        .unwrap();
+        assert_eq!(partstat, "TENTATIVE");
+        let (offset, channels): (PgInterval, Vec<String>) = sqlx::query_as(
+            "SELECT offset_interval, notify_channels FROM task_alarms WHERE id = $1",
+        )
+        .bind(uid(0x27))
+        .fetch_one(&db_b)
+        .await
+        .unwrap();
+        assert_eq!(offset.microseconds, -3_600_000_000);
+        assert_eq!(channels, vec!["email".to_string(), "sms".to_string()]);
+
+        // The undated journal stays undated (a note) with its extra_props;
+        // the dated one keeps its DATE-valued DTSTART.
+        let (starts_at, start_date, jstatus, jextras): (
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::NaiveDate>,
+            String,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT starts_at, start_date, status, extra_props FROM journals WHERE uid = 'note-1'",
+        )
+        .fetch_one(&db_b)
+        .await
+        .unwrap();
+        assert_eq!(
+            (starts_at.is_none(), start_date.is_none(), jstatus.as_str()),
+            (true, true, "FINAL")
+        );
+        assert_eq!(
+            jextras,
+            serde_json::json!([{"name": "X-NOTE", "value": "keep"}])
+        );
+        let day: chrono::NaiveDate =
+            sqlx::query_scalar("SELECT start_date FROM journals WHERE uid = 'note-2'")
+                .fetch_one(&db_b)
+                .await
+                .unwrap();
+        assert_eq!(day, chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap());
+
         // User prefs and share/subscription/rule/category/contact counts.
         let (tz, notify_email): (Option<String>, bool) =
             sqlx::query_as("SELECT timezone, notify_email FROM users WHERE id = $1")
@@ -774,6 +1048,10 @@ mod backup_tests {
             ("event_attendees", 2),
             ("event_alarms", 1),
             ("attachments", 1),
+            ("tasks", 3),
+            ("task_attendees", 1),
+            ("task_alarms", 1),
+            ("journals", 2),
             ("tenant_members", 1),
         ] {
             let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
