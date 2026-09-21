@@ -486,11 +486,11 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" \
   -X POST "$BASE/api/auth/webauthn/register/finish" -d '{"challenge_id":"00000000-0000-0000-0000-000000000000"}')
 [ "$CODE" = 400 ] || [ "$CODE" = 422 ] || fail "register/finish should reject an unknown challenge (400/422), got $CODE"
 
-step "Web UI: /rules, /admin and /providers pages exist (admin-gated since 00a9e13/3275b18)"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/rules")
-[ "$CODE" = 303 ] || fail "anonymous /rules should redirect, got $CODE"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" "$BASE/rules")
-[ "$CODE" = 200 ] || fail "/rules page, got $CODE"
+step "Web UI: /rules redirects to its index tab; /admin and /providers pages exist (admin-gated since 00a9e13/3275b18)"
+OUT=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -b "$DATA/admin.jar" "$BASE/rules")
+[ "$OUT" = "303 $BASE/?tab=rules" ] || fail "/rules should 303 to /?tab=rules, got $OUT"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" "$BASE/?tab=rules")
+[ "$CODE" = 200 ] || fail "/?tab=rules page, got $CODE"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" "$BASE/admin")
 [ "$CODE" = 200 ] || fail "/admin page, got $CODE"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/admin.jar" "$BASE/providers")
@@ -626,9 +626,9 @@ curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H "If-Match: $ETA
   | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['categories']==['holiday'], d['categories']" \
   || fail "PATCH did not apply categories"
 
-step "/categories page exists"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/categories")
-[ "$CODE" = 200 ] || fail "/categories page, got $CODE"
+step "/categories redirects to its index tab"
+OUT=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/categories")
+[ "$OUT" = "303 $BASE/?tab=categories" ] || fail "/categories should 303 to /?tab=categories, got $OUT"
 
 # ============ 6. admin user management ============
 step "Attachment round-trip: upload, list, download, meta, delete"
