@@ -4,7 +4,6 @@ members = [
   "crates/calendar-server",
   "crates/calendar-core",
   "crates/calendar-db",
-  "crates/calendar-api",
   "crates/calendar-caldav",
   "crates/calendar-carddav",
   "crates/calendar-auth",

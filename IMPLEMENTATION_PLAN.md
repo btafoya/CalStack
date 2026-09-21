@@ -52,9 +52,9 @@
 
 ## Stage 5: Delete legacy doc + response-schema validation in interop
 
-**Goal**: Retire `openapi_document()`, `json_response`, `param` and the calendar-api crate's doc code; interop suite starts validating live responses against generated schemas.
+**Goal**: Retire the legacy fragment entirely and interop suite starts validating live responses against generated schemas.
 **Success Criteria**:
 - `openapi_document()` deleted; nothing references it.
 - Interop harness validates a sample of live responses (calendar list, event CRUD round-trip, task, webhook, audit) against the generated response schemas; any mismatch fails the suite.
 **Tests**: full interop run with response validation enabled; the completeness test now asserts `ApiDoc` paths == the full pinned inventory (deleting an annotation or handler fails CI).
-**Status**: Not Started
+**Status**: Complete (commit pending; `crates/calendar-api` deleted entirely — the fragment's info/security moved into the ApiDoc derive via a `Modify` impl. Security schemes: sessionCookie (cookie apiKey) + bearerToken (http bearer), declared as global alternatives. Response validation: `tests/interop/validate_responses.py` (minimal 3.1 subset validator) + a run.sh step validating 11 live responses; it caught its first real mismatch immediately (rdate/exdate are JSON arrays, schemas said freeform objects — fixed). Served doc: 3.1.0, 69 paths, 112 schemas)
