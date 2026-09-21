@@ -9,7 +9,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use calendar_db::{self as db};
+use calendar_db::{self as db, scheduling::SubjectKind};
 use chrono::{DateTime, NaiveDate, Utc};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -325,6 +325,9 @@ async fn create_task(
     let (task, etag) =
         db::tasks::create_task(&pool, calendar_id, auth.user.id, &attendees, &alarms, &data)
             .await?;
+    // Scheduling dispatch (stage 8c): copies for internal assignees, REQUEST
+    // intents for external ones.
+    db::scheduling::dispatch(&pool, SubjectKind::Task, task.id, auth.user.id).await?;
     let next_open = if task.rrule.is_some() {
         db::tasks::next_open(&pool, task.id, 90).await?
     } else {
@@ -533,6 +536,43 @@ async fn patch_task(
     )
     .await?;
     validate_task_patch(&body)?;
+    // A delivered copy accepts only the assignee's own PARTSTAT; everything
+    // else is discarded (the organizer's next dispatch rebuilds the copy).
+    if let Some(origin_id) = db::scheduling::origin_of(&pool, SubjectKind::Task, task_id).await? {
+        let email = db::scheduling::attendee_email_for_user(
+            &pool,
+            SubjectKind::Task,
+            task_id,
+            auth.user.id,
+        )
+        .await?
+        .ok_or(AppError::Forbidden)?;
+        let partstat = body
+            .attendees
+            .unwrap_or_default()
+            .into_iter()
+            .find(|a| {
+                a.user_id == Some(auth.user.id)
+                    || a.email
+                        .as_deref()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(&auth.user.email))
+            })
+            .and_then(|a| a.partstat)
+            .ok_or_else(|| {
+                AppError::BadRequest("a delivered copy accepts only your own PARTSTAT".into())
+            })?;
+        db::scheduling::reply(&pool, SubjectKind::Task, origin_id, &email, &partstat).await?;
+        let (task, etag) = db::tasks::get_task(&pool, task_id).await?;
+        let (next_open, subtasks_count) = task_extras(&pool, &task).await?;
+        return Ok(Json(task_view(
+            &task,
+            &etag,
+            &db::tasks::list_task_attendees(&pool, task.id).await?,
+            &db::tasks::list_task_alarms(&pool, task.id).await?,
+            next_open,
+            subtasks_count,
+        )));
+    }
     let patch = db::tasks::TaskPatch {
         summary: Some(body.summary),
         description_html: body
@@ -569,6 +609,8 @@ async fn patch_task(
     };
     let (task, etag) =
         db::tasks::update_task(&pool, task_id, if_match.0.as_deref(), &patch).await?;
+    // Scheduling dispatch: copies rebuilt, updated REQUESTs / removal CANCELs.
+    db::scheduling::dispatch(&pool, SubjectKind::Task, task.id, auth.user.id).await?;
     let (next_open, subtasks_count) = task_extras(&pool, &task).await?;
     fire_task_hooks(
         &pool,
@@ -604,7 +646,17 @@ async fn delete_task(
         calendar_core::CalendarCapability::ReadWrite,
     )
     .await?;
+    // Deleting a delivered copy is a decline: DECLINED on the origin, copy
+    // soft-deleted. Deleting the organizer's row cancels for everyone.
+    if db::scheduling::origin_of(&pool, SubjectKind::Task, task_id)
+        .await?
+        .is_some()
+    {
+        db::scheduling::decline_copy(&pool, SubjectKind::Task, task_id, auth.user.id).await?;
+        return Ok(Json(serde_json::json!({"ok": true, "deleted": 1})));
+    }
     let n = db::tasks::delete_task(&pool, task_id, if_match.0.as_deref()).await?;
+    db::scheduling::dispatch_cancel(&pool, SubjectKind::Task, existing.id, auth.user.id).await?;
     if let Ok(cal) = db::get_calendar(&pool, existing.calendar_id).await {
         crate::rules_api::run_rules(
             &pool,
