@@ -1050,6 +1050,7 @@
     if (state.editingMode !== 'occurrence' && !state.editingRruleUnknown) {
       body.rrule = buildRrule();
     }
+    var req;
     if (state.editingMode === 'occurrence') {
       // A RECURRENCE-ID exception for just this occurrence; the server
       // derives the wall-clock RECURRENCE-ID from the occurrence instant.

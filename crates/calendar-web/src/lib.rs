@@ -867,7 +867,7 @@ const APP_PAGE_HEAD: &str = concat!(
 <script src="/assets/js/journals.js?v=17"></script>
 <script src="/assets/js/rules.js?v=17"></script>
 <script src="/assets/js/categories.js?v=17"></script>
-<script src="/assets/js/app.js?v=19"></script>
+<script src="/assets/js/app.js?v=20"></script>
 </body></html>"#
 );
 
