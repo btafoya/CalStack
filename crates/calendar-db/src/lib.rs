@@ -1587,9 +1587,15 @@ mod migration_tests {
             .ensure_migrations_table()
             .await
             .unwrap();
-        // Partial history: apply every migration except the last three, by
-        // hand, recording them exactly as the migrator would.
-        let cutoff = migrator.migrations.len() - 4;
+        // Partial history: apply every migration before 0014 (notify claim)
+        // by hand, recording them exactly as the migrator would. Anchored on
+        // the migration version, not a count — a count shifts every time a
+        // new migration lands (which is exactly how this test broke).
+        let cutoff = migrator
+            .migrations
+            .iter()
+            .position(|m| m.version == 14)
+            .expect("migration 0014 not found");
         for migration in &migrator.migrations[..cutoff] {
             let mut tx = pool.begin().await.unwrap();
             // raw_sql, not a prepared statement: migration files hold many
