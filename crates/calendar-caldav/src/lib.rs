@@ -7,7 +7,7 @@ pub mod journal;
 pub mod store;
 pub mod todo;
 
-pub use adapter::{DavAuth, PgDavFs};
+pub use adapter::{DavAuth, PgDavFs, upsert_for};
 pub use journal::{ParsedJournal, journal_to_ics};
 pub(crate) use store::upsert_data;
 pub use todo::{ParsedTodo, ParsedTodoSeries, TaskExportRow, todos_to_ics};

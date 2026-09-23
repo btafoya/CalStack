@@ -437,6 +437,9 @@ const APP_PAGE_HEAD: &str = concat!(
         <li class="nav-item"><button class="nav-link" id="tab-btn-rules" data-tab="rules" data-bs-toggle="tab" data-bs-target="#tab-rules" type="button" role="tab" hidden>Rules</button></li>
         </ul>
         <button id="share-btn" class="btn btn-outline-secondary btn-sm ms-2" type="button" title="Sharing and access for this calendar"><i class="bi bi-share"></i></button>
+        <button id="import-btn" class="btn btn-outline-secondary btn-sm ms-2" type="button" title="Import an .ics file into this calendar"><i class="bi bi-upload"></i></button>
+        <button id="export-btn" class="btn btn-outline-secondary btn-sm ms-2" type="button" title="Download this calendar as .ics"><i class="bi bi-download"></i></button>
+        <input type="file" id="ics-import-input" accept=".ics,text/calendar" hidden>
       </div>
       <div class="tab-content">
         <div class="tab-pane fade show active" id="tab-calendar" role="tabpanel">
@@ -562,6 +565,10 @@ const APP_PAGE_HEAD: &str = concat!(
         <div class="form-check"><input class="form-check-input" type="checkbox" id="cal-comp-vjournal" value="VJOURNAL">
           <label class="form-check-label" for="cal-comp-vjournal">Journals</label></div>
         <p class="text-body-secondary small mb-0 mt-1">Removing a type that still has items is refused by the server.</p>
+      </div>
+      <div class="mb-3"><label class="form-label" for="cal-source">Subscribe to remote .ics URL</label>
+        <input class="form-control" id="cal-source" type="url" placeholder="https://example.com/calendar.ics">
+        <p class="text-body-secondary small mb-0 mt-1">The calendar becomes read-only and syncs automatically.</p>
       </div>
     </div>
     <div class="modal-footer">

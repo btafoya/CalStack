@@ -166,6 +166,8 @@ pub struct Config {
     pub retention_days: i64,
     /// Google Places API key; enables place autocomplete in the web UI.
     pub places_api_key: Option<String>,
+    /// Cap on a single ICS import/upload body (also the remote-sync fetch cap).
+    pub import_max_bytes: i64,
 }
 
 impl Config {
@@ -192,6 +194,9 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
             places_api_key: env("GOOGLE_MAPS_API_KEY").filter(|k| !k.is_empty()),
+            import_max_bytes: env("IMPORT_MAX_BYTES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10 * 1024 * 1024),
         })
     }
 }
@@ -543,6 +548,8 @@ mod tests {
             ("/api/calendars/{id}", "delete"),
             ("/api/calendars/{id}/acl", "get"),
             ("/api/calendars/{id}/acl", "put"),
+            ("/api/calendars/{id}/export.ics", "get"),
+            ("/api/calendars/{id}/import", "post"),
             ("/api/calendars/{id}/events", "post"),
             ("/api/calendars/{id}/events", "get"),
             ("/api/calendars/{id}/occurrences", "get"),

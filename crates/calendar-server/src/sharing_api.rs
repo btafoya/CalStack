@@ -13,9 +13,10 @@ use axum::{
 };
 use calendar_caldav::ExportRow;
 use calendar_core::CalendarCapability;
-use calendar_db::{self as db};
+use calendar_db::{self as db, DbError};
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 // ============ share management ============
@@ -361,39 +362,50 @@ fn vjournal_text(journal: &db::journals::JournalRow) -> String {
 /// data and PRIVATE/CONFIDENTIAL events are withheld (privacy rules); PUBLIC
 /// (or unclassified) tasks and journals are appended as minimal VTODO /
 /// VJOURNAL components without extra_props, attendees or alarms.
-pub(crate) async fn public_feed(
-    State(AppState { pool, .. }): State<AppState>,
-    Path(token): Path<String>,
-) -> axum::response::Response {
-    let Some(share) = db::sharing::find_live_share(&pool, &calendar_auth::sha256(token.as_bytes()))
-        .await
-        .ok()
-    else {
-        return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
+/// Whole-calendar ICS. `for_public` = the anonymous share feed (private
+/// classes withheld, no attendee PII); otherwise the authenticated export
+/// with attendees and every event.
+pub(crate) async fn build_calendar_ics(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    for_public: bool,
+) -> Result<String, DbError> {
+    let (rows, tasks, journals) = if for_public {
+        (
+            db::sharing::list_public_events(pool, calendar_id).await,
+            db::sharing::list_public_tasks(pool, calendar_id).await,
+            db::sharing::list_public_journals(pool, calendar_id).await,
+        )
+    } else {
+        (
+            db::sharing::list_export_events(pool, calendar_id).await,
+            db::sharing::list_export_tasks(pool, calendar_id).await,
+            db::sharing::list_export_journals(pool, calendar_id).await,
+        )
     };
-    let (rows, tasks, journals) = (
-        db::sharing::list_public_events(&pool, share.calendar_id).await,
-        db::sharing::list_public_tasks(&pool, share.calendar_id).await,
-        db::sharing::list_public_journals(&pool, share.calendar_id).await,
-    );
     let (rows, tasks, journals) = match (rows, tasks, journals) {
         (Ok(r), Ok(t), Ok(j)) => (r, t, j),
-        _ => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "feed failed").into_response(),
+        _ => return Err(DbError::Conflict("calendar feed query failed".into())),
     };
     // Client-supplied VTIMEZONEs ride along so TZID-qualified events stay
-    // interpretable in the public feed (ADR-012).
-    let zones = db::timezones::list_for_calendar(&pool, share.calendar_id)
+    // interpretable (ADR-012).
+    let zones = db::timezones::list_for_calendar(pool, calendar_id)
         .await
         .unwrap_or_default();
     let mut exports: Vec<ExportRow> = Vec::new();
     for event in rows {
         // No attendee PII in public feeds.
-        let alarms = db::alarms::list_alarms(&pool, event.id)
+        let attendees = if for_public {
+            vec![]
+        } else {
+            db::list_attendees(pool, event.id).await.unwrap_or_default()
+        };
+        let alarms = db::alarms::list_alarms(pool, event.id)
             .await
             .unwrap_or_default();
-        let location = db::location_for_event(&pool, &event).await;
+        let location = db::location_for_event(pool, &event).await;
         exports.push(ExportRow {
-            attendees: vec![],
+            attendees,
             event,
             alarms,
             location,
@@ -411,15 +423,31 @@ pub(crate) async fn public_feed(
     {
         ics.insert_str(pos, &extras);
     }
-    (
-        axum::http::StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/calendar; charset=utf-8",
-        )],
-        ics,
-    )
-        .into_response()
+    Ok(ics)
+}
+
+pub(crate) async fn public_feed(
+    State(AppState { pool, .. }): State<AppState>,
+    Path(token): Path<String>,
+) -> axum::response::Response {
+    let Some(share) = db::sharing::find_live_share(&pool, &calendar_auth::sha256(token.as_bytes()))
+        .await
+        .ok()
+    else {
+        return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    match build_calendar_ics(&pool, share.calendar_id, true).await {
+        Ok(ics) => (
+            axum::http::StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/calendar; charset=utf-8",
+            )],
+            ics,
+        )
+            .into_response(),
+        Err(_) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "feed failed").into_response(),
+    }
 }
 
 // ============ router ============

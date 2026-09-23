@@ -437,6 +437,10 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                     }
                     if options.write {
                         capability_guard(cap, CalendarCapability::ReadWrite)?;
+                        // Subscribed calendars are fed by ics_sync; client writes.
+                        if cal.source_url.is_some() {
+                            return Err(FsError::Forbidden);
+                        }
                         let existing = self.object_at(cal.id, &name).await;
                         let exists = match &existing {
                             Ok(Some(object)) if object.deleted_at.is_none() => true,
@@ -694,6 +698,12 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                 Location::Object(slug, name) => {
                     let (cal, cap) = self.calendar_by_slug(creds, &slug).await?;
                     capability_guard(cap, CalendarCapability::ReadWrite)?;
+                    // Subscribed calendars are fed by ics_sync; client deletes
+                    // would be resurrected on the next pass. Deleting the
+                    // calendar itself (Owner) remains the unsubscribe path.
+                    if cal.source_url.is_some() {
+                        return Err(FsError::Forbidden);
+                    }
                     let Some(object) = self.object_at(cal.id, &name).await? else {
                         return Err(FsError::NotFound);
                     };
@@ -1540,7 +1550,10 @@ fn put_err(e: db::DbError) -> FsError {
 
 /// Storage record for one parsed VEVENT written by `user`. organizer_email is
 /// NOT NULL: an organizer-less VEVENT PUTs as owned by the writer.
-fn upsert_for(user: &db::UserRow, parsed: &crate::ParsedEvent) -> db::ics_upsert::IcsEventUpsert {
+pub fn upsert_for(
+    user: &db::UserRow,
+    parsed: &crate::ParsedEvent,
+) -> db::ics_upsert::IcsEventUpsert {
     let mut data = crate::upsert_data(parsed);
     if data.organizer_email.is_empty() {
         data.organizer_email = user.email.clone();

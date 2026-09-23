@@ -234,6 +234,49 @@ pub async fn list_public_events(
     .map_err(Into::into)
 }
 
+/// Every live event of a calendar, private classes included: the
+/// authenticated export.ics path, where the caller holds calendar ACL.
+pub async fn list_export_events(
+    pool: &PgPool,
+    calendar_id: Uuid,
+) -> Result<Vec<EventRow>, DbError> {
+    sqlx::query_as::<_, EventRow>(
+        "SELECT * FROM events WHERE calendar_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(calendar_id)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Same for tasks and journals (series masters only, like the public feed).
+pub async fn list_export_tasks(
+    pool: &PgPool,
+    calendar_id: Uuid,
+) -> Result<Vec<tasks::TaskRow>, DbError> {
+    sqlx::query_as::<_, tasks::TaskRow>(
+        "SELECT * FROM tasks
+         WHERE calendar_id = $1 AND deleted_at IS NULL AND master_task_id IS NULL",
+    )
+    .bind(calendar_id)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+pub async fn list_export_journals(
+    pool: &PgPool,
+    calendar_id: Uuid,
+) -> Result<Vec<journals::JournalRow>, DbError> {
+    sqlx::query_as::<_, journals::JournalRow>(
+        "SELECT * FROM journals WHERE calendar_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(calendar_id)
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
 /// Tasks visible in a public feed: same class rule, series masters only
 /// (overrides render inside their master's resource, like calendar_objects).
 pub async fn list_public_tasks(

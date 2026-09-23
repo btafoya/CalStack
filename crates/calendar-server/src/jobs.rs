@@ -51,6 +51,26 @@ pub async fn run_worker(
         .await
         .ok();
     }
+    let sync_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM durable_jobs
+            WHERE job_type = 'ics_sync' AND completed_at IS NULL AND failed_at IS NULL
+        )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(false);
+    if !sync_pending {
+        db::jobs::enqueue(
+            &pool,
+            "ics_sync",
+            serde_json::json!({}),
+            Some(Utc::now()),
+            0,
+        )
+        .await
+        .ok();
+    }
 
     let retention_days = std::env::var("RETENTION_DAYS")
         .ok()
@@ -122,6 +142,21 @@ async fn execute(
             Ok(())
         }
         "webhook_send" => webhook_send(pool, job, crypto).await,
+        "ics_sync" => {
+            ics_sync(pool).await?;
+            // Self-rescheduling pass over subscribed calendars.
+            let interval = ics_sync_interval();
+            db::jobs::enqueue(
+                pool,
+                "ics_sync",
+                serde_json::json!({}),
+                Some(Utc::now() + Duration::seconds(interval)),
+                0,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        }
         "retention_purge" => {
             retention_purge(pool, retention_days).await?;
             // Daily sweep.
@@ -398,6 +433,273 @@ async fn schedule_alarm_scan(
     run_at: DateTime<Utc>,
 ) -> Result<Uuid, db::DbError> {
     db::jobs::enqueue(pool, "alarm_scan", serde_json::json!({}), Some(run_at), 0).await
+}
+
+fn ics_sync_interval() -> i64 {
+    std::env::var("ICS_SYNC_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600)
+}
+
+fn import_max_bytes() -> i64 {
+    std::env::var("IMPORT_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10 * 1024 * 1024)
+}
+
+// ============ ics_sync: outbound .ics subscriptions (PRD section 5) ============
+//
+// One pass re-fetches every calendar with a source_url. The remote is
+// authoritative: series replace by UID (put_series), masters absent from the
+// refetch soft-delete (§21 retention purges later). A failed fetch keeps the
+// last good data; the pass loop is the retry.
+
+async fn ics_sync(pool: &PgPool) -> Result<(), String> {
+    // Redirects are not followed: a 30x could aim the fetch at an internal
+    // address the resolver check never saw.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    let calendars = db::subscribed_calendars(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    for cal in calendars {
+        if let Err(e) = sync_calendar(pool, &client, &cal).await {
+            tracing::warn!(calendar = %cal.id, error = %e, "ics_sync pass failed");
+        }
+    }
+    Ok(())
+}
+
+/// True when an address must not be fetched as a subscription source:
+/// loopback, link-local, private ranges, unspecified. ponytail: resolved-IP
+/// check only (no TOCTOU DNS pinning); upgrade to a proxy or custom connector
+/// if a deployment actually needs one.
+fn ip_allowed(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast())
+        }
+        std::net::IpAddr::V6(v6) => {
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local())
+        }
+    }
+}
+
+/// One calendar's fetch-and-replace pass.
+async fn sync_calendar(
+    pool: &PgPool,
+    client: &reqwest::Client,
+    cal: &db::CalendarRow,
+) -> Result<(), String> {
+    let source = cal.source_url.as_deref().unwrap_or_default();
+    let url = reqwest::Url::parse(source).map_err(|_| format!("invalid source URL {source:?}"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("source URL must be http or https".into());
+    }
+    // Resolve and vet the target before connecting (no redirects followed).
+    let host = url.host_str().ok_or("source URL has no host")?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("resolving {host}: {e}"))?
+        .collect();
+    let Some(_) = addrs.first() else {
+        return Err(format!("remote host {host} did not resolve"));
+    };
+    if let Some(blocked) = addrs.iter().map(|a| a.ip()).find(|ip| !ip_allowed(*ip)) {
+        return Err(format!(
+            "remote host resolves to a blocked address ({blocked})"
+        ));
+    }
+    let mut request = client.get(url).header("accept", "text/calendar").header(
+        "user-agent",
+        concat!("CalStack/", env!("CARGO_PKG_VERSION")),
+    );
+    if let Some(etag) = &cal.source_etag {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| e.without_url().to_string())?;
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        // Nothing changed; just mark the pass.
+        return db::set_calendar_sync_state(pool, cal.id, None)
+            .await
+            .map_err(|e| e.to_string());
+    }
+    if !response.status().is_success() {
+        return Err(format!("remote returned {}", response.status()));
+    }
+    if let Some(len) = response.content_length()
+        && len as i64 > import_max_bytes()
+    {
+        return Err("remote body over the size cap".into());
+    }
+    let validator = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .or_else(|| response.headers().get(reqwest::header::LAST_MODIFIED))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| e.without_url().to_string())?;
+    if bytes.len() as i64 > import_max_bytes() {
+        return Err("remote body over the size cap".into());
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let parsed = calendar_caldav::parse_calendar(&text)
+        .map_err(|e| format!("remote body is not valid iCalendar: {e}"))?;
+    let zones: Vec<db::timezones::NewTimezone> = parsed
+        .timezones
+        .iter()
+        .map(|tz| db::timezones::NewTimezone {
+            tzid: tz.tzid.clone(),
+            definition: tz.definition.clone(),
+            rules: tz.rules.clone(),
+        })
+        .collect();
+    // One master plus its overrides per UID; href stays stable per UID so
+    // updates match instead of colliding. Organizer fallback is the calendar
+    // owner (remote ICS usually carries its own ORGANIZER; upsert_for keeps it).
+    let owner: db::UserRow = match cal.created_by {
+        Some(uid) => db::find_user_by_id(pool, uid).await.unwrap_or_else(|_| {
+            tracing::warn!(calendar = %cal.id, "subscribed calendar owner is gone; events without ORGANIZER get a placeholder");
+            db::UserRow {
+                id: Uuid::nil(),
+                username: String::new(),
+                email: "sync-unknown@calstack.invalid".into(),
+                display_name: None,
+                password_hash: None,
+                is_admin: false,
+                timezone: None,
+                notify_email: false,
+                notify_sms: false,
+                notify_push: false,
+                disabled_at: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }),
+        None => {
+            tracing::warn!(calendar = %cal.id, "subscribed calendar has no owner; events without ORGANIZER get a placeholder");
+            db::UserRow {
+                id: Uuid::nil(),
+                username: String::new(),
+                email: "sync-unknown@calstack.invalid".into(),
+                display_name: None,
+                password_hash: None,
+                is_admin: false,
+                timezone: None,
+                notify_email: false,
+                notify_sms: false,
+                notify_push: false,
+                disabled_at: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+    };
+    // Group by UID, in one pass, preserving first-seen order.
+    struct Group<'a> {
+        master: Option<&'a calendar_caldav::ParsedEvent>,
+        overrides: Vec<&'a calendar_caldav::ParsedEvent>,
+    }
+    let mut groups: std::collections::HashMap<String, Group<'_>> = std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for event in &parsed.events {
+        match groups.get_mut(&event.uid) {
+            Some(group) => {
+                if event.recurrence_id.is_none() && event.recurrence_id_date.is_none() {
+                    group.master = Some(event);
+                } else {
+                    group.overrides.push(event);
+                }
+            }
+            None => {
+                order.push(event.uid.clone());
+                let mut group = Group {
+                    master: None,
+                    overrides: Vec::new(),
+                };
+                if event.recurrence_id.is_none() && event.recurrence_id_date.is_none() {
+                    group.master = Some(event);
+                } else {
+                    group.overrides.push(event);
+                }
+                groups.insert(event.uid.clone(), group);
+            }
+        }
+    }
+    let mut fetched_uids: Vec<String> = Vec::new();
+    for uid in order {
+        let group = &groups[&uid];
+        let href: Option<String> = sqlx::query_scalar(
+            "SELECT COALESCE(href, id::text || '.ics') FROM events
+             WHERE calendar_id = $1 AND uid = $2 AND master_event_id IS NULL
+             LIMIT 1",
+        )
+        .bind(cal.id)
+        .bind(&uid)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        let href = href.unwrap_or_else(|| format!("{}.ics", Uuid::new_v4()));
+        let overrides: Vec<db::ics_upsert::IcsEventUpsert> = group
+            .overrides
+            .iter()
+            .map(|e| calendar_caldav::upsert_for(&owner, e))
+            .collect();
+        let master_data =
+            calendar_caldav::upsert_for(&owner, group.master.expect("master set above"));
+        db::ics_upsert::put_series(
+            pool,
+            cal.id,
+            cal.created_by.unwrap_or(cal.tenant_id),
+            &href,
+            &master_data,
+            &overrides,
+            &zones,
+            &db::ics_upsert::PutPrecondition::None,
+        )
+        .await
+        .map_err(|e| format!("storing UID {uid}: {e}"))?;
+        fetched_uids.push(uid);
+    }
+    // Staleness sweep over the *fetched* set (not the written one): a UID
+    // whose put failed keeps its stored rows and is not treated as stale.
+    sqlx::query(
+        "WITH stale AS (
+            SELECT id FROM events
+            WHERE calendar_id = $1 AND deleted_at IS NULL
+              AND master_event_id IS NULL AND uid <> ALL($2)
+         )
+         UPDATE events e SET deleted_at = now()
+         FROM stale s
+         WHERE e.deleted_at IS NULL AND (e.id = s.id OR e.master_event_id = s.id)",
+    )
+    .bind(cal.id)
+    .bind(&fetched_uids)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    db::set_calendar_sync_state(pool, cal.id, validator.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Finds alarms whose trigger falls in the window, creates deduped
@@ -1193,6 +1495,23 @@ fn parse_points(value: &serde_json::Value) -> Vec<DateOrDateTime> {
 mod tests {
     use super::*;
     use calendar_db::EventRow;
+
+    #[test]
+    fn subscription_fetch_blocks_private_targets() {
+        let p = |s: &str| ip_allowed(s.parse().unwrap());
+        assert!(p("93.184.216.34")); // public
+        assert!(p("2606:2800:220:1:248:1893:25c8:1946")); // public v6
+        assert!(!p("127.0.0.1"));
+        assert!(!p("10.1.2.3"));
+        assert!(!p("172.16.0.9"));
+        assert!(!p("192.168.1.1"));
+        assert!(!p("169.254.1.1"));
+        assert!(!p("0.0.0.0"));
+        assert!(!p("::1"));
+        assert!(!p("fe80::1"));
+        assert!(!p("fd00::1"));
+        assert!(!p("::"));
+    }
 
     fn resolver() -> calendar_core::recurrence::TzResolver {
         calendar_core::recurrence::TzResolver::default()

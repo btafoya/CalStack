@@ -45,11 +45,13 @@
     if (extraHeaders) { $.extend(headers, extraHeaders); }
     var $btn = method !== 'GET' ? $(document.activeElement).filter('button, input[type="submit"]') : $();
     $btn.prop('disabled', true);
+    var raw = data instanceof Blob;
     return $.ajax({
       method: method,
       url: url,
-      data: data !== undefined && data !== null ? JSON.stringify(data) : null,
-      contentType: 'application/json',
+      data: raw ? data : (data !== undefined && data !== null ? JSON.stringify(data) : null),
+      contentType: raw ? 'text/calendar' : 'application/json',
+      processData: !raw,
       headers: headers,
     }).always(function () {
       $btn.prop('disabled', false);
@@ -279,6 +281,7 @@
     editingCal = cal || null;
     $('#calendar-modal-title').text(cal ? 'Edit calendar' : 'New calendar');
     $('#cal-name').val(cal ? cal.name : '');
+    $('#cal-source').val(cal ? (cal.source_url || '') : '');
     ['vevent', 'vtodo', 'vjournal'].forEach(function (kind) {
       var wanted = cal ? cal.components.indexOf(kind.toUpperCase()) !== -1 : true;
       $('#cal-comp-' + kind).prop('checked', wanted);
@@ -296,13 +299,20 @@
       return $('#cal-comp-' + kind).prop('checked') ? kind.toUpperCase() : null;
     }).filter(Boolean);
     if (!components.length) { errorDialog('Pick at least one content type.'); return; }
+    var sourceUrl = $('#cal-source').val().trim();
     var req;
     if (editingCal) {
-      req = api('PATCH', '/api/calendars/' + editingCal.id, { name: name, components: components });
+      var patch = { name: name, components: components };
+      // Send the source field only when it changed (owner-only server-side).
+      var oldSource = editingCal.source_url || '';
+      if (sourceUrl !== oldSource) { patch.source_url = sourceUrl; }
+      req = api('PATCH', '/api/calendars/' + editingCal.id, patch);
     } else {
       var slug = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
       if (!slug) { errorDialog('Enter a valid calendar name.'); return; }
-      req = api('POST', '/api/calendars', { slug: slug, name: name, components: components });
+      var body = { slug: slug, name: name, components: components };
+      if (sourceUrl) { body.source_url = sourceUrl; }
+      req = api('POST', '/api/calendars', body);
     }
     req.done(function () {
       toast(editingCal ? 'Calendar updated.' : 'Calendar created.');
@@ -352,7 +362,7 @@
         .attr('data-id', cal.id);
       var dot = calColorHex(cal.color);
       if (dot) { item.append($('<span class="cal-dot" aria-hidden="true">').css('background-color', dot)); }
-      item.append($('<span>').text(cal.name + (capText(cal.my_capability) ? ' (' + capText(cal.my_capability) + ')' : '')));
+      item.append($('<span>').text(cal.name + (cal.read_only ? ' (subscribed)' : (capText(cal.my_capability) ? ' (' + capText(cal.my_capability) + ')' : ''))));
       item.on('click', function () { selectCalendar(cal); });
       var btns = $('<span class="btn-group btn-group-sm">');
       btns.append(
@@ -1072,6 +1082,33 @@
     loadAcl();
     loadShares();
     modal('share-modal').show();
+  });
+
+  // ============ ICS import / export for the current calendar ============
+  $('#export-btn').on('click', function () {
+    if (!state.currentCalendar) { return; }
+    var a = document.createElement('a');
+    a.href = '/api/calendars/' + state.currentCalendar.id + '/export.ics';
+    a.download = state.currentCalendar.slug + '.ics';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+  $('#import-btn').on('click', function () {
+    if (!state.currentCalendar) { return; }
+    if (state.currentCalendar.read_only) { errorDialog('This calendar is fed from a remote source and is read-only.'); return; }
+    $('#ics-import-input').val('').trigger('click');
+  });
+  $('#ics-import-input').on('change', function () {
+    var file = this.files[0];
+    var cal = state.currentCalendar;
+    if (!file || !cal) { return; }
+    api('POST', '/api/calendars/' + cal.id + '/import', file).done(function (r) {
+      var msg = r.imported + ' imported, ' + r.skipped + ' skipped';
+      if (r.rejected.length) { msg += ', ' + r.rejected.length + ' rejected'; }
+      toast(msg + '.');
+      refreshActivePane();
+    });
   });
 
   // ============ account (password change) ============
