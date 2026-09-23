@@ -654,7 +654,7 @@ const APP_PAGE_HEAD: &str = concat!(
 <!-- event editor -->
 <div class="modal fade" id="event-modal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
   <div class="modal-dialog"><form id="event-form" class="modal-content">
-    <div class="modal-header"><h2 class="modal-title h5">Event</h2>
+    <div class="modal-header"><h2 class="modal-title h5" id="event-modal-title">Event</h2>
       <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
     <div class="modal-body">
       <div class="mb-3"><label class="form-label" for="ev-title">Title</label>
@@ -719,7 +719,7 @@ const APP_PAGE_HEAD: &str = concat!(
               </select></div>
           </div>
           <div class="row mb-3">
-            <div class="col"><label class="form-label" for="ev-repeat">Repeat</label>
+            <div class="col" id="ev-repeat-row"><label class="form-label" for="ev-repeat">Repeat</label>
               <select class="form-select" id="ev-repeat">
                 <option value="">Does not repeat</option>
                 <option value="DAILY">Daily</option>
@@ -867,7 +867,7 @@ const APP_PAGE_HEAD: &str = concat!(
 <script src="/assets/js/journals.js?v=17"></script>
 <script src="/assets/js/rules.js?v=17"></script>
 <script src="/assets/js/categories.js?v=17"></script>
-<script src="/assets/js/app.js?v=17"></script>
+<script src="/assets/js/app.js?v=18"></script>
 </body></html>"#
 );
 

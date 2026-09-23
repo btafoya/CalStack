@@ -65,6 +65,13 @@ struct EventBody {
     master_event_id: Option<Uuid>,
     recurrence_id: Option<chrono::NaiveDateTime>,
     recurrence_id_date: Option<chrono::NaiveDate>,
+    /// UTC instant of the targeted occurrence; the server derives the
+    /// RECURRENCE-ID wall-clock from the master's tz (and picks date vs
+    /// date-time for all-day masters). For split it also anchors the split
+    /// point. Set by the web UI's "this event" / "this and following".
+    recurrence_id_at: Option<DateTime<Utc>>,
+    /// Split only: true = delete this and following (no continuation event).
+    truncate_rest: Option<bool>,
 }
 
 /// Locations are append-only (calendar-db::create_location); a location on
@@ -267,9 +274,15 @@ fn validate_event_body(body: &EventBody) -> Result<(), AppError> {
     {
         return Err(AppError::bad_request("priority must be 0..=9"));
     }
+    if body.recurrence_id_at.is_some() && body.master_event_id.is_none() {
+        return Err(AppError::bad_request(
+            "recurrence_id_at needs master_event_id",
+        ));
+    }
     if body.master_event_id.is_some()
         && body.recurrence_id.is_none()
         && body.recurrence_id_date.is_none()
+        && body.recurrence_id_at.is_none()
     {
         return Err(AppError::bad_request("exception needs recurrence_id"));
     }
@@ -306,6 +319,27 @@ struct OccurrencePoint {
     date: Option<String>,
 }
 
+/// The original wall-clock of occurrence instant `at` in `master`'s
+/// timezone — the key exception rows are stored under (date-time for timed
+/// masters, date for all-day ones).
+async fn occurrence_wall(
+    pool: &PgPool,
+    master: &db::EventRow,
+    at: DateTime<Utc>,
+) -> Result<(Option<chrono::NaiveDateTime>, Option<chrono::NaiveDate>), AppError> {
+    let resolver = db::timezones::load_for_calendar(pool, master.calendar_id)
+        .await
+        .unwrap_or_default();
+    let zone = calendar_core::recurrence::resolve_tz(master.tzid.as_deref(), Some(&resolver))
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    let wall = zone.to_local(at);
+    if master.all_day {
+        Ok((None, Some(wall.date())))
+    } else {
+        Ok((Some(wall), None))
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/calendars/{id}/events",
@@ -333,6 +367,23 @@ async fn create_event(
     )
     .await?;
     validate_event_body(&body)?;
+    // RECURRENCE-ID wall-clock derived server-side from the occurrence
+    // instant — the client never does timezone math.
+    if let Some(at) = body.recurrence_id_at {
+        let master_id = body.master_event_id.expect("validated");
+        let (master, _) = db::get_event(&pool, master_id).await?;
+        if master.calendar_id != calendar_id
+            || master.master_event_id.is_some()
+            || master.rrule.is_none()
+        {
+            return Err(AppError::bad_request(
+                "master_event_id must be a recurring event in this calendar",
+            ));
+        }
+        let (wall, wall_date) = occurrence_wall(&pool, &master, at).await?;
+        body.recurrence_id = wall;
+        body.recurrence_id_date = wall_date;
+    }
     let location = match body.location.take() {
         Some(loc_body) => Some(create_location_from_body(&pool, loc_body).await?),
         None => None,
@@ -1056,6 +1107,12 @@ async fn expand_occurrences_json(
             let matched = exceptions
                 .iter()
                 .find(|ex| ex.master_event_id == Some(event.id) && ex.recurrence_id == Some(wall));
+            // A cancelled override means the occurrence is off the calendar
+            // (web grid); CalDAV still serves it as a STATUS:CANCELLED
+            // override inside the master's resource.
+            if matched.is_some_and(|ex| ex.status.as_deref() == Some("CANCELLED")) {
+                continue;
+            }
             let (source, is_exception) = matched.map_or((event, false), |ex| (ex, true));
             let location = db::location_for_event(pool, source).await;
             let event_view = event_view(
@@ -1110,6 +1167,295 @@ fn json_to_points(value: &serde_json::Value) -> Vec<calendar_core::DateOrDateTim
         .unwrap_or_default()
 }
 
+/// Partition a RDATE/EXDATE array at the split point: (kept on the master,
+/// moved to the continuation). `keep` decides per raw string; unparsable
+/// entries stay put.
+fn partition_points(
+    value: &serde_json::Value,
+    keep: impl Fn(&str) -> bool,
+) -> (serde_json::Value, serde_json::Value) {
+    let mut kept = Vec::new();
+    let mut rest = Vec::new();
+    if let Some(arr) = value.as_array() {
+        for s in arr.iter().filter_map(|v| v.as_str()) {
+            if keep(s) {
+                kept.push(serde_json::Value::String(s.to_string()));
+            } else {
+                rest.push(serde_json::Value::String(s.to_string()));
+            }
+        }
+    }
+    (
+        serde_json::Value::Array(kept),
+        serde_json::Value::Array(rest),
+    )
+}
+
+/// Master's attendees carried onto the continuation when the request
+/// doesn't supply its own set.
+async fn carried_attendees(
+    pool: &PgPool,
+    master_id: Uuid,
+) -> Result<Vec<db::NewAttendee>, AppError> {
+    Ok(db::list_attendees(pool, master_id)
+        .await?
+        .into_iter()
+        .map(|a| db::NewAttendee {
+            user_id: a.user_id,
+            contact_id: a.contact_id,
+            email: a.email,
+            display_name: a.display_name,
+            telephone: a.telephone,
+            role: Some(a.role),
+            partstat: Some(a.partstat),
+            rsvp: a.rsvp,
+        })
+        .collect())
+}
+
+/// Re-anchor a COUNT rule at a new DTSTART already past `skipped`
+/// occurrences (the split point). Returns None when nothing remains — the
+/// continuation is a single event.
+fn reanchor_count(rrule: Option<String>, skipped: usize) -> Option<String> {
+    rrule.and_then(|r| {
+        r.split(';')
+            .map(|part| {
+                if let Some(count) = part.strip_prefix("COUNT=") {
+                    let remaining = count.parse::<usize>().unwrap_or(0).saturating_sub(skipped);
+                    if remaining == 0 {
+                        return None;
+                    }
+                    Some(format!("COUNT={remaining}"))
+                } else {
+                    Some(part.to_string())
+                }
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join(";"))
+    })
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct SplitView {
+    ok: bool,
+    /// "This and following" edit: the new event carrying the future part.
+    continuation_id: Option<Uuid>,
+}
+
+/// "This and following" (and "delete this and following"): truncates the
+/// master's RRULE at the split occurrence and creates a continuation event
+/// from the occurrence onward carrying the edited fields. One transaction on
+/// the db side (db::split_event).
+#[utoipa::path(
+    post,
+    path = "/api/events/{id}/split",
+    params(("id" = Uuid, Path, description = "recurring master event id")),
+    request_body = EventBody,
+    responses(
+        (status = 200, description = "series split (or truncated)", body = SplitView),
+        (status = 400, description = "not recurring or missing recurrence_id_at"),
+        (status = 404, description = "absent"),
+    )
+)]
+async fn split_event_handler(
+    State(AppState { pool, crypto, .. }): State<AppState>,
+    headers: HeaderMap,
+    Path(event_id): Path<Uuid>,
+    Json(mut body): Json<EventBody>,
+) -> Result<impl IntoResponse, AppError> {
+    let auth = resolve_auth(&pool, &headers).await?;
+    require_csrf(&auth, &headers)?;
+    let (master, _) = db::get_event(&pool, event_id).await?;
+    require_capability(
+        &pool,
+        master.calendar_id,
+        auth.user.id,
+        calendar_core::CalendarCapability::ReadWrite,
+    )
+    .await?;
+    if master.rrule.is_none() {
+        return Err(AppError::bad_request("not a recurring event"));
+    }
+    let resolver = db::timezones::load_for_calendar(&pool, master.calendar_id)
+        .await
+        .unwrap_or_default();
+    let (wall, wall_date) =
+        if master.all_day {
+            (
+                None,
+                Some(body.recurrence_id_date.ok_or_else(|| {
+                    AppError::bad_request("all-day split needs recurrence_id_date")
+                })?),
+            )
+        } else {
+            let at = body
+                .recurrence_id_at
+                .ok_or_else(|| AppError::bad_request("split needs recurrence_id_at"))?;
+            occurrence_wall(&pool, &master, at).await?
+        };
+    // Rule-generated occurrences strictly before the split anchor the
+    // truncated rule (RDATE/EXDATE excluded — COUNT counts rule expansion).
+    let dtstart = match (master.starts_at, master.start_date) {
+        (Some(at), _) => calendar_core::DateOrDateTime::Timed(at),
+        (None, Some(date)) => calendar_core::DateOrDateTime::AllDay(date),
+        _ => return Err(AppError::bad_request("master has no start")),
+    };
+    let window_from = master.starts_at.unwrap_or_else(|| {
+        master
+            .start_date
+            .expect("validated")
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+    });
+    // Midnight UTC of the split date works as the exclusive window end for
+    // all-day masters: its local wall-clock lands before the split date's
+    // local midnight, so that date's occurrence is excluded either way.
+    let window_to = if master.all_day {
+        wall_date
+            .expect("validated")
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+    } else {
+        body.recurrence_id_at.expect("validated")
+    };
+    let before = calendar_core::recurrence::expand_occurrences(
+        dtstart,
+        master.tzid.as_deref(),
+        Some(&resolver),
+        master.rrule.as_deref(),
+        &[],
+        &[],
+        window_from,
+        window_to,
+    )
+    .map_err(|e| AppError::bad_request(e.to_string()))?;
+    let keep_date = |s: &str| {
+        s.get(..10)
+            .is_some_and(|d| wall_date.is_some_and(|w| d < format!("{w}").as_str()))
+    };
+    let (keep_rdate, move_rdate) = if master.all_day {
+        partition_points(&master.rdate, keep_date)
+    } else {
+        let at = body.recurrence_id_at.expect("validated");
+        partition_points(&master.rdate, |s| {
+            DateTime::parse_from_rfc3339(s)
+                .map(|d| d.with_timezone(&Utc) < at)
+                .unwrap_or(true)
+        })
+    };
+    let (keep_exdate, move_exdate) = if master.all_day {
+        partition_points(&master.exdate, keep_date)
+    } else {
+        let at = body.recurrence_id_at.expect("validated");
+        partition_points(&master.exdate, |s| {
+            DateTime::parse_from_rfc3339(s)
+                .map(|d| d.with_timezone(&Utc) < at)
+                .unwrap_or(true)
+        })
+    };
+    let (continuation_attendees, continuation) = if body.truncate_rest == Some(true) {
+        (Vec::new(), None)
+    } else {
+        let attendees = match body.attendees.clone() {
+            Some(list) => list,
+            None => carried_attendees(&pool, master.id).await?,
+        };
+        let location_id = match body.location.take() {
+            Some(loc_body) => Some(create_location_from_body(&pool, loc_body).await?.id),
+            None => master.location_id,
+        };
+        let data = db::NewEventData {
+            uid: Uuid::new_v4().to_string(),
+            starts_at: body.starts_at.or(master.starts_at),
+            ends_at: body.ends_at.or(master.ends_at),
+            start_date: body.start_date.or(master.start_date),
+            end_date: body.end_date.or(master.end_date),
+            tzid: body.tzid.clone().or_else(|| master.tzid.clone()),
+            all_day: body.all_day.unwrap_or(master.all_day),
+            // The user-edited pattern, or the master's rule as-is (the
+            // web UI omits rrule for rules it can't rebuild); COUNT is
+            // re-anchored at the continuation's new DTSTART.
+            rrule: reanchor_count(
+                body.rrule.clone().or_else(|| master.rrule.clone()),
+                before.len(),
+            ),
+            rdate: Some(move_rdate),
+            exdate: Some(move_exdate),
+            summary: body.summary,
+            description_html: body
+                .description_html
+                .clone()
+                .or_else(|| master.description_html.clone())
+                .map(|html| calendar_core::sanitize_html(&html)),
+            description_text: body
+                .description_text
+                .clone()
+                .or_else(|| master.description_text.clone()),
+            url: body.url.clone().or_else(|| master.url.clone()),
+            status: body.status.clone().or_else(|| master.status.clone()),
+            priority: body.priority.or(master.priority),
+            class: body.class.clone().or_else(|| master.class.clone()),
+            transp: body.transp.clone().or_else(|| master.transp.clone()),
+            categories: body
+                .categories
+                .clone()
+                .unwrap_or_else(|| master.categories.clone()),
+            location_id,
+            organizer_user_id: master.organizer_user_id,
+            organizer_email: master.organizer_email.clone(),
+            organizer_name: master.organizer_name.clone(),
+            master_id: None,
+            recurrence_id: None,
+            recurrence_id_date: None,
+        };
+        (attendees, Some(data))
+    };
+    let (master_row, continuation_row) = db::split_event(
+        &pool,
+        master.id,
+        &continuation_attendees,
+        &db::SeriesSplit {
+            wall,
+            wall_date,
+            master_rrule: calendar_core::recurrence::truncate_rrule(
+                master.rrule.as_deref().unwrap_or_default(),
+                &before,
+                master.all_day,
+            ),
+            master_rdate: keep_rdate,
+            master_exdate: keep_exdate,
+            continuation,
+        },
+    )
+    .await?;
+    db::scheduling::dispatch(&pool, SubjectKind::Event, master_row.id, auth.user.id).await?;
+    if let Some(cont) = &continuation_row {
+        db::scheduling::dispatch(&pool, SubjectKind::Event, cont.id, auth.user.id).await?;
+    }
+    if let Ok(cal) = db::get_calendar(&pool, master.calendar_id).await {
+        crate::webhooks_api::fire(&pool, cal.tenant_id, master_row.id, "event_updated").await;
+        if let Some(cont) = &continuation_row {
+            crate::rules_api::run_rules(
+                &pool,
+                cal.tenant_id,
+                cal.id,
+                "event_created",
+                cont.id,
+                serde_json::json!({"summary": cont.summary, "starts_at": cont.starts_at}),
+                crypto.as_deref(),
+            )
+            .await;
+            crate::webhooks_api::fire(&pool, cal.tenant_id, cont.id, "event_created").await;
+        }
+    }
+    Ok(Json(SplitView {
+        ok: true,
+        continuation_id: continuation_row.as_ref().map(|c| c.id),
+    }))
+}
+
 pub fn router() -> axum::Router<crate::AppState> {
     axum::Router::new()
         .route(
@@ -1125,6 +1471,7 @@ pub fn router() -> axum::Router<crate::AppState> {
             "/api/events/{id}",
             get(get_event).patch(patch_event).delete(delete_event),
         )
+        .route("/api/events/{id}/split", post(split_event_handler))
         .route(
             "/api/events/{id}/attendees/self",
             axum::routing::patch(patch_own_partstat),
@@ -1140,6 +1487,7 @@ pub fn router() -> axum::Router<crate::AppState> {
         get_event,
         patch_event,
         delete_event,
+        split_event_handler,
         patch_own_partstat,
         list_occurrences,
         list_subscription_occurrences,

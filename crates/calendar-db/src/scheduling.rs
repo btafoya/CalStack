@@ -759,6 +759,10 @@ async fn copy_alarms(
 /// Live copies of the series whose owner is no longer an invited attendee:
 /// set to STATUS:CANCELLED (kept visible, RFC 5546) and notified. Copies on
 /// calendars owned by still-invited users are left alone.
+///
+/// Copies always carry a non-NULL origin_id; the organizer's own RECURRENCE-ID
+/// exceptions do not — restricting the master-pointer branch to copies keeps
+/// a master's dispatch from cancelling its own exception rows.
 async fn cancel_stray_copies(
     tx: &mut sqlx::PgConnection,
     kind: SubjectKind,
@@ -769,7 +773,8 @@ async fn cancel_stray_copies(
     let sql = format!(
         "SELECT c.id, c.calendar_id, a.principal_user_id FROM {} c
          JOIN calendar_acl a ON a.calendar_id = c.calendar_id AND a.capability = 'owner'
-         WHERE (c.origin_id = $1 OR c.{} = $1) AND c.deleted_at IS NULL
+         WHERE (c.origin_id = $1 OR (c.origin_id IS NOT NULL AND c.{} = $1))
+           AND c.deleted_at IS NULL
          ORDER BY c.id",
         kind.table(),
         kind.master_col()

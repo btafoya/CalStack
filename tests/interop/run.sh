@@ -451,6 +451,110 @@ step "iCal export via occurrences + exceptions"
 REC=$(curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$CAL/occurrences?from=2026-09-01T00:00:00Z&to=2026-10-01T00:00:00Z")
 echo "$REC" | grep -q '"occurrence"' || fail "occurrence expansion (got: $(echo "$REC" | head -c 200))"
 
+# ============ 4c. series editing ============
+# The web UI's three-way dialog behind it: "this event" (RECURRENCE-ID
+# exception), "this and following" (split), "delete this and following".
+step "Series editing: this-occurrence exception lands as a RECURRENCE-ID override"
+SER_CAL=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars" \
+  -d '{"slug":"series-edit","name":"Series edit"}' \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+SER=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars/$SER_CAL/events" \
+  -d '{"summary":"Series probe","uid":"series-probe@interop","starts_at":"2026-10-01T10:00:00Z","ends_at":"2026-10-01T10:30:00Z","rrule":"FREQ=DAILY;COUNT=5"}')
+SER_ID=$(echo "$SER" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$SER_CAL/occurrences?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z" \
+  | python3 -c "import json,sys;rows=json.load(sys.stdin);assert len(rows)==5 and not any(r['is_exception'] for r in rows), rows" \
+  || fail "series should expand to 5 plain occurrences"
+
+# "This event": move the 10-03 occurrence to 15:00.
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars/$SER_CAL/events" \
+  -d '{"summary":"Series probe (moved)","uid":"series-probe@interop","master_event_id":"'"$SER_ID"'","recurrence_id_at":"2026-10-03T10:00:00Z","starts_at":"2026-10-03T15:00:00Z","ends_at":"2026-10-03T15:30:00Z"}' \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['master_event_id']=='$SER_ID' and r['recurrence_id']=='2026-10-03T10:00:00', r" \
+  || fail "this-occurrence exception should carry the derived wall-clock RECURRENCE-ID"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$SER_CAL/occurrences?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+assert len(rows) == 5, len(rows)
+moved = next((r for r in rows if r['event']['recurrence_id'] == '2026-10-03T10:00:00'), None)
+assert moved and moved['is_exception'], rows
+assert moved['event']['summary'] == 'Series probe (moved)'
+assert moved['event']['starts_at'].startswith('2026-10-03T15:00')
+assert moved['occurrence']['at'].startswith('2026-10-03T10:00')
+assert any(r['event']['id'] == '$SER_ID' and r['occurrence']['at'].startswith('2026-10-02T10:00') for r in rows)
+" || fail "exception should overlay only its own occurrence"
+
+step "Cancelled instance: hidden from /occurrences, still a CANCELLED override over CalDAV"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars/$SER_CAL/events" \
+  -d '{"summary":"Series probe","uid":"series-probe@interop","master_event_id":"'"$SER_ID"'","status":"CANCELLED","recurrence_id_at":"2026-10-04T10:00:00Z","starts_at":"2026-10-04T10:00:00Z","ends_at":"2026-10-04T10:30:00Z"}' >/dev/null
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$SER_CAL/occurrences?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+assert not any((r['occurrence'] or {}).get('at', '').startswith('2026-10-04') for r in rows), rows
+" || fail "cancelled occurrence must be hidden from the occurrence feed"
+curl -s -u "$AUTH" "$BASE/calendars/alice/series-edit/$SER_ID.ics" \
+  | grep -q "STATUS:CANCELLED" \
+  || fail "CalDAV must still serve the cancelled override inside the master"
+curl -s -u "$AUTH" "$BASE/calendars/alice/series-edit/$SER_ID.ics" \
+  | grep -q "RECURRENCE-ID:20261004T100000Z" \
+  || fail "CalDAV override must carry the original wall-clock RECURRENCE-ID"
+
+step "This and following: master truncates, continuation carries the edit, exceptions re-parent"
+SPLIT=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/events/$SER_ID/split" \
+  -d '{"summary":"Series probe (rest)","recurrence_id_at":"2026-10-05T10:00:00Z","starts_at":"2026-10-05T12:00:00Z","ends_at":"2026-10-05T12:30:00Z"}')
+echo "$SPLIT" | grep -q '"ok":true' || fail "split response: $SPLIT"
+CONT_ID=$(echo "$SPLIT" | python3 -c "import json,sys;print(json.load(sys.stdin)['continuation_id'])")
+[ -n "$CONT_ID" ] || fail "split without continuation id"
+curl -s -b "$DATA/alice.jar" "$BASE/api/events/$SER_ID" \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['rrule']=='FREQ=DAILY;COUNT=4', r['rrule']" \
+  || fail "master must truncate COUNT to the occurrences before the split"
+curl -s -b "$DATA/alice.jar" "$BASE/api/events/$CONT_ID" \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['rrule']=='FREQ=DAILY;COUNT=1', r['rrule'];assert r['starts_at'].startswith('2026-10-05T12:00');assert r['uid']!='series-probe@interop'" \
+  || fail "continuation must re-anchor COUNT and start at the split occurrence"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$SER_CAL/occurrences?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+at = sorted((r['occurrence'] or {}).get('at', '') for r in rows)
+assert at == ['2026-10-01T10:00:00Z', '2026-10-02T10:00:00Z', '2026-10-03T10:00:00Z', '2026-10-05T12:00:00Z'], at
+" || fail "split should leave 3 master slots + the moved continuation occurrence"
+curl -s -u "$AUTH" "$BASE/calendars/alice/series-edit/$CONT_ID.ics" \
+  | grep -q "SUMMARY:Series probe (rest)" \
+  || fail "continuation must serve as its own CalDAV resource"
+
+step "Delete this and following: master truncates, no continuation, overrides past the wall go"
+TRUNC=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars/$SER_CAL/events" \
+  -d '{"summary":"Truncate probe","uid":"truncate-probe@interop","starts_at":"2026-11-01T08:00:00Z","ends_at":"2026-11-01T08:30:00Z","rrule":"FREQ=DAILY;COUNT=5"}' \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/events/$TRUNC/split" \
+  -d '{"summary":"Truncate probe","truncate_rest":true,"recurrence_id_at":"2026-11-03T08:00:00Z"}' \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['ok'] and r['continuation_id'] is None, r" \
+  || fail "truncate split should not create a continuation"
+curl -s -b "$DATA/alice.jar" "$BASE/api/events/$TRUNC" \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['rrule']=='FREQ=DAILY;COUNT=2', r['rrule']" \
+  || fail "truncated master should keep only its first two occurrences"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$SER_CAL/occurrences?from=2026-11-01T00:00:00Z&to=2026-11-10T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+at = sorted((r['occurrence'] or {}).get('at', '') for r in rows)
+assert at == ['2026-11-01T08:00:00Z', '2026-11-02T08:00:00Z'], at
+" || fail "truncated series must stop at the split wall"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$SER_CAL/occurrences?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+moved = [r for r in rows if r['event']['summary'] == 'Series probe (moved)']
+assert len(moved) == 1, rows
+" || fail "the moved exception must survive the split (re-parented or kept)"
+
 # ============ 5. rules ============
 step "Rules: create, toggle enabled, list reflects it"
 RULE=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" -H 'content-type: application/json' \

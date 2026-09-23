@@ -958,14 +958,15 @@ pub fn event_etag(event: &EventRow) -> String {
 
 /// Creates an event (or an exception when master_id is set) plus attendees,
 /// and records the change atomically. Returns the row and its ETag.
-pub async fn create_event(
-    pool: &PgPool,
+/// The shared INSERT-side of create_event (row + attendees + etag); runs on
+/// the caller's transaction so composite mutations (series split) stay atomic.
+pub(crate) async fn insert_event_tx(
+    tx: &mut sqlx::PgConnection,
     calendar_id: Uuid,
     created_by: Uuid,
     attendees: &[NewAttendee],
     data: &NewEventData,
 ) -> Result<(EventRow, String), DbError> {
-    let mut tx = pool.begin().await?;
     let event = sqlx::query_as::<_, EventRow>(
         "INSERT INTO events (
             id, calendar_id, uid, master_event_id, recurrence_id, recurrence_id_date,
@@ -1047,9 +1048,154 @@ pub async fn create_event(
         .bind(&etag)
         .execute(&mut *tx)
         .await?;
-    append_change(&mut tx, calendar_id, event.id, "created", "event").await?;
+    append_change(tx, calendar_id, event.id, "created", "event").await?;
+    Ok((event, etag))
+}
+
+pub async fn create_event(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    created_by: Uuid,
+    attendees: &[NewAttendee],
+    data: &NewEventData,
+) -> Result<(EventRow, String), DbError> {
+    let mut tx = pool.begin().await?;
+    let (event, etag) = insert_event_tx(&mut tx, calendar_id, created_by, attendees, data).await?;
     tx.commit().await?;
     Ok((event, etag))
+}
+
+/// One atomic "this and following" mutation of a recurring master:
+/// truncates the master's RRULE (None = stops recurring), rewrites its
+/// RDATE/EXDATE to the caller's partitioned halves, soft-deletes the
+/// exception at the split wall itself, and either re-parents exceptions
+/// after the wall to a continuation event or (no continuation) deletes them
+/// along with the future occurrences.
+pub struct SeriesSplit {
+    /// Split wall-clock for a timed master.
+    pub wall: Option<chrono::NaiveDateTime>,
+    /// Split wall-clock date for an all-day master.
+    pub wall_date: Option<chrono::NaiveDate>,
+    /// The truncated master RRULE; None means the master stops recurring.
+    pub master_rrule: Option<String>,
+    /// Master's RDATE/EXDATE halves kept after the split.
+    pub master_rdate: serde_json::Value,
+    pub master_exdate: serde_json::Value,
+    /// The continuation event ("this and following" edit); None = delete
+    /// this and following.
+    pub continuation: Option<NewEventData>,
+}
+
+pub async fn split_event(
+    pool: &PgPool,
+    master_id: Uuid,
+    attendees: &[NewAttendee],
+    split: &SeriesSplit,
+) -> Result<(EventRow, Option<EventRow>), DbError> {
+    let mut tx = pool.begin().await?;
+    let master = sqlx::query_as::<_, EventRow>(
+        "SELECT * FROM events WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(master_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(DbError::NotFound)?;
+    if master.rrule.is_none() {
+        return Err(DbError::Conflict("not a recurring event".into()));
+    }
+    let master = sqlx::query_as::<_, EventRow>(
+        "UPDATE events SET
+            rrule = $2,
+            rdate = $3,
+            exdate = $4,
+            sequence = sequence + 1,
+            updated_at = now()
+         WHERE id = $1
+         RETURNING *",
+    )
+    .bind(master.id)
+    .bind(&split.master_rrule)
+    .bind(&split.master_rdate)
+    .bind(&split.master_exdate)
+    .fetch_one(&mut *tx)
+    .await?;
+    let new_etag = etag_for(master.calendar_id, master.sequence, master.updated_at);
+    sqlx::query("UPDATE events SET etag = $2 WHERE id = $1")
+        .bind(master.id)
+        .bind(&new_etag)
+        .execute(&mut *tx)
+        .await?;
+    append_change(&mut tx, master.calendar_id, master.id, "updated", "event").await?;
+    // The override at the split wall itself is replaced by the edit (split)
+    // or dies with the future part (truncate).
+    sqlx::query(
+        "UPDATE events SET deleted_at = now()
+         WHERE master_event_id = $1 AND deleted_at IS NULL
+           AND (recurrence_id = $2 OR recurrence_id_date = $3)",
+    )
+    .bind(master.id)
+    .bind(split.wall)
+    .bind(split.wall_date)
+    .execute(&mut *tx)
+    .await?;
+    let continuation = match &split.continuation {
+        Some(data) => {
+            let (row, _etag) = insert_event_tx(
+                &mut tx,
+                master.calendar_id,
+                master.created_by.unwrap_or(master.id),
+                attendees,
+                data,
+            )
+            .await?;
+            // Overrides beyond the split wall belong to the continuation
+            // (their RECURRENCE-IDs no longer match the truncated master).
+            sqlx::query(
+                "UPDATE events SET master_event_id = $2, updated_at = now()
+                 WHERE master_event_id = $1 AND deleted_at IS NULL
+                   AND (recurrence_id > $3 OR recurrence_id_date > $4)",
+            )
+            .bind(master.id)
+            .bind(row.id)
+            .bind(split.wall)
+            .bind(split.wall_date)
+            .execute(&mut *tx)
+            .await?;
+            // The re-parented overrides are part of the continuation's
+            // CalDAV resource now (see append_change); bump + refresh it.
+            let cont = sqlx::query_as::<_, EventRow>(
+                "UPDATE events SET sequence = sequence + 1, updated_at = now()
+                 WHERE id = $1
+                 RETURNING *",
+            )
+            .bind(row.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE events SET etag = $2 WHERE id = $1")
+                .bind(cont.id)
+                .bind(etag_for(cont.calendar_id, cont.sequence, cont.updated_at))
+                .execute(&mut *tx)
+                .await?;
+            Some(cont)
+        }
+        // "Delete this and following": every override at-or-after the wall
+        // goes with it.
+        None => {
+            sqlx::query(
+                "UPDATE events SET deleted_at = now()
+                 WHERE master_event_id = $1 AND deleted_at IS NULL
+                   AND (recurrence_id >= $2 OR recurrence_id_date >= $3)",
+            )
+            .bind(master.id)
+            .bind(split.wall)
+            .bind(split.wall_date)
+            .execute(&mut *tx)
+            .await?;
+            None
+        }
+    };
+    tx.commit().await?;
+    Ok((master, continuation))
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]
