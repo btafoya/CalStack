@@ -5,6 +5,8 @@
 (function () {
   'use strict';
 
+  // Shared SweetAlert2 styling; window-exposed so other files (app.js's
+  // series dialog) reuse the same button classes.
   var BUTTONS = {
     buttonsStyling: false,
     confirmButtonColor: undefined,
@@ -17,6 +19,7 @@
     // focus restore when it closes.
     returnFocus: false,
   };
+  window.BUTTONS = BUTTONS;
 
   window.confirmDialog = function (message, options) {
     var d = $.Deferred();
