@@ -102,6 +102,91 @@ curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" "$BASE/api/calendars/$SCRATCH_CAL")
 [ "$CODE" = 404 ] || fail "deleted calendar should 404 (got $CODE)"
 
+step "ICS import: 3 series round-trip, duplicates skipped, export matches"
+ICS_CAL=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars" \
+  -d '{"slug":"ics-demo","name":"ICS demo"}' | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+cat > "$DATA/import.ics" <<'EOF'
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//EN
+BEGIN:VEVENT
+UID:import-a@example.com
+DTSTAMP:20260901T000000Z
+DTSTART:20261001T100000Z
+DTEND:20261001T110000Z
+SUMMARY:Import A
+END:VEVENT
+BEGIN:VEVENT
+UID:import-b@example.com
+DTSTAMP:20260901T000000Z
+DTSTART:20261002T100000Z
+DTEND:20261002T110000Z
+SUMMARY:Import B
+END:VEVENT
+BEGIN:VEVENT
+UID:import-r@example.com
+DTSTAMP:20260901T000000Z
+DTSTART:20261005T100000Z
+DTEND:20261005T103000Z
+RRULE:FREQ=DAILY;COUNT=3
+SUMMARY:Import R
+END:VEVENT
+BEGIN:VEVENT
+UID:import-r@example.com
+RECURRENCE-ID:20261006T100000Z
+DTSTAMP:20260901T000000Z
+DTSTART:20261006T140000Z
+DTEND:20261006T143000Z
+SUMMARY:Import R moved
+END:VEVENT
+END:VCALENDAR
+EOF
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: text/calendar' --data-binary @"$DATA/import.ics" \
+  -X POST "$BASE/api/calendars/$ICS_CAL/import" \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['imported']==3 and r['skipped']==0 and not r['rejected'], r" \
+  || fail "first import should place 3 series"
+curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: text/calendar' --data-binary @"$DATA/import.ics" \
+  -X POST "$BASE/api/calendars/$ICS_CAL/import" \
+  | python3 -c "import json,sys;r=json.load(sys.stdin);assert r['imported']==0 and r['skipped']==3 and not r['rejected'], r" \
+  || fail "duplicate import must skip, never overwrite"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$ICS_CAL/export.ics" > "$DATA/export.ics"
+grep -q "Import A" "$DATA/export.ics" || fail "export missing imported event"
+grep -q "RECURRENCE-ID:20261006T100000Z" "$DATA/export.ics" \
+  || fail "export missing the imported exception"
+
+step "ICS import refuses VTODO-only files with a clear 400"
+printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:t@x\r\nDTSTAMP:20260901T000000Z\r\nSUMMARY:Task\r\nEND:VTODO\r\nEND:VCALENDAR\r\n' > "$DATA/tasks.ics"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: text/calendar' --data-binary @"$DATA/tasks.ics" \
+  -X POST "$BASE/api/calendars/$ICS_CAL/import")
+[ "$CODE" = 400 ] || fail "VTODO-only import should 400, got $CODE"
+
+step "Subscribed calendar: read-only to import and CalDAV writes, owner can unsubscribe"
+SUB_CAL=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X POST "$BASE/api/calendars" \
+  -d '{"slug":"subscribed","name":"Subscribed","source_url":"http://example.invalid/calendar.ics"}' \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+echo "$SUB_CAL" | python3 -c "import json,sys;assert len(sys.argv[1])==36" "$SUB_CAL" \
+  || fail "subscribed calendar create failed"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: text/calendar' --data-binary @"$DATA/import.ics" \
+  -X POST "$BASE/api/calendars/$SUB_CAL/import")
+[ "$CODE" = 403 ] || fail "import into a subscribed calendar should 403, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" \
+  -X PUT "$BASE/calendars/alice/subscribed/synced.ics" \
+  -H 'content-type: text/calendar' --data-binary @"$DATA/import.ics")
+[ "$CODE" = 403 ] || fail "CalDAV PUT to a subscribed calendar should 403, got $CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
+  -H 'content-type: application/json' -X PATCH "$BASE/api/calendars/$SUB_CAL" \
+  -d '{"source_url":""}')
+[ "$CODE" = 200 ] || fail "owner unsubscribe (clear source_url) should 200, got $CODE"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$SUB_CAL" \
+  | python3 -c "import json,sys;c=json.load(sys.stdin);assert not c['read_only'] and c['source_url'] is None" \
+  || fail "cleared source_url should restore a writable calendar"
+
 step "Event create + ETag If-Match update + 409 on stale"
 EV=$(curl -s -b "$DATA/alice.jar" -H "X-CSRF-Token: $(csrf alice)" \
   -H 'content-type: application/json' -X POST "$BASE/api/calendars/$CAL/events" \

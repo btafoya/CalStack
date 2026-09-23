@@ -164,6 +164,10 @@ pub struct CalendarRow {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+    /// Set → calendar is fed from a remote ICS file and read-only to writes.
+    pub source_url: Option<String>,
+    pub source_etag: Option<String>,
+    pub source_synced_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Default)]
@@ -175,6 +179,8 @@ pub struct NewCalendar {
     pub timezone: Option<String>,
     /// Component set; None = the schema default (ADR-015 D6).
     pub components: Option<Vec<String>>,
+    /// Remote ICS URL; Some → subscribed read-only calendar.
+    pub source_url: Option<String>,
 }
 
 /// Creates a calendar with its ACL inside one transaction; the ACL set must
@@ -188,8 +194,8 @@ pub async fn create_calendar(
 ) -> Result<CalendarRow, DbError> {
     let mut tx = pool.begin().await?;
     let calendar = sqlx::query_as::<_, CalendarRow>(
-        "INSERT INTO calendars (id, tenant_id, slug, name, description, color, timezone, created_by, components)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, ARRAY['VEVENT'])) RETURNING *",
+        "INSERT INTO calendars (id, tenant_id, slug, name, description, color, timezone, created_by, components, source_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, ARRAY['VEVENT']), NULLIF($10, '')) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(tenant_id)
@@ -200,6 +206,7 @@ pub async fn create_calendar(
     .bind(new_calendar.timezone.as_deref())
     .bind(created_by)
     .bind(new_calendar.components.as_deref())
+    .bind(new_calendar.source_url.as_deref())
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| match e {
@@ -336,6 +343,54 @@ pub async fn soft_delete_calendar(pool: &PgPool, calendar_id: Uuid) -> Result<()
     if n == 0 {
         return Err(DbError::NotFound);
     }
+    Ok(())
+}
+
+/// Sets or clears a calendar's remote source (owner action). Any change
+/// resets the sync state: the next ics_sync pass re-fetches from scratch.
+pub async fn set_calendar_source(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    source_url: Option<&str>,
+) -> Result<CalendarRow, DbError> {
+    sqlx::query_as::<_, CalendarRow>(
+        "UPDATE calendars SET source_url = NULLIF($2, ''), source_etag = NULL,
+            source_synced_at = NULL, updated_at = now()
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING *",
+    )
+    .bind(calendar_id)
+    .bind(source_url)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(DbError::NotFound)
+}
+
+/// Live calendars fed from a remote ICS source, for the ics_sync job.
+pub async fn subscribed_calendars(pool: &PgPool) -> Result<Vec<CalendarRow>, DbError> {
+    sqlx::query_as::<_, CalendarRow>(
+        "SELECT * FROM calendars WHERE source_url IS NOT NULL AND deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(Into::into)
+}
+
+/// Records one ics_sync pass: a fresh validator when the body changed (the
+/// fetched ETag or Last-Modified), or keep it on a 304; synced_at always.
+pub async fn set_calendar_sync_state(
+    pool: &PgPool,
+    calendar_id: Uuid,
+    etag: Option<&str>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE calendars SET source_etag = COALESCE($2, source_etag), source_synced_at = now()
+         WHERE id = $1",
+    )
+    .bind(calendar_id)
+    .bind(etag)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

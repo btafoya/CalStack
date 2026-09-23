@@ -106,6 +106,9 @@ const TABLES: &[TableSpec] = &[
             "order_index",
             "components",
             "created_by",
+            "source_url",
+            "source_etag",
+            "source_synced_at",
         ],
         filter: "WHERE deleted_at IS NULL",
         defaults: &[
