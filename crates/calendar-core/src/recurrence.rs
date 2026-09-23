@@ -727,6 +727,45 @@ fn expand_rrule(
     }
     Ok(out)
 }
+
+/// Truncate a recurring rule at a split point ("this and following"):
+/// keeps the occurrences in `before` (already expanded) and rewrites COUNT
+/// or UNTIL so the rule yields exactly those. Other parts (BYDAY, INTERVAL,
+/// …) are preserved verbatim. Returns None when nothing remains before the
+/// split point — the master stops recurring and should become a plain
+/// single event.
+pub fn truncate_rrule(rrule: &str, before: &[DateOrDateTime], all_day: bool) -> Option<String> {
+    let last = before.last()?;
+    let mut kept: Vec<String> = Vec::new();
+    let mut had_count = false;
+    for part in rrule.split(';') {
+        let key = part.split('=').next().unwrap_or(part);
+        match key {
+            "COUNT" => had_count = true,
+            "UNTIL" => {}
+            _ => kept.push(part.to_string()),
+        }
+    }
+    if had_count {
+        kept.push(format!("COUNT={}", before.len()));
+    } else {
+        let until = match last {
+            DateOrDateTime::AllDay(date) => date.format("%Y%m%d").to_string(),
+            // UNTIL is always UTC for DTSTART-with-time (RFC 5545 §3.8.5.3);
+            // instants in `before` are already UTC.
+            DateOrDateTime::Timed(at) => {
+                if all_day {
+                    at.format("%Y%m%d").to_string()
+                } else {
+                    at.format("%Y%m%dT%H%M%SZ").to_string()
+                }
+            }
+        };
+        kept.push(format!("UNTIL={until}"));
+    }
+    Some(kept.join(";"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,5 +1188,53 @@ mod tests {
         );
         let dates: Vec<_> = out.iter().map(|d| (d.year(), d.month(), d.day())).collect();
         assert_eq!(dates, vec![(2026, 3, 8), (2027, 3, 14)]);
+    }
+
+    fn pts(times: &[&str]) -> Vec<DateOrDateTime> {
+        times
+            .iter()
+            .map(|t| {
+                DateOrDateTime::Timed(DateTime::parse_from_rfc3339(t).unwrap().with_timezone(&Utc))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn truncate_rrule_rewrites_until() {
+        let before = pts(&["2026-01-01T09:00:00Z", "2026-01-02T09:00:00Z"]);
+        assert_eq!(
+            truncate_rrule("FREQ=DAILY", &before, false).as_deref(),
+            Some("FREQ=DAILY;UNTIL=20260102T090000Z")
+        );
+        // INTERVAL and BYDAY survive; UNTIL is replaced in place.
+        assert_eq!(
+            truncate_rrule("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE", &before, false).as_deref(),
+            Some("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;UNTIL=20260102T090000Z")
+        );
+    }
+
+    #[test]
+    fn truncate_rrule_clamps_count() {
+        let before = pts(&["2026-01-01T09:00:00Z", "2026-01-02T09:00:00Z"]);
+        assert_eq!(
+            truncate_rrule("FREQ=DAILY;COUNT=10", &before, false).as_deref(),
+            Some("FREQ=DAILY;COUNT=2")
+        );
+    }
+
+    #[test]
+    fn truncate_rrule_all_day_uses_date_until() {
+        let before = vec![DateOrDateTime::AllDay(
+            chrono::NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+        )];
+        assert_eq!(
+            truncate_rrule("FREQ=MONTHLY", &before, true).as_deref(),
+            Some("FREQ=MONTHLY;UNTIL=20260301")
+        );
+    }
+
+    #[test]
+    fn truncate_rrule_nothing_before_stops_recurring() {
+        assert_eq!(truncate_rrule("FREQ=DAILY", &[], false), None);
     }
 }

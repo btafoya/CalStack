@@ -21,6 +21,11 @@
     // existing rule using BYDAY/COUNT/etc is left alone (flag set, key
     // omitted from the save body) rather than risk mangling it.
     editingRruleUnknown: false,
+    // Which save path saveEvent uses: 'edit' (PATCH the row), 'occurrence'
+    // (POST a RECURRENCE-ID exception for this occurrence only) or 'split'
+    // (truncate the series at this occurrence + continuation).
+    editingMode: 'edit',
+    editingOccurrence: null,
     currentAcl: [],
     currentShares: [],
     calendarActivated: false,
@@ -250,18 +255,35 @@
           end: partToLocalInput(data && data.end, '10:00'),
         });
       },
-      // ponytail: editing/deleting a recurring occurrence acts on the whole
-      // series (the shared master event) — per-occurrence exceptions need
-      // their own RECURRENCE-ID UI, add when single-instance edits matter.
+      // ponytail: the three-way series dialog (this / this-and-following /
+      // all) replaced the whole-series-only shortcut; exception rows (their
+      // own RECURRENCE-ID override) and single events still edit directly.
       onEdit: function (appointment) {
         if (state.currentCalendar && state.currentCalendar.readOnly) { return; }
         var ev = state.eventCache[appointment.id];
-        if (ev) { openEventModal('edit', ev); }
+        if (!ev) { return; }
+        if (ev.rrule && !ev.master_event_id) {
+          seriesDialog('Edit "' + (ev.summary || 'this event') + '"').done(function (choice) {
+            if (choice === 'this') { openEventModal('occurrence', ev); }
+            else if (choice === 'following') { openEventModal('split', ev); }
+            else if (choice === 'all') { openEventModal('edit', ev); }
+          });
+          return;
+        }
+        openEventModal('edit', ev);
       },
       onDelete: function (appointment) {
         if (state.currentCalendar && state.currentCalendar.readOnly) { return; }
         var ev = state.eventCache[appointment.id];
         if (!ev) { return; }
+        if (ev.rrule && !ev.master_event_id) {
+          seriesDialog('Delete "' + (ev.summary || 'this event') + '"?').done(function (choice) {
+            if (choice === 'this') { cancelOccurrence(ev); }
+            else if (choice === 'following') { truncateSeries(ev); }
+            else if (choice === 'all') { deleteEvent(ev.id, ev.etag); }
+          });
+          return;
+        }
         confirmDialog('Delete "' + (ev.summary || 'this event') + '"?').done(function () {
           deleteEvent(ev.id, ev.etag);
         });
@@ -570,6 +592,11 @@
       .then(function (rows) {
         return rows.map(function (row) {
           var ev = row.event || row;
+          // The occurrence slot (which day of a series was clicked) and
+          // whether this row is already a RECURRENCE-ID exception drive the
+          // series dialog; the event view itself never carries them.
+          ev._occ = row.occurrence || null;
+          ev._isException = !!row.is_exception;
           state.eventCache[ev.id] = ev;
           return toAppointment(ev, row.occurrence);
         });
@@ -759,22 +786,130 @@
     return parts.join(';');
   }
 
+  // Which part of a recurring series a click on one occurrence touches.
+  // Resolves 'this' | 'following' | 'all', or null on a bare dismiss (Esc /
+  // backdrop) so callers no-op — only the explicit "All events" button picks
+  // the whole series.
+  function seriesDialog(title) {
+    var d = $.Deferred();
+    Swal.fire($.extend({}, BUTTONS, {
+      title: title,
+      showDenyButton: true,
+      showCancelButton: true,
+      confirmButtonText: 'This event',
+      denyButtonText: 'This and following',
+      cancelButtonText: 'All events',
+      customClass: $.extend({}, BUTTONS.customClass, { denyButton: 'btn btn-secondary' }),
+    })).then(function (r) {
+      if (r.isConfirmed) { d.resolve('this'); }
+      else if (r.isDenied) { d.resolve('following'); }
+      else if (r.dismiss === Swal.DismissReason.cancel) { d.resolve('all'); }
+      else { d.resolve(null); }
+    });
+    return d.promise();
+  }
+
+  // The occurrence slot as start/end instants the API accepts: the master's
+  // duration stretched over the clicked day.
+  function occurrenceSlot(ev, occ) {
+    var durationMs = ev.starts_at && ev.ends_at ? (new Date(ev.ends_at) - new Date(ev.starts_at)) : 0;
+    if (occ && occ.kind === 'timed') {
+      var at = new Date(occ.at);
+      return { timed: true, start: occ.at, end: new Date(at.getTime() + durationMs).toISOString() };
+    }
+    var date = (occ && occ.date) || '';
+    var days = ev.start_date && ev.end_date
+      ? Math.round((Date.parse(ev.end_date) - Date.parse(ev.start_date)) / 86400000) : 0;
+    var shifted = new Date(Date.parse(date + 'T00:00:00Z'));
+    shifted.setUTCDate(shifted.getUTCDate() + days);
+    return { timed: false, start: date, end: shifted.toISOString().slice(0, 10) };
+  }
+
+  // "Delete this occurrence": a STATUS:CANCELLED override carrying the
+  // master's own fields, keyed to the clicked day.
+  function cancelOccurrence(ev) {
+    var occ = ev._occ;
+    if (!occ) { return; }
+    var slot = occurrenceSlot(ev, occ);
+    var body = {
+      uid: ev.uid,
+      summary: ev.summary || '(untitled)',
+      description_html: ev.description_html || null,
+      description_text: ev.description_text || null,
+      url: ev.url || null,
+      status: 'CANCELLED',
+      class: ev.class || null,
+      transp: ev.transp || null,
+      categories: ev.categories || [],
+      location: ev.location || null,
+      master_event_id: ev.id,
+    };
+    if (slot.timed) {
+      body.all_day = false;
+      body.starts_at = slot.start;
+      body.ends_at = slot.end;
+      body.recurrence_id_at = occ.at;
+    } else {
+      body.all_day = true;
+      body.start_date = slot.start;
+      body.end_date = slot.end;
+      body.recurrence_id_date = occ.date;
+    }
+    api('POST', '/api/calendars/' + state.currentCalendar.id + '/events', body).done(function () {
+      toast('Occurrence cancelled.');
+      $('#calendar').bsCalendar('refresh');
+    });
+  }
+
+  // "Delete this and following": truncate the series at the clicked day.
+  function truncateSeries(ev) {
+    var occ = ev._occ;
+    if (!occ) { return; }
+    var body = { truncate_rest: true, summary: ev.summary || '(untitled)' };
+    if (occ.kind === 'timed') { body.recurrence_id_at = occ.at; }
+    else { body.recurrence_id_date = occ.date; }
+    api('POST', '/api/events/' + ev.id + '/split', body).done(function () {
+      toast('Future occurrences deleted.');
+      $('#calendar').bsCalendar('refresh');
+    });
+  }
+
   function openEventModal(mode, payload) {
     $('#event-form')[0].reset();
     state.eventDirty = false;
+    state.editingMode = mode;
+    state.editingOccurrence = null;
+    $('#event-modal-title').text(
+      mode === 'occurrence' ? 'Edit this occurrence'
+        : mode === 'split' ? 'Edit from here on'
+        : 'Event');
     $('#ev-delete').prop('hidden', mode !== 'edit');
     $('#ev-attachments-section').prop('hidden', mode !== 'edit');
+    // A single-occurrence edit can't touch the series rule; the picker is
+    // meaningless there. 'split' keeps it (the continuation carries it).
+    $('#ev-repeat-row, #ev-repeat-interval-row, #ev-repeat-until-row')
+      .prop('hidden', mode === 'occurrence');
     state.editingAttendees = [];
     state.placeLocation = null;
     pickedPlace = null;
     hidePlaceMenu();
-    if (mode === 'edit') {
+    if (mode !== 'create') {
       state.editingEventId = payload.id;
-      state.editingEtag = payload.etag;
-      state.editingRruleUnknown = !applyRruleToForm(payload.rrule);
+      state.editingEtag = mode === 'edit' ? payload.etag : null;
+      // 'occurrence' saves an exception — it never sends a rule; 'split'
+      // prefills the master's rule so the continuation can carry a change.
+      state.editingRruleUnknown = !applyRruleToForm(
+        mode === 'occurrence' ? null : payload.rrule);
+      state.editingOccurrence = mode === 'edit' ? null : (payload._occ || null);
       $('#ev-title').val(payload.summary || '');
-      setTimeControls('start', isoToLocalInput(payload.starts_at || payload.start_date));
-      setTimeControls('end', isoToLocalInput(payload.ends_at || payload.end_date));
+      // The occurrence's own slot (the clicked day), not the series DTSTART.
+      var slot = mode === 'edit' ? null : occurrenceSlot(payload, payload._occ);
+      setTimeControls('start', slot
+        ? isoToLocalInput(slot.start)
+        : isoToLocalInput(payload.starts_at || payload.start_date));
+      setTimeControls('end', slot
+        ? isoToLocalInput(slot.end)
+        : isoToLocalInput(payload.ends_at || payload.end_date));
       $('#ev-all-day').prop('checked', !!payload.all_day);
       $('#ev-url').val(payload.url || '');
       $('#ev-status').val(payload.status || '');
@@ -909,11 +1044,41 @@
       body.starts_at = localInputToIso($('#ev-start').val());
       body.ends_at = localInputToIso($('#ev-end').val());
     }
-    if (!state.editingRruleUnknown) { body.rrule = buildRrule(); }
-    var req = state.editingEventId
-      ? api('PATCH', '/api/events/' + state.editingEventId, body,
-          state.editingEtag ? { 'If-Match': state.editingEtag } : {})
-      : api('POST', '/api/calendars/' + state.currentCalendar.id + '/events', body);
+    // An exception body carries no rule; a split body carries the rule the
+    // continuation should use (omitted when the picker can't rebuild it —
+    // the server then keeps the master's rule).
+    if (state.editingMode !== 'occurrence' && !state.editingRruleUnknown) {
+      body.rrule = buildRrule();
+    }
+    if (state.editingMode === 'occurrence') {
+      // A RECURRENCE-ID exception for just this occurrence; the server
+      // derives the wall-clock RECURRENCE-ID from the occurrence instant.
+      var master = state.eventCache[state.editingEventId];
+      body.master_event_id = state.editingEventId;
+      body.uid = master ? master.uid : undefined;
+      if (state.editingOccurrence) {
+        if (state.editingOccurrence.kind === 'timed') {
+          body.recurrence_id_at = state.editingOccurrence.at;
+        } else {
+          body.recurrence_id_date = state.editingOccurrence.date;
+        }
+      }
+      req = api('POST', '/api/calendars/' + state.currentCalendar.id + '/events', body);
+    } else if (state.editingMode === 'split') {
+      if (state.editingOccurrence) {
+        if (state.editingOccurrence.kind === 'timed') {
+          body.recurrence_id_at = state.editingOccurrence.at;
+        } else {
+          body.recurrence_id_date = state.editingOccurrence.date;
+        }
+      }
+      req = api('POST', '/api/events/' + state.editingEventId + '/split', body);
+    } else if (state.editingEventId) {
+      req = api('PATCH', '/api/events/' + state.editingEventId, body,
+        state.editingEtag ? { 'If-Match': state.editingEtag } : {});
+    } else {
+      req = api('POST', '/api/calendars/' + state.currentCalendar.id + '/events', body);
+    }
     req.done(function () {
       state.eventDirty = false;
       modal('event-modal').hide();
