@@ -256,7 +256,8 @@ aside.border-end {
 
 /* "Free" pills go hollow; the colored inset ring is set inline by app.js
    from the pill's own background before this class clears it. */
-[data-appointment].ev-free {
+[data-appointment].ev-free,
+[data-appointment].ev-free * {
   background-color: transparent !important;
   background-image: none !important;
   color: var(--bs-body-color) !important;
