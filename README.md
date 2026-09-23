@@ -29,6 +29,7 @@ CalStack speaks CalDAV (and CardDAV) to real clients (Apple Calendar/Contacts, T
 - **Categories** — tenant-wide color-coded registry shared across every calendar; managed from the web UI, carried on events and exposed through the API.
 - **ACLs** — multiple owners per calendar, owner/read-write/read-only/free-busy capabilities.
 - **Public sharing** — revocable, optionally-expiring share tokens; anonymous read-only `.ics` feeds that withhold private/confidential events and attendee contact data. A share token also works as a read-only CalDAV credential when `allows_caldav` is set.
+- **ICS import / export / subscriptions** — upload a `.ics` file into any calendar (duplicates skipped by UID, recurrence exceptions round-trip), download any calendar as `.ics`, or subscribe a calendar to a remote `.ics` URL: the server re-fetches it on a schedule, keeps events in sync, and treats the calendar as read-only.
 - **Auth** — local accounts (Argon2id), WebAuthn/passkeys, TOTP 2FA with recovery codes, scoped API bearer tokens, CalDAV app passwords, and lockout after repeated failed logins.
 - **Reminders** — VALARMs fire from a PostgreSQL-backed durable job queue (no external scheduler) and reach you however you want: in-app always, plus email, SMS, and Web Push. Pick channels per alarm, opt out per user, and failed sends retry with backoff before giving up with a notice in the app.
 - **Attachments** — capped, stored as `bytea` in PostgreSQL.
@@ -126,6 +127,8 @@ Configuration is environment-variable only — no config files, no CLI flags for
 | `POSTMARK_INBOUND_SECRET` | required for inbound iMIP | — | Shared secret validating Postmark's inbound iMIP webhook; the webhook endpoint refuses all traffic (403) while this is unset |
 | `APP_PUBLIC_URL` | no | — | Public base URL (e.g. `https://calendar.example.com`) for the click-through link in reminder emails and Web Push payloads. No link is added when unset. |
 | `GOOGLE_MAPS_API_KEY` | no | — | Google Places API (New) key enabling place autocomplete in the web UI event form. Key stays server-side; browsers call the `/api/places/*` proxy. Without it, the location field is free text. |
+| `IMPORT_MAX_BYTES` | no | `10485760` (10 MB) | Cap on a single ICS import body and on a remote subscription fetch |
+| `ICS_SYNC_INTERVAL_SECS` | no | `3600` | How often subscribed remote `.ics` calendars are re-fetched |
 
 \* `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGIN` must both be set to enable passkey login; otherwise it's disabled and every other auth method still works.
 
@@ -159,13 +162,13 @@ Under Docker Compose, run subcommands with `docker compose run --rm app <command
 docker compose run --rm app create-admin admin admin@example.com correcthorsebatterystaple
 ```
 
-`serve` also starts an in-process worker that scans for due VALARM reminders and dispatches them, sends outbound iTIP invitations, and purges expired data on a schedule — no separate process to babysit.
+`serve` also starts an in-process worker that scans for due VALARM reminders and dispatches them, sends outbound iTIP invitations, re-fetches subscribed remote `.ics` calendars, and purges expired data on a schedule — no separate process to babysit.
 
 ## Usage
 
 ### Web UI
 
-Open `http://<BIND_ADDR>/` (redirects to `/login` if unauthenticated). Register an account, create a calendar, and use the built-in week-view calendar to add events.
+Open `http://<BIND_ADDR>/` (redirects to `/login` if unauthenticated). Register an account, create a calendar, and use the built-in week-view calendar to add events. The calendar sidebar covers the ICS lifecycle too: the **+/edit** dialog takes a remote `.ics` URL to subscribe, and the **import/export** buttons in the tab bar upload or download the selected calendar's `.ics`.
 
 - **Account** (nav bar, every signed-in user) — change your password (this revokes every other live session), turn off email/SMS/push reminders if you don't want them, and enable Web Push on the current device.
 - **Tasks** (nav bar) — VTODO to-do lists with due dates, priority, recurrence, and completion, in both list and web form.
@@ -255,6 +258,33 @@ curl -s -b cookies.txt -H "X-CSRF-Token: $CSRF" \
 The resulting feed (`https://your-host/share/<token>/calendar.ics`) needs no authentication and can be subscribed to from any calendar app. Revoke it any time via `DELETE /api/calendars/<calendar-id>/shares/<share-id>`.
 
 Pass `"allows_caldav": true` when creating the share and the token also works as a read-only CalDAV credential: point a DAV client at the same server, authenticate with the **token as the username** (any password). The share principal sees only that calendar, only PUBLIC events, and can never write; revocation or expiry cuts DAV access on the next request.
+
+### ICS import / export / subscriptions
+
+```bash
+# upload an .ics file into a calendar you can write to
+curl -s -b cookies.txt -H "X-CSRF-Token: $CSRF" \
+  -H 'content-type: text/calendar' --data-binary @events.ics \
+  -X POST https://your-host/api/calendars/<calendar-id>/import
+# -> {"imported": 3, "skipped": 1, "rejected": [{"uid": "...", "reason": "..."}]}
+
+# download a whole calendar as .ics
+curl -s -b cookies.txt \
+  https://your-host/api/calendars/<calendar-id>/export.ics -o work.ics
+```
+
+Events whose UID already exists live in the target calendar are **skipped, never overwritten**; a series (master plus its `RECURRENCE-ID` exceptions) imports as one unit. Per-series failures are reported in `rejected` and never abort the batch. Tasks and journals are not file-importable — those go through CalDAV.
+
+To follow a remote calendar, create (or patch, owner-only) a calendar with a `source_url`:
+
+```bash
+curl -s -b cookies.txt -H "X-CSRF-Token: $CSRF" \
+  -X POST https://your-host/api/calendars \
+  -H 'content-type: application/json' \
+  -d '{"slug":"remote","name":"Remote","source_url":"https://example.com/calendar.ics"}'
+```
+
+A subscribed calendar is **read-only** (file imports and CalDAV writes are refused): every `ICS_SYNC_INTERVAL_SECS` the server fetches the remote file (ETag-conditional, size-capped, no redirects followed, private network targets refused), replaces events by UID, and soft-deletes ones the remote no longer lists. Clear it with `PATCH {"source_url": ""}` to turn the calendar back into a normal, writable one.
 
 ## Development
 
