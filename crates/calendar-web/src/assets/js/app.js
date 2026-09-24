@@ -598,6 +598,9 @@
       from: toIso(range.from),
       to: toIsoExclusiveEnd(range.to),
     });
+    // Cancelled occurrences stay visible (struck through) so they can be
+    // re-opened; subscriptions are someone else's calendar and stay filtered.
+    if (!cal.subscriptionId) { params.set('include', 'cancelled'); }
     var url = cal.subscriptionId
       ? '/api/subscriptions/' + cal.subscriptionId + '/occurrences?' + params
       : '/api/calendars/' + cal.id + '/occurrences?' + params;

@@ -496,6 +496,13 @@ import json,sys
 rows = json.load(sys.stdin)
 assert not any((r['occurrence'] or {}).get('at', '').startswith('2026-10-04') for r in rows), rows
 " || fail "cancelled occurrence must be hidden from the occurrence feed"
+curl -s -b "$DATA/alice.jar" "$BASE/api/calendars/$SER_CAL/occurrences?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z&include=cancelled" \
+  | python3 -c "
+import json,sys
+rows = json.load(sys.stdin)
+hit = [r for r in rows if (r['occurrence'] or {}).get('at', '').startswith('2026-10-04')]
+assert len(hit) == 1 and hit[0]['is_exception'] and hit[0]['event']['status'] == 'CANCELLED', rows
+" || fail "include=cancelled must surface the cancelled override"
 curl -s -u "$AUTH" "$BASE/calendars/alice/series-edit/$SER_ID.ics" \
   | grep -q "STATUS:CANCELLED" \
   || fail "CalDAV must still serve the cancelled override inside the master"
