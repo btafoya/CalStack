@@ -784,7 +784,7 @@ impl axum::extract::FromRequestParts<AppState> for IfMatch {
         ("id" = Uuid, Path, description = "calendar id"),
         ("from" = Option<chrono::DateTime<Utc>>, Query, description = "window start (default: now - 30d)"),
         ("to" = Option<chrono::DateTime<Utc>>, Query, description = "window end (default: now + 90d)"),
-        ("include" = Option<String>, Query, description = "comma-separated extras: tasks,journals append dated markers (type: task/journal) to the event entries"),
+        ("include" = Option<String>, Query, description = "comma-separated extras: tasks,journals append dated markers (type: task/journal) to the event entries; cancelled keeps cancelled occurrence overrides in the feed"),
     ),
     responses((status = 200, description = "occurrences", body = Vec<OccurrenceView>))
 )]
@@ -805,14 +805,9 @@ async fn list_occurrences(
     let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let rows = db::list_events_in_range(&pool, calendar_id, from, to).await?;
-    let mut out: Vec<serde_json::Value> =
-        expand_occurrences_json(&pool, calendar_id, rows, from, to)
-            .await?
-            .into_iter()
-            .map(|o| serde_json::to_value(o).expect("occurrence view serializes"))
-            .collect();
     // Additive ?include=tasks,journals: dated markers for the calendar view;
-    // the event entries above keep their shape untouched.
+    // the event entries keep their shape untouched. `cancelled` keeps
+    // cancelled overrides in the feed so the UI can show and re-open them.
     let include: Vec<&str> = query
         .include
         .as_deref()
@@ -821,6 +816,18 @@ async fn list_occurrences(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
+    let mut out: Vec<serde_json::Value> = expand_occurrences_json(
+        &pool,
+        calendar_id,
+        rows,
+        from,
+        to,
+        include.contains(&"cancelled"),
+    )
+    .await?
+    .into_iter()
+    .map(|o| serde_json::to_value(o).expect("occurrence view serializes"))
+    .collect();
     if include.contains(&"tasks") {
         out.extend(
             include_task_markers(&pool, calendar_id, from, to)
@@ -1017,7 +1024,7 @@ async fn list_subscription_occurrences(
     let from = query.from.unwrap_or(Utc::now() - Duration::days(30));
     let to = query.to.unwrap_or(Utc::now() + Duration::days(90));
     let rows = db::list_public_events_in_range(&pool, calendar_id, from, to).await?;
-    let out = expand_occurrences_json(&pool, calendar_id, rows, from, to).await?;
+    let out = expand_occurrences_json(&pool, calendar_id, rows, from, to, false).await?;
     Ok(Json(out))
 }
 
@@ -1029,6 +1036,7 @@ async fn expand_occurrences_json(
     rows: Vec<db::EventRow>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    show_cancelled: bool,
 ) -> Result<Vec<OccurrenceView>, AppError> {
     let registry = db::categories::registry_for_calendar(pool, calendar_id).await?;
     let master_ids: Vec<Uuid> = rows
@@ -1108,9 +1116,12 @@ async fn expand_occurrences_json(
                 .iter()
                 .find(|ex| ex.master_event_id == Some(event.id) && ex.recurrence_id == Some(wall));
             // A cancelled override means the occurrence is off the calendar
-            // (web grid); CalDAV still serves it as a STATUS:CANCELLED
+            // unless the caller asked to see it (owner web grid, so it can be
+            // re-opened); CalDAV still serves it as a STATUS:CANCELLED
             // override inside the master's resource.
-            if matched.is_some_and(|ex| ex.status.as_deref() == Some("CANCELLED")) {
+            if !show_cancelled
+                && matched.is_some_and(|ex| ex.status.as_deref() == Some("CANCELLED"))
+            {
                 continue;
             }
             let (source, is_exception) = matched.map_or((event, false), |ex| (ex, true));
