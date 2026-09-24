@@ -260,7 +260,7 @@
       // own RECURRENCE-ID override) and single events still edit directly.
       onEdit: function (appointment) {
         if (state.currentCalendar && state.currentCalendar.readOnly) { return; }
-        var ev = state.eventCache[appointment.id];
+        var ev = seriesEvent(appointment);
         if (!ev) { return; }
         if (ev.rrule && !ev.master_event_id) {
           seriesDialog('Edit "' + (ev.summary || 'this event') + '"').done(function (choice) {
@@ -274,7 +274,7 @@
       },
       onDelete: function (appointment) {
         if (state.currentCalendar && state.currentCalendar.readOnly) { return; }
-        var ev = state.eventCache[appointment.id];
+        var ev = seriesEvent(appointment);
         if (!ev) { return; }
         if (ev.rrule && !ev.master_event_id) {
           seriesDialog('Delete "' + (ev.summary || 'this event') + '"?').done(function (choice) {
@@ -290,6 +290,16 @@
       },
     });
     startAmPmObserver();
+  }
+
+  // The eventCache entry for a series id is shared by every occurrence pill
+  // (keyed by the master's id) and holds whichever occurrence loaded last —
+  // overlay the clicked pill's own occurrence so "this occurrence" targets
+  // the day actually clicked.
+  function seriesEvent(appointment) {
+    var ev = appointment && state.eventCache[appointment.id];
+    if (!ev) { return null; }
+    return appointment._occ ? $.extend({}, ev, { _occ: appointment._occ }) : ev;
   }
 
   // ============ calendar create/edit ============
@@ -537,6 +547,10 @@
       // First registered category wins the event color; untagged events keep
       // the calendar color.
       color: categoryColorHex(ev) || (state.currentCalendar && state.currentCalendar.color) || '#1554C0',
+      // Every occurrence pill of a series shares the master's id, so the
+      // eventCache entry (keyed by that id) holds whichever occurrence
+      // happened to load last — the pill must carry its own.
+      _occ: occurrence,
     };
   }
 
