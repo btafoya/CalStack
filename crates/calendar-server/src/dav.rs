@@ -373,7 +373,16 @@ async fn bind_carddav_namespace(response: axum::response::Response) -> axum::res
         Ok(xml) => match xml.find("<D:multistatus") {
             Some(open) => {
                 let rest = &xml[open + "<D:multistatus".len()..];
-                format!("<D:multistatus xmlns:CARD=\"urn:ietf:params:xml:ns:carddav\"{rest}")
+                let tag_end = rest.find('>').map_or(rest.len(), |i| i + 1);
+                // Only bind when not already bound: dav-server-rs declares
+                // prefixes its property elements carry, and a duplicate
+                // xmlns:CARD makes strict parsers reject the whole document
+                // (Thunderbird again, 2026-09-28).
+                if rest[..tag_end].contains("xmlns:CARD") {
+                    xml.to_string()
+                } else {
+                    format!("<D:multistatus xmlns:CARD=\"urn:ietf:params:xml:ns:carddav\"{rest}")
+                }
             }
             None => xml.to_string(),
         },
@@ -1678,6 +1687,20 @@ mod tests {
             .unwrap();
         let other = bind_carddav_namespace(other).await;
         assert_eq!(other.status(), StatusCode::NOT_FOUND);
+
+        // Already bound: no duplicate declaration must be added.
+        let xml_bound = "<D:multistatus xmlns:CARD=\"urn:ietf:params:xml:ns:carddav\" xmlns:D=\"DAV:\">\
+<D:response><D:href>/contacts/dev/contacts/</D:href><D:propstat><D:prop><CARD:addressbook></CARD:addressbook>\
+</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>";
+        let bound = axum::response::Response::builder()
+            .status(StatusCode::MULTI_STATUS)
+            .body(Body::from(xml_bound))
+            .unwrap();
+        let out = bind_carddav_namespace(bound).await;
+        let (_, body) = out.into_parts();
+        let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await.unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(text.matches("xmlns:CARD").count(), 1);
     }
 
     fn base_row(id: Uuid) -> db::EventRow {

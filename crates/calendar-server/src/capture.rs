@@ -1,7 +1,8 @@
 //! Dev-only DAV request capture for the client fixture session
 //! (docs/INTEROP_CAPTURE.md). Off unless `DAV_CAPTURE_DIR` is set: one text
 //! file per request holding the method, URL, headers, body and the response
-//! status. Only DAV traffic is captured, never `/api`, so login passwords and
+//! status, selected headers and body. Only DAV traffic is captured, never
+//! `/api`, so login passwords and
 //! tokens are not written. `Authorization` and `Cookie` values are redacted,
 //! but bodies are calendar content: point this at a throwaway directory.
 
@@ -87,6 +88,33 @@ pub(crate) async fn middleware(request: Request, next: Next) -> Response {
         "\n\n--- response ---\nstatus: {}\n",
         response.status()
     ));
+    for name in ["content-type", "location", "etag", "dav"] {
+        if let Some(v) = response.headers().get(name)
+            && let Ok(s) = v.to_str()
+        {
+            text.push_str(&format!("{name}: {s}\n"));
+        }
+    }
+    // Response body, capped — bodies are calendar content, dev data only.
+    // Beyond the cap the response is served empty (capture mode is dev-only;
+    // real sessions carry small bodies) and noted in the capture.
+    let (rparts, rbody) = response.into_parts();
+    let mut response_out = None;
+    match axum::body::to_bytes(rbody, 8 * 1024 * 1024).await {
+        Ok(rb) => {
+            if !rb.is_empty() {
+                text.push_str("\n--- response body ---\n");
+                text.push_str(&String::from_utf8_lossy(&rb));
+                if rb.len() >= 8 * 1024 * 1024 {
+                    text.push_str("\n<truncated>");
+                }
+            }
+            response_out = Some(rb);
+        }
+        Err(_) => text.push_str("\n<truncated: response body exceeded capture cap>"),
+    }
+    let response =
+        axum::response::Response::from_parts(rparts, Body::from(response_out.unwrap_or_default()));
     if let Err(e) = write(&file, &text).await {
         tracing::warn!(error = %e, "DAV capture write failed");
     }
