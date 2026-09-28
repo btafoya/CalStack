@@ -5,7 +5,11 @@
 <h1 align="center">Daymark</h1>
 
 <p align="center">
-  A fast, self-hosted, single-binary calendar server written in Rust, backed by nothing but PostgreSQL.
+  A standards-first, self-hosted calendar &amp; contacts server.
+</p>
+
+<p align="center">
+  CalDAV &middot; CardDAV &middot; OpenAPI 3.1 &middot; single Rust binary &middot; PostgreSQL &middot; MIT
 </p>
 
 <p align="center">
@@ -15,33 +19,88 @@
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg">
 </p>
 
+<p align="center">
+  <a href="#installation"><b>Quick start</b></a> ·
+  <a href="#api"><b>API</b></a> ·
+  <a href="#client-compatibility"><b>Client compatibility</b></a> ·
+  <a href="docs/README.md"><b>Documentation</b></a>
+</p>
+
 ---
 
 Daymark speaks standard CalDAV and CardDAV (RFC 4791 / RFC 6352) and exposes a normalized OpenAPI domain model for everything else. One binary, one database, no Redis, no queue service, no data directory. Protocol behavior is exercised end-to-end by an automated interoperability suite — see [Client compatibility](#client-compatibility) for tested-client status.
 
+Calendar and contact infrastructure without deploying a groupware suite.
+
+```text
+                    Internet
+                       │
+                 Reverse proxy
+                (Caddy/nginx/TLS)
+                       │
+                       ▼
+               ┌───────────────┐
+               │    Daymark    │   one Rust binary:
+               │  web UI + in- │   static assets and the
+               │  process jobs │   job worker are embedded
+               └───────┬───────┘
+       ┌───────────────┼───────────────┐
+       ▼               ▼               ▼
+    CalDAV          CardDAV         OpenAPI
+   RFC 4791        RFC 6352        /api/*
+   /calendars      /contacts       apps & integrations
+       │               │               │
+       └───────────────┼───────────────┘
+                       ▼
+                 PostgreSQL 16+
+      events · tasks · contacts · jobs
+```
+
 ## Features
 
-- **CalDAV** (RFC 4791) discovery, `MKCALENDAR`, CRUD, `calendar-query`/`calendar-multiget` REPORTs, `sync-collection` incremental sync, `free-busy-query` — for events, tasks, and journals alike.
-- **CardDAV** (RFC 6352) address books — `.well-known/carddav` discovery, vCard CRUD, the same app passwords as CalDAV, plus a normalized contacts API and web page.
-- **OpenAPI 3.1** domain API — the full model, not a CalDAV wrapper. Served live at `/api/openapi.json`.
-- **PostgreSQL-normalized events** — full RRULE/RDATE/EXDATE/RECURRENCE-ID recurrence, hand-rolled and DST-correct, with client-supplied VTIMEZONE definitions parsed, stored per calendar, and honored during expansion (custom tzids never silently become UTC). iCalendar is a wire format, never the source of truth.
+### Standards
+
+- **CalDAV** (RFC 4791) — discovery, `MKCALENDAR`, CRUD, `calendar-query`/`calendar-multiget` REPORTs, `sync-collection` incremental sync, `free-busy-query` — for events, tasks, and journals alike.
+- **CardDAV** (RFC 6352) — address books, `.well-known/carddav` discovery, vCard CRUD, the same app passwords as CalDAV, plus a normalized contacts API and web page.
+- **iCalendar fidelity** — full RRULE/RDATE/EXDATE/RECURRENCE-ID recurrence, hand-rolled and DST-correct, with client-supplied VTIMEZONE definitions parsed, stored per calendar, and honored during expansion (custom tzids never silently become UTC).
+
+### Data & storage
+
+- **PostgreSQL-normalized events** — iCalendar is a wire format, never the source of truth; the same data is addressable through CalDAV, the API, and full-text search.
 - **Tasks and journals** — VTODO and VJOURNAL are first-class stored components (ADR-015), not opaque blobs: normalized columns beside `extra_props` for anything unmodelled, full recurrence with overrides, CalDAV and API round-trips, and web pages.
 - **Categories** — tenant-wide color-coded registry shared across every calendar; managed from the web UI, carried on events and exposed through the API.
-- **ACLs** — multiple owners per calendar, owner/read-write/read-only/free-busy capabilities.
-- **Public sharing** — revocable, optionally-expiring share tokens; anonymous read-only `.ics` feeds that withhold private/confidential events and attendee contact data. A share token also works as a read-only CalDAV credential when `allows_caldav` is set.
 - **ICS import / export / subscriptions** — upload a `.ics` file into any calendar (duplicates skipped by UID, recurrence exceptions round-trip), download any calendar as `.ics`, or subscribe a calendar to a remote `.ics` URL: the server re-fetches it on a schedule, keeps events in sync, and treats the calendar as read-only.
-- **Auth** — local accounts (Argon2id), WebAuthn/passkeys, TOTP 2FA with recovery codes, scoped API bearer tokens, CalDAV app passwords, and lockout after repeated failed logins.
-- **Reminders** — VALARMs fire from a PostgreSQL-backed durable job queue (no external scheduler) and reach you however you want: in-app always, plus email, SMS, and Web Push. Pick channels per alarm, opt out per user, and failed sends retry with backoff before giving up with a notice in the app.
 - **Attachments** — capped, stored as `bytea` in PostgreSQL.
 - **Search** — PostgreSQL full-text, no external search service.
+- **Backup/restore** — portable JSON export/import, attachments included.
+
+### Authentication
+
+- **Auth** — local accounts (Argon2id), WebAuthn/passkeys, TOTP 2FA with recovery codes, scoped API bearer tokens, CalDAV app passwords, and lockout after repeated failed logins.
+
+### Collaboration
+
+- **ACLs** — multiple owners per calendar, owner/read-write/read-only/free-busy capabilities.
+- **Public sharing** — revocable, optionally-expiring share tokens; anonymous read-only `.ics` feeds that withhold private/confidential events and attendee contact data. A share token also works as a read-only CalDAV credential when `allows_caldav` is set.
+- **Attendees** — invite by email or by phone alone; `sms:` attendee URIs round-trip through iCalendar.
 - **Scheduling** — outbound iTIP invitations and cancellations, inbound iMIP replies via a Postmark webhook. Attendees on the same tenant get organizer-rebuilt copies of the event directly — no email involved — and their replies round-trip internally. Sender identity is trusted from Postmark's inbound pipeline (SPF/DKIM/DMARC happen there); the server only checks the From against the attendee list. Do not configure the webhook if you do not trust your inbound mail pipeline.
+
+### Automation
+
+- **Reminders** — VALARMs fire from a PostgreSQL-backed durable job queue (no external scheduler) and reach you however you want: in-app always, plus email, SMS, and Web Push. Pick channels per alarm, opt out per user, and failed sends retry with backoff before giving up with a notice in the app.
 - **Rules** — trigger → condition → action automation on event created/updated/deleted (field/op/value conditions, in-app / SMS / webhook actions), scoped to one calendar or tenant-wide; managed from the web UI.
 - **Webhooks** — register HMAC-SHA256-signed webhook URLs per tenant; every event create/update/delete (via the API or CalDAV) and rule webhook action delivers an at-least-once signed payload through the durable job queue, with retries, delivery history, and a send-test button.
-- **Audit trail** — every authenticated API mutation and login event is recorded (actor, action, object, status) and rendered on the Admin page; rows purge after `AUDIT_RETENTION_DAYS`.
 - **Notifications** — Postmark, generic SMTP, Twilio SMS, and Web Push (VAPID) credentials, all configured from the web UI. Every provider is editable and has a send-test button.
-- **Attendees** — invite by email or by phone alone; `sms:` attendee URIs round-trip through iCalendar.
+- **Audit trail** — every authenticated API mutation and login event is recorded (actor, action, object, status) and rendered on the Admin page; rows purge after `AUDIT_RETENTION_DAYS`.
+
+### Developer platform
+
+- **OpenAPI 3.1** domain API — the full model, not a CalDAV wrapper. Served live at `/api/openapi.json`, browsable through the vendored Swagger UI at `/docs`.
+- **Scoped tokens** — read/write/full bearer scopes enforced server-side; webhooks and a rules engine make the API programmable, not just readable.
+
+### Web UI
+
 - **Embedded web UI** — Bootstrap 5.3 + jQuery 4 + [bs-calendar](https://github.com/ThomasDev-de/bs-calendar), vendored, no CDN, no build step. Calendar view, per-calendar rules, notification providers, and admin user management.
-- **Backup/restore** — portable JSON export/import, attachments included.
 
 MIT licensed.
 

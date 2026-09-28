@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a problem with the server, API, protocols, or web UI
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issues: do not open an issue — email btafoya@briantafoya.com (see [SECURITY.md](../blob/main/SECURITY.md)).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps, curl commands, or a client trace. For CalDAV/CardDAV issues, include the client name and version.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Daymark version / commit
+      description: "`calendar-server check`, `git rev-parse HEAD`, or the Docker tag"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Area
+      options:
+        - CalDAV
+        - CardDAV
+        - OpenAPI / REST API
+        - Web UI
+        - Authentication / sessions
+        - Notifications / reminders
+        - Webhooks / rules
+        - Import / export / subscriptions
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Server log excerpt. Redact credentials — never paste tokens or passwords.
+    validations:
+      required: false

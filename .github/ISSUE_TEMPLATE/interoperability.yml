@@ -1,0 +1,61 @@
+name: Client interoperability report
+description: Report how a real CalDAV/CardDAV client behaves against Daymark (successes and failures both valuable)
+labels: ["interoperability"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real-client testing is the most valuable contribution for a DAV server. Both working configurations and breakage reports help — the goal is a truthful [compatibility matrix](../blob/main/docs/COMPATIBILITY.md).
+  - type: input
+    id: client
+    attributes:
+      label: Client and version
+      example: "Thunderbird 140.0 (Linux); DAVx5 4.5 (Android 15)"
+    validations:
+      required: true
+  - type: input
+    id: daymark-version
+    attributes:
+      label: Daymark version / commit
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Works fully
+        - Works with caveats
+        - Partially works
+        - Does not work
+    validations:
+      required: true
+  - type: checkboxes
+    id: tested
+    attributes:
+      label: What you exercised
+      options:
+        - Account discovery (.well-known / bare URL)
+        - Calendar/address book list
+        - Event/contact create, edit, delete
+        - Recurrence and exceptions
+        - Alarms / reminders
+        - Tasks (VTODO)
+        - Journals (VJOURNAL)
+        - Free/busy
+        - Sharing / public feed
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What worked, what didn't, error messages, unexpected behavior. A client-side trace or `captures/` output is gold.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      description: Sanitize any calendar/contact data before pasting.
+      options:
+        - label: I have removed private data from this report
+          required: true
