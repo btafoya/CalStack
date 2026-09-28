@@ -378,6 +378,10 @@ OUT=$(curl -s -u "$AUTH" -X PROPFIND "$BASE/contacts/alice/" -H 'Depth: 1' \
 echo "$OUT" | grep -q "contacts" || fail "personal book missing from home-set listing"
 echo "$OUT" | grep -q "directory" || fail "directory book missing from home-set listing"
 echo "$OUT" | grep -q "<D:href>[^<]*//" && fail "doubled slash in home-set hrefs"
+# The document must be well-formed XML: dav-server-rs emits CARD: prefixed
+# elements without binding the namespace, which strict parsers reject.
+echo "$OUT" | python3 -c "import sys,xml.dom.minidom; xml.dom.minidom.parseString(sys.stdin.read())" \
+  || fail "home-set listing is not well-formed XML"
 
 step "CardDAV vCard PUT/GET round-trip"
 VUID=$(uuidgen)

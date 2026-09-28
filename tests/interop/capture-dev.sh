@@ -51,6 +51,20 @@ CSRF=$(curl -s -c "$J" -X POST $B/api/auth/login -H 'content-type: application/j
 APPPW=$(curl -s -b "$J" -H "X-CSRF-Token: $CSRF" -H 'content-type: application/json' \
   -X POST $B/api/auth/app-passwords -d '{"name":"clients"}' | jq -r .password)
 rm -f "$J"
+
+# Standard calendar fixtures so a client's stored collection URLs (same slugs
+# each run) keep resolving across stack restarts.
+J2=$(mktemp)
+CSRF2=$(curl -s -c "$J2" -X POST $B/api/auth/login -H 'content-type: application/json' \
+  -d "{\"username_or_email\":\"dev\",\"password\":\"$WEBPW\"}" | jq -r .csrf_token)
+for SPEC in \
+  '{"slug":"personal","name":"Personal","components":["VEVENT"]}' \
+  '{"slug":"tasks","name":"Tasks","components":["VEVENT","VTODO"]}' \
+  '{"slug":"journal","name":"Journal","components":["VEVENT","VJOURNAL"]}'; do
+  curl -s -b "$J2" -H "X-CSRF-Token: $CSRF2" -H 'content-type: application/json' \
+    -X POST $B/api/calendars -d "$SPEC" -o /dev/null
+done
+rm -f "$J2"
 if [ "$BIND" = 127.0.0.1 ]; then
   IP=127.0.0.1
   NOTE="Loopback only: put a TLS reverse proxy in front to reach it from a phone, or rerun with BIND_ADDR=0.0.0.0."

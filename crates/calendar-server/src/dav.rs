@@ -352,7 +352,39 @@ pub(crate) async fn entry_carddav(
             calendar_carddav::DavAuth { user: auth.user },
         )
         .await;
-    convert(response)
+    bind_carddav_namespace(convert(response)).await
+}
+
+/// dav-server-rs emits `CARD:addressbook` inside resourcetype with the prefix
+/// set but the namespace never bound: only D (and C, caldav) are declared at
+/// the multistatus root, so every CardDAV listing is unparseable for strict
+/// XML parsers (Thunderbird's DOMParser discards the document entirely and
+/// reports "no address books found", 2026-09-28). Bind CARD at the root.
+async fn bind_carddav_namespace(response: axum::response::Response) -> axum::response::Response {
+    if response.status() != StatusCode::MULTI_STATUS {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => return internal("CardDAV response body unreadable"),
+    };
+    let out = match std::str::from_utf8(&bytes) {
+        Ok(xml) => match xml.find("<D:multistatus") {
+            Some(open) => {
+                let rest = &xml[open + "<D:multistatus".len()..];
+                format!("<D:multistatus xmlns:CARD=\"urn:ietf:params:xml:ns:carddav\"{rest}")
+            }
+            None => xml.to_string(),
+        },
+        // Not UTF-8: pass the body through untouched.
+        Err(_) => {
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return axum::response::Response::from_parts(parts, Body::from(bytes));
+        }
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, Body::from(out.into_bytes()))
 }
 
 /// sync-collection REPORT for an address book: dav-server-rs implements it
@@ -1618,6 +1650,34 @@ mod tests {
         );
         let ics = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nBEGIN:VALARM\r\nEND:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
         assert_eq!(body_components(ics).collect::<Vec<_>>(), ["VTODO"]);
+    }
+
+    #[tokio::test]
+    async fn carddav_responses_bind_the_card_namespace() {
+        use axum::body::Body;
+        // Shape dav-server-rs emits: CARD: prefixed element, root declares
+        // only D (and C).
+        let xml = "<D:multistatus xmlns:D=\"DAV:\"><D:response><D:href>/contacts/dev/contacts/</D:href>\
+<D:propstat><D:prop><D:resourcetype><D:collection></D:collection><CARD:addressbook></CARD:addressbook>\
+</D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>";
+        let response = axum::response::Response::builder()
+            .status(StatusCode::MULTI_STATUS)
+            .body(Body::from(xml))
+            .unwrap();
+        let out = bind_carddav_namespace(response).await;
+        let (_, body) = out.into_parts();
+        let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await.unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(text.starts_with("<D:multistatus xmlns:CARD=\"urn:ietf:params:xml:ns:carddav\""));
+        // The unbound-prefix document must now parse cleanly.
+        assert!(xmltree::Element::parse(bytes.as_ref()).is_ok());
+        // Non-207 responses pass through.
+        let other = axum::response::Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(xml))
+            .unwrap();
+        let other = bind_carddav_namespace(other).await;
+        assert_eq!(other.status(), StatusCode::NOT_FOUND);
     }
 
     fn base_row(id: Uuid) -> db::EventRow {

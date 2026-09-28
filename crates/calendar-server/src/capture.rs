@@ -30,10 +30,12 @@ pub(crate) fn dir() -> Option<&'static Path> {
     .as_deref()
 }
 
-/// The calendar mount and discovery. `/` counts only for DAV methods
-/// (PROPFIND, OPTIONS...), not the web UI's GET.
+/// The calendar and contacts mounts, and discovery. `/` counts only for DAV
+/// methods (PROPFIND, OPTIONS...), not the web UI's GET.
 fn is_dav(method: &Method, path: &str) -> bool {
     path.starts_with("/calendars")
+        // /contacts-ui is a web page, not DAV; keep it out.
+        || (path.starts_with("/contacts") && !path.starts_with("/contacts-ui"))
         || path.starts_with("/.well-known/")
         || (path == "/" && method != Method::GET && method != Method::HEAD)
 }
@@ -107,9 +109,16 @@ mod tests {
         assert!(is_dav(&Method::PUT, "/calendars/alice/work/a.ics"));
         assert!(is_dav(&Method::from_bytes(b"PROPFIND").unwrap(), "/"));
         assert!(is_dav(&Method::GET, "/.well-known/caldav"));
+        // /contacts is the CardDAV mount.
+        assert!(is_dav(
+            &Method::from_bytes(b"PROPFIND").unwrap(),
+            "/contacts/"
+        ));
+        assert!(is_dav(&Method::PUT, "/contacts/alice/contacts/x.vcf"));
         assert!(!is_dav(&Method::GET, "/"));
         assert!(!is_dav(&Method::POST, "/api/auth/login"));
-        assert!(!is_dav(&Method::GET, "/contacts/x"));
+        // The contacts web page is not DAV.
+        assert!(!is_dav(&Method::GET, "/contacts-ui"));
     }
 
     #[test]
