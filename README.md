@@ -47,20 +47,20 @@ MIT licensed.
 
 ## Requirements
 
-- **PostgreSQL 16+** — the only runtime dependency.
-- **Rust** (stable toolchain, 2024 edition) — only if building from source.
-- **Docker + Docker Compose** — only if running via Compose.
+- **PostgreSQL 16+** — the only runtime dependency. `docker-compose.yml` runs just this, if you'd rather not install it natively.
+- **Rust** (stable toolchain, 2024 edition) — to build the binary; both installation paths below build from source.
 - **A Debian-family distro + systemd** — only for the `scripts/install.sh` path.
 
 ## Installation
 
-Pick one of three paths:
+Pick one of two paths:
 
 | Path | When |
 |---|---|
 | **systemd (Debian)** | Bare-metal or VM deployment, service managed by systemd |
-| **Docker Compose** | Containerized deployment |
 | **Build from source** | You manage the process yourself (or another supervisor) |
+
+PostgreSQL itself can run either way — natively, or via `docker compose up -d` (starts just the database, on `127.0.0.1:5433` by default; see `docker-compose.yml`).
 
 ### systemd (Debian-family distros)
 
@@ -72,17 +72,6 @@ sudo scripts/install.sh --with-postgres  # also apt-installs PostgreSQL and prov
 ```
 
 The installer builds from source (needs Rust), installs the binary to `/usr/local/bin/calendar-server`, generates `APP_ENCRYPTION_KEY` for you, writes a sandboxed `calendar-server.service`, enables it at boot, and offers to create the first admin. Idempotent — re-running upgrades the binary safely. Uninstall with `sudo scripts/uninstall.sh` (never touches your database). Details, flags, logs, and config-reload notes: [`scripts/README.md`](scripts/README.md).
-
-### Docker Compose
-
-```bash
-git clone https://github.com/btafoya/CalStack.git
-cd CalStack
-cp .env.example .env   # edit as needed
-docker compose up --build -d
-```
-
-This builds the app image and starts it alongside a PostgreSQL 16 container (named volume, healthcheck-gated). The app listens on `${APP_PORT:-8080}` on the host — set `APP_PORT` in `.env` to change it. Migrations run automatically on startup. Put a reverse proxy (nginx, Caddy, Traefik) in front for TLS.
 
 ### Build from source
 
@@ -154,12 +143,6 @@ calendar-server restore backup.json
 
 # create the first admin user
 calendar-server create-admin <username> <email> <password>
-```
-
-Under Docker Compose, run subcommands with `docker compose run --rm app <command> [args]`, e.g.:
-
-```bash
-docker compose run --rm app create-admin admin admin@example.com correcthorsebatterystaple
 ```
 
 `serve` also starts an in-process worker that scans for due VALARM reminders and dispatches them, sends outbound iTIP invitations, re-fetches subscribed remote `.ics` calendars, and purges expired data on a schedule — no separate process to babysit.

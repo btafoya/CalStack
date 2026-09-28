@@ -1,6 +1,6 @@
 # Requirements: systemd autostart scripts for Debian (`scripts/`)
 
-Status: requirements only — implementation pending.
+Status: implemented (`scripts/install.sh`, `scripts/uninstall.sh`, `scripts/README.md`).
 
 ## Goal
 
