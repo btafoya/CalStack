@@ -232,12 +232,29 @@ pub async fn put_series(
             .await?
         }
         None => {
+            // A canonical "{uuid}.ics" URL names the row after the uuid, but
+            // events.id is a global primary key: a client moving a resource
+            // between calendars reuses the same canonical URL in the target
+            // calendar, where the uuid is already a row id. Keep the URL by
+            // storing it explicitly and minting a fresh row id.
+            let mut id = canonical.unwrap_or_else(Uuid::new_v4);
+            let mut stored_href = canonical.is_none().then_some(href);
+            if let Some(u) = canonical {
+                let taken: Option<i32> = sqlx::query_scalar("SELECT 1 FROM events WHERE id = $1")
+                    .bind(u)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                if taken.is_some() {
+                    id = Uuid::new_v4();
+                    stored_href = Some(href);
+                }
+            }
             insert_row(
                 &mut tx,
                 calendar_id,
                 created_by,
-                canonical.unwrap_or_else(Uuid::new_v4),
-                canonical.is_none().then_some(href),
+                id,
+                stored_href,
                 None,
                 master_location,
                 master,
@@ -684,5 +701,71 @@ mod tests {
         .unwrap();
         assert!(created);
         assert_eq!(row.uid, other);
+    }
+
+    /// Moving a resource between calendars: Thunderbird reuses the event's
+    /// UID as the target filename, so the canonical "{uid}.ics" URL derives
+    /// a row id that already exists in the source calendar. events.id is a
+    /// global primary key — the insert must fall back to a fresh id and
+    /// store the href explicitly instead of failing (seen as 403 on TB's
+    /// cross-calendar move, 2026-09-28).
+    #[tokio::test]
+    async fn same_canonical_href_in_another_calendar_stores() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let f = fixture(&pool).await;
+        let cal2 = Uuid::new_v4();
+        let tenant_id: Uuid = sqlx::query_scalar("SELECT tenant_id FROM calendars WHERE id = $1")
+            .bind(f.calendar)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (id, tenant_id, slug, name, created_by) VALUES ($1, $2, $3, $3, $4)",
+        )
+        .bind(cal2)
+        .bind(tenant_id)
+        .bind(cal2.simple().to_string())
+        .bind(f.user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let uid = Uuid::new_v4().to_string();
+        let href = format!("{uid}.ics");
+        let (original, _) = put_series(
+            &pool,
+            f.calendar,
+            f.user,
+            &href,
+            &sample(&uid),
+            &[],
+            &[],
+            &PutPrecondition::None,
+        )
+        .await
+        .unwrap();
+        let (moved, created) = put_series(
+            &pool,
+            cal2,
+            f.user,
+            &href,
+            &sample(&uid),
+            &[],
+            &[],
+            &PutPrecondition::None,
+        )
+        .await
+        .unwrap();
+        assert!(created);
+        assert_ne!(moved.id, original.id, "row id must not collide");
+        // The canonical URL resolves in the target calendar.
+        let fetched = crate::get_event_by_href(&pool, cal2, &href).await.unwrap();
+        assert_eq!(fetched.0.id, moved.id);
+        // And the source calendar's copy is untouched.
+        let kept = crate::get_event_by_href(&pool, f.calendar, &href)
+            .await
+            .unwrap();
+        assert_eq!(kept.0.id, original.id);
     }
 }

@@ -287,6 +287,26 @@ curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/work/$UUID.ics" -H 'content-typ
   --data-binary @"$DATA/ev.ics" -D- -o /dev/null | grep -q "201" || fail "CalDAV PUT"
 curl -s -u "$AUTH" "$BASE/calendars/alice/work/$UUID.ics" | grep -q "TZID=America/Denver" || fail "TZID round-trip"
 
+step "CalDAV cross-calendar move reuses the canonical URL"
+# Thunderbird moves an event by PUTting the same "<uid>.ics" resource into
+# the target calendar. The canonical uuid is already a row id in the source
+# calendar; the write must fall back to a fresh id + stored href, not 403.
+MOVE_UUID=$(uuidgen)
+curl -s -u "$AUTH" -X MKCALENDAR "$BASE/calendars/alice/archive/" \
+  -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><D:mkcalendar xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:set><D:prop><D:resourcetype><D:collection/><C:calendar/></D:resourcetype><D:displayname>Archive</D:displayname></D:prop></D:set></D:mkcalendar>' \
+  -o /dev/null -w '%{http_code}' | grep -qE "201|204" || fail "MKCALENDAR archive"
+printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//interop//EN\r\nBEGIN:VEVENT\r\nUID:move-me@interop\r\nDTSTAMP:20260911T120000Z\r\nDTSTART;TZID=America/Denver:20260917T090000\r\nDTEND;TZID=America/Denver:20260917T100000\r\nSUMMARY:Moved event\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n' > "$DATA/move.ics"
+curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/work/$MOVE_UUID.ics" -H 'content-type: text/calendar' \
+  --data-binary @"$DATA/move.ics" -o /dev/null -w '%{http_code}' | grep -q "201" || fail "source calendar PUT"
+curl -s -u "$AUTH" -X PUT "$BASE/calendars/alice/archive/$MOVE_UUID.ics" -H 'content-type: text/calendar' \
+  --data-binary @"$DATA/move.ics" -o /dev/null -w '%{http_code}' | grep -q "201" \
+  || fail "cross-calendar move PUT (Thunderbird)"
+curl -s -u "$AUTH" "$BASE/calendars/alice/archive/$MOVE_UUID.ics" | grep -q "SUMMARY:Moved event" \
+  || fail "moved event not readable in target calendar"
+curl -s -u "$AUTH" "$BASE/calendars/alice/work/$MOVE_UUID.ics" | grep -q "SUMMARY:Moved event" \
+  || fail "source calendar copy lost after move"
+
 step "CalDAV export includes LOCATION for an event with a structured location"
 curl -s -u "$AUTH" "$BASE/calendars/alice/work/$EV2_ID.ics" | grep -q "LOCATION:New Venue" \
   || fail "LOCATION missing from CalDAV export"
