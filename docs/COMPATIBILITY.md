@@ -12,7 +12,7 @@ produces per-request evidence for client sessions.
 | Client | Calendar | Contacts | Tasks | Notes |
 |---|---:|---:|---:|---|
 | DAVx⁵ + Android | ✅ | ✅ | not recorded | production use, ongoing |
-| Thunderbird 153.3.1 | ✅ | not recorded | ✅ | interop session, 2026-09-28 |
+| Thunderbird 153.3.1 | ✅ | ✅ | ✅ | interop session, 2026-09-28 |
 | Band Manager (eventmgr, CalDAV consumer) | ✅ | — | — | production use, ongoing |
 
 - **DAVx⁵ + Android** — real-device sessions against a production server
@@ -35,7 +35,17 @@ produces per-request evidence for client sessions.
   403 (fixed in `daf1095`, DB unit test + interop step). Thunderbird 153 no
   longer offers "Floating" times in the event editor, so floating-time E5
   could not be exercised from this client (covered by automated tests).
-  Contacts via CardDAV not yet exercised.
+  Contacts via CardDAV exercised in a second session (2026-09-28, remote
+  workstation, capture harness): `.well-known/carddav` discovery (308 to
+  `/contacts/`), app-password Basic auth, addressbook listing (both the
+  personal book and the read-only tenant directory), REPORT
+  addressbook-query and addressbook-multiget, and full CRUD round-trip
+  (PUT 201 + ETag, update 204 + new ETag, DELETE 204, GET-after-delete 404)
+  with a vCard 4.0 contact. Known cosmetic quirks, tolerated by
+  Thunderbird: `current-user-principal` and `addressbook-home-set` hrefs
+  return the collection root (`/contacts/`) rather than a principal URL and
+  the user's namespace, and `current-user-privilege-set` is silently
+  omitted from PROPFIND responses.
 - **Band Manager (eventmgr)** — a Go application consuming Daymark
   calendars over CalDAV (display-name-keyed multi-calendar adoption,
   LOCATION property) as its active calendar provider, in production use.
