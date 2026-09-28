@@ -101,7 +101,8 @@ Automate:
 
 Round-trip:
 - VEVENT
-- VTODO only if later explicitly added
+- VTODO (first-class since ADR-015)
+- VJOURNAL (first-class since ADR-015)
 - RRULE
 - RDATE
 - EXDATE

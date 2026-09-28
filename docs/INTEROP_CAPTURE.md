@@ -15,9 +15,13 @@ Starts a throwaway Postgres (docker) and the debug server with `DAV_CAPTURE_DIR`
 - Short session only: `BIND_ADDR=0.0.0.0 tests/interop/capture-dev.sh`. That is plain HTTP with **open registration**, and on a host with a public IP it is reachable by anyone. Stop it as soon as you are done.
 - iOS/macOS may refuse plain HTTP CalDAV accounts (unverified); prefer TLS for Apple.
 
-## Important: tasks are rejected for now
+## Tasks and journals
 
-Until stage 3, the server answers `403` to any VTODO/VJOURNAL PUT. That is fine: the rejected request body is exactly the fixture. But a client that has an upload rejected may stop or retry, so it cannot show what it sends for the *next* step. Work around it:
+VTODO and VJOURNAL are first-class stored components since ADR-015 stages
+3–7 (commit `dfc9fcd`): they round-trip through CalDAV PUT/GET and the API.
+Use a calendar that has the target component enabled (calendar edit dialog
+in the web UI: Tasks / Journals). The older advice below still applies for
+anything that needs final-state-only captures:
 
 - **One scenario, one item.** Each scenario below uses its own task/journal so an earlier rejection does not block it.
 - **Do state-changing steps offline.** For anything of the form "create X, then complete/edit it", pause sync first (airplane mode; or turn off auto-sync in DAVx5), create the item and perform the follow-up steps, then resume sync. The first upload then carries the final state, which is what we need to see.
@@ -35,7 +39,7 @@ Add the account. Try the bare host first (`https://your-host`), then the full `.
 - E2 all-day event.
 - E3 weekly recurring event; then change **one** occurrence's time ("this event only").
 - E4 delete **one** occurrence of E3's series.
-- E5 floating-time event (Apple: Time Zone Support off; Thunderbird: timezone "Floating").
+- E5 floating-time event (Apple: Time Zone Support off; Thunderbird removed the "Floating" option from its event editor in newer versions — floating times are covered by automated round-trip tests instead).
 
 ### Apple Reminders (iOS/macOS)
 - R1 create a list.

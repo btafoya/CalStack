@@ -6,6 +6,8 @@
 
 # Fixes
 
+- [x] Admin page audit log rendered `[object Object]` in the Summary column — `change_summary` is a JSON object (`{path, status}`) and `admin.js` printed it raw. Now renders `path (status)` (2026-09-27).
+- [x] Moving an event to another calendar from Thunderbird failed with 403. TB reuses the event's UID as the target filename; canonical `<uuid>.ics` URLs derive the row's `events.id`, which is a globally-unique primary key, so the same URL in a second calendar collided on the PK and was mislabeled as a uid conflict. `put_series` now pre-checks the collision and stores the href explicitly with a fresh row id, keeping the URL resolvable. Regression tests: DB unit test + interop suite step (2026-09-28, `daf1095`).
 - [x] Calendar sidebar collapses into the far left sidebar - this should be redesigned
 - [x] What exactly are tasks? That should be removed.
 - [x] The datetime selector in the calendar webui is using 24hr time, not AM/PM - this was missed during the above changes.
