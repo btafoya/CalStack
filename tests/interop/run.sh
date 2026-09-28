@@ -403,6 +403,47 @@ curl -s -u "$AUTH" -X REPORT "$BASE/contacts/alice/contacts/" -H 'content-type: 
 step "CardDAV vCard DELETE"
 curl -s -u "$AUTH" -X DELETE "$BASE/contacts/alice/contacts/$VUID.vcf" -o /dev/null -w '%{http_code}' | grep -q "204" || fail "vCard DELETE"
 
+step "CardDAV sync-collection delta reports a deletion as a 404 entry"
+DELTA=$(curl -s -u "$AUTH" -X REPORT "$BASE/contacts/alice/contacts/" -H 'content-type: application/xml' \
+  --data-binary "<?xml version=\"1.0\"?><D:sync-collection xmlns:D=\"DAV:\"><D:sync-token>$TOKEN</D:sync-token><D:prop><D:getetag/></D:prop></D:sync-collection>")
+# Deletion tombstones use the contact row's id as the href segment (the card
+# is gone); they appear as <D:href>…vcf</D:href><D:status>HTTP/1.1 404 ….
+echo "$DELTA" | grep -q "<D:status>HTTP/1.1 404" || fail "sync delta missing deleted vCard entry"
+
+step "CardDAV rich vCard parts round-trip verbatim (ADR/CATEGORIES/PHOTO)"
+RVUID=$(uuidgen)
+printf 'BEGIN:VCARD\r\nVERSION:4.0\r\nUID:%s\r\nFN:Rich Test\r\nADR;TYPE=home:;;123 Main St;Springfield;IL;62704;USA\r\nCATEGORIES:friends,engineers\r\nPHOTO:data:image/jpeg;base64,/9j/test\r\nEND:VCARD\r\n' "$RVUID" > "$DATA/rich.vcf"
+curl -s -u "$AUTH" -X PUT "$BASE/contacts/alice/contacts/$RVUID.vcf" -H 'content-type: text/vcard' \
+  --data-binary @"$DATA/rich.vcf" -o /dev/null -w '%{http_code}' | grep -q "201" || fail "rich vCard PUT"
+RICH=$(curl -s -u "$AUTH" "$BASE/contacts/alice/contacts/$RVUID.vcf")
+echo "$RICH" | grep -q "ADR;TYPE=home:;;123 Main St;Springfield;IL;62704;USA" || fail "ADR not round-tripped"
+echo "$RICH" | grep -q "CATEGORIES:friends,engineers" || fail "CATEGORIES not round-tripped"
+echo "$RICH" | grep -q "PHOTO:data:image/jpeg" || fail "PHOTO not round-tripped"
+curl -s -u "$AUTH" -X DELETE "$BASE/contacts/alice/contacts/$RVUID.vcf" -o /dev/null -w '%{http_code}' | grep -q "204" || fail "rich vCard DELETE"
+
+step "CardDAV group vCard (KIND:group) stores and resolves a live MEMBER"
+MUID=$(uuidgen)
+printf 'BEGIN:VCARD\r\nVERSION:4.0\r\nUID:%s\r\nFN:Group Member\r\nEND:VCARD\r\n' "$MUID" > "$DATA/member.vcf"
+curl -s -u "$AUTH" -X PUT "$BASE/contacts/alice/contacts/$MUID.vcf" -H 'content-type: text/vcard' \
+  --data-binary @"$DATA/member.vcf" -o /dev/null -w '%{http_code}' | grep -q "201" || fail "group member PUT"
+GUID=$(uuidgen)
+printf 'BEGIN:VCARD\r\nVERSION:4.0\r\nUID:%s\r\nKIND:group\r\nFN:Interop Team\r\nMEMBER:urn:uuid:%s\r\nEND:VCARD\r\n' "$GUID" "$MUID" > "$DATA/group.vcf"
+curl -s -u "$AUTH" -X PUT "$BASE/contacts/alice/contacts/$GUID.vcf" -H 'content-type: text/vcard' \
+  --data-binary @"$DATA/group.vcf" -o /dev/null -w '%{http_code}' | grep -q "201" || fail "group vCard PUT"
+curl -s -u "$AUTH" "$BASE/contacts/alice/contacts/$GUID.vcf" | grep -q "MEMBER:urn:uuid:$MUID" || fail "group MEMBER not round-tripped"
+curl -s -u "$AUTH" -X DELETE "$BASE/contacts/alice/contacts/$GUID.vcf" -o /dev/null -w '%{http_code}' | grep -q "204" || fail "group vCard DELETE"
+curl -s -u "$AUTH" -X DELETE "$BASE/contacts/alice/contacts/$MUID.vcf" -o /dev/null -w '%{http_code}' | grep -q "204" || fail "group member DELETE"
+
+step "CardDAV directory book refuses writes (403)"
+curl -s -u "$AUTH" -X PUT "$BASE/contacts/alice/directory/should-not-exist.vcf" -H 'content-type: text/vcard' \
+  --data-binary 'BEGIN:VCARD\r\nVERSION:4.0\r\nUID:dir-write-probe\r\nFN:Should Not Exist\r\nEND:VCARD\r\n' \
+  -o /dev/null -w '%{http_code}' | grep -q "403" || fail "directory PUT must be 403"
+DIRDEL=$(curl -s -u "$AUTH" -X DELETE "$BASE/contacts/alice/directory/")
+echo "$DIRDEL" | grep -q "403 Forbidden" || fail "directory member delete must be refused"
+DIRLIST=$(curl -s -u "$AUTH" -X PROPFIND "$BASE/contacts/alice/directory/" -H 'Depth: 1' \
+  --data-binary '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>')
+echo "$DIRLIST" | grep -q "\.vcf</D:href>" || fail "directory probe deleted a member"
+
 step "PROPFIND advertises supported-report-set on the calendar collection"
 curl -s -u "$AUTH" -X PROPFIND "$BASE/calendars/alice/work/" -H 'Depth: 0' \
   -H 'content-type: application/xml' \
