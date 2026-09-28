@@ -190,6 +190,8 @@
     $('#tab-bar-row').prop('hidden', !cal);
     $('#tab-btn-tasks, #tab-btn-journals').prop('hidden', !!(cal && cal.readOnly));
     $('#tab-btn-rules').prop('hidden', !(cal && !cal.readOnly && state.userIsAdmin));
+    $('#tab-btn-categories').prop('hidden', !!(cal && cal.unified));
+    $('#share-btn, #import-btn, #export-btn').prop('hidden', !!(cal && cal.unified));
     if (cal && $('#cal-tabs [data-tab="' + currentTab() + '"]').prop('hidden')) {
       showTab('calendar');
     }
@@ -208,10 +210,16 @@
     $('#calendar-empty').prop('hidden', selected);
   }
 
+  // Read-only aggregate pseudo-calendar: reuses every readOnly-gated check
+  // below (onAdd/onEdit/onDelete no-op, tasks/journals/rules tabs hidden)
+  // instead of a parallel unified-mode flag.
+  var ALL_CALENDARS = { id: 'all', name: 'All Calendars', color: null, readOnly: true, unified: true };
+  $('#cal-all-item').on('click', function () { selectCalendar(ALL_CALENDARS); });
+
   function selectCalendar(cal) {
     state.currentCalendar = cal;
-    $('#cal-list li, #sub-list li').removeClass('active');
-    $('#cal-list li[data-id="' + cal.id + '"], #sub-list li[data-id="' + cal.id + '"]').addClass('active');
+    $('#cal-list li, #sub-list li, #cal-all-item').removeClass('active');
+    $('#cal-list li[data-id="' + cal.id + '"], #sub-list li[data-id="' + cal.id + '"], #cal-all-item[data-id="' + cal.id + '"]').addClass('active');
     updateTabs();
     updateCalendarVisibility();
     // Category colors on a subscription's events come pre-attached per-event
@@ -363,8 +371,8 @@
       // create/rename/delete) leave the current selection alone.
       if (!state.calendarChosen) {
         state.calendarChosen = true;
-        var want = state.wantCalendar
-          ? list.find(function (c) { return c.id === state.wantCalendar; })
+        var want = state.wantCalendar === 'all' ? ALL_CALENDARS
+          : state.wantCalendar ? list.find(function (c) { return c.id === state.wantCalendar; })
           : null;
         state.wantCalendar = null;
         if (want || list.length) { selectCalendar(want || list[0]); }
@@ -520,7 +528,7 @@
   });
 
   // ============ bs-calendar data feed ============
-  function toAppointment(ev, occurrence) {
+  function toAppointment(ev, occurrence, cal) {
     var start, end;
     var durationMs = ev.starts_at && ev.ends_at ? (new Date(ev.ends_at) - new Date(ev.starts_at)) : 0;
     if (occurrence && occurrence.kind === 'timed') {
@@ -538,15 +546,19 @@
       return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
         pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
     }
+    var owner = cal || state.currentCalendar;
     return {
       id: ev.id,
-      title: ev.summary || '(untitled)',
+      // Unified view merges every calendar into one grid; suffix the
+      // source calendar's name since same-colored calendars are otherwise
+      // indistinguishable.
+      title: (ev.summary || '(untitled)') + (cal && cal !== state.currentCalendar ? ' — ' + cal.name : ''),
       start: fmt(start),
       end: fmt(end),
       allDay: !!ev.start_date,
       // First registered category wins the event color; untagged events keep
       // the calendar color.
-      color: categoryColorHex(ev) || (state.currentCalendar && state.currentCalendar.color) || '#1554C0',
+      color: categoryColorHex(ev) || (owner && owner.color) || '#1554C0',
       // Every occurrence pill of a series shares the master's id, so the
       // eventCache entry (keyed by that id) holds whichever occurrence
       // happened to load last — the pill must carry its own.
@@ -590,21 +602,16 @@
     return { from: requestData.fromDate, to: requestData.toDate };
   }
 
-  function eventsUrl(requestData) {
-    var cal = state.currentCalendar;
-    if (!cal) { return Promise.resolve([]); }
-    var range = weekViewDateRange(requestData);
-    var params = new URLSearchParams({
-      from: toIso(range.from),
-      to: toIsoExclusiveEnd(range.to),
-    });
-    // Cancelled occurrences stay visible (struck through) so they can be
-    // re-opened; subscriptions are someone else's calendar and stay filtered.
-    if (!cal.subscriptionId) { params.set('include', 'cancelled'); }
-    var url = cal.subscriptionId
-      ? '/api/subscriptions/' + cal.subscriptionId + '/occurrences?' + params
-      : '/api/calendars/' + cal.id + '/occurrences?' + params;
-    return fetch(url)
+  function occurrencesUrl(cal, params) {
+    var p = new URLSearchParams(params);
+    if (!cal.subscriptionId) { p.set('include', 'cancelled'); }
+    return cal.subscriptionId
+      ? '/api/subscriptions/' + cal.subscriptionId + '/occurrences?' + p
+      : '/api/calendars/' + cal.id + '/occurrences?' + p;
+  }
+
+  function occurrencesFor(cal, params) {
+    return fetch(occurrencesUrl(cal, params))
       .then(function (r) { return r.json(); })
       .then(function (rows) {
         return rows.map(function (row) {
@@ -615,9 +622,27 @@
           ev._occ = row.occurrence || null;
           ev._isException = !!row.is_exception;
           state.eventCache[ev.id] = ev;
-          return toAppointment(ev, row.occurrence);
+          return toAppointment(ev, row.occurrence, cal);
         });
       });
+  }
+
+  function eventsUrl(requestData) {
+    var cal = state.currentCalendar;
+    if (!cal) { return Promise.resolve([]); }
+    var range = weekViewDateRange(requestData);
+    var params = new URLSearchParams({
+      from: toIso(range.from),
+      to: toIsoExclusiveEnd(range.to),
+    });
+    if (cal.unified) {
+      // ponytail: one fetch per calendar, fine while calendar counts are
+      // small (same assumption the single-calendar endpoint already makes,
+      // events_api.rs:466); add a batch endpoint if that stops holding.
+      return Promise.all(state.calendars.map(function (c) { return occurrencesFor(c, params); }))
+        .then(function (perCal) { return [].concat.apply([], perCal); });
+    }
+    return occurrencesFor(cal, params);
   }
 
   // ============ event create/edit/delete ============

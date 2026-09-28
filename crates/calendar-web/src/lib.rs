@@ -417,6 +417,9 @@ const APP_PAGE_HEAD: &str = concat!(
         <span class="fw-semibold">Calendars</span>
         <button id="add-cal-btn" class="btn btn-outline-primary" style="width:2.75rem;height:2.75rem" type="button" aria-label="Add calendar">+</button>
       </div>
+      <ul class="list-group list-group-flush mb-2">
+        <li id="cal-all-item" class="list-group-item list-group-item-action" data-id="all"><i class="bi bi-calendar3-range me-1"></i>All Calendars</li>
+      </ul>
       <ul id="cal-list" class="list-group list-group-flush"><li class="list-group-item text-body-secondary">Loading…</li></ul>
       <div class="d-flex justify-content-between align-items-center mb-2 mt-4">
         <span class="fw-semibold">Subscriptions</span>
