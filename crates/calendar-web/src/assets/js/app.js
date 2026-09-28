@@ -322,6 +322,8 @@
     $('#calendar-modal-title').text(cal ? 'Edit calendar' : 'New calendar');
     $('#cal-name').val(cal ? cal.name : '');
     $('#cal-source').val(cal ? (cal.source_url || '') : '');
+    $('#cal-import-file').val('');
+    $('#cal-import-field').toggle(!cal);
     ['vevent', 'vtodo', 'vjournal'].forEach(function (kind) {
       var wanted = cal ? cal.components.indexOf(kind.toUpperCase()) !== -1 : true;
       $('#cal-comp-' + kind).prop('checked', wanted);
@@ -330,6 +332,17 @@
   }
 
   $('#add-cal-btn').on('click', function () { openCalendarModal(null); });
+
+  $('#cal-import-file').on('change', function () {
+    var file = this.files[0];
+    if (!file || $('#cal-name').val().trim()) { return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var m = /^X-WR-CALNAME:(.*)$/im.exec(reader.result || '');
+      $('#cal-name').val((m ? m[1].trim() : '') || file.name.replace(/\.ics$/i, ''));
+    };
+    reader.readAsText(file);
+  });
 
   $('#calendar-form').on('submit', function (ev) {
     ev.preventDefault();
@@ -340,6 +353,7 @@
     }).filter(Boolean);
     if (!components.length) { errorDialog('Pick at least one content type.'); return; }
     var sourceUrl = $('#cal-source').val().trim();
+    var importFile = editingCal ? null : $('#cal-import-file')[0].files[0];
     var req;
     if (editingCal) {
       var patch = { name: name, components: components };
@@ -354,10 +368,21 @@
       if (sourceUrl) { body.source_url = sourceUrl; }
       req = api('POST', '/api/calendars', body);
     }
-    req.done(function () {
+    req.done(function (created) {
       toast(editingCal ? 'Calendar updated.' : 'Calendar created.');
       modal('calendar-modal').hide();
       loadCalendars();
+      if (importFile && created && created.id) {
+        api('POST', '/api/calendars/' + created.id + '/import', importFile).done(function (r) {
+          var msg = r.imported + ' imported, ' + r.skipped + ' skipped';
+          if (r.rejected.length) { msg += ', ' + r.rejected.length + ' rejected'; }
+          toast(msg + '.');
+        }).fail(function () {
+          // Import failed on a calendar that only exists because of this file — remove
+          // it rather than leave an empty orphan the user didn't ask to create.
+          api('DELETE', '/api/calendars/' + created.id).done(loadCalendars);
+        });
+      }
     });
   });
 

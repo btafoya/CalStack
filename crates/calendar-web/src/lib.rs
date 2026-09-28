@@ -573,6 +573,9 @@ const APP_PAGE_HEAD: &str = concat!(
         <input class="form-control" id="cal-source" type="url" placeholder="https://example.com/calendar.ics">
         <p class="text-body-secondary small mb-0 mt-1">The calendar becomes read-only and syncs automatically.</p>
       </div>
+      <div class="mb-3" id="cal-import-field"><label class="form-label" for="cal-import-file">Import events from .ics file</label>
+        <input class="form-control" id="cal-import-file" type="file" accept=".ics,text/calendar">
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancel</button>
