@@ -12,6 +12,7 @@ produces per-request evidence for client sessions.
 | Client | Calendar | Contacts | Tasks | Notes |
 |---|---:|---:|---:|---|
 | DAVx⁵ + Android | ✅ | ✅ | not recorded | production use, ongoing |
+| Thunderbird 153.3.1 | ✅ | not recorded | ✅ | interop session, 2026-09-28 |
 | Band Manager (eventmgr, CalDAV consumer) | ✅ | — | — | production use, ongoing |
 
 - **DAVx⁵ + Android** — real-device sessions against a production server
@@ -22,6 +23,19 @@ produces per-request evidence for client sessions.
   master's UID after a "this and following" series split, making them
   permanently unwritable via CalDAV PUT — was fixed in commit `3bde372`
   (re-parent overrides' UID on series split) with a regression test.
+- **Thunderbird 153.3.1** (Linux) — guided interop session 2026-09-28
+  against a throwaway build of the current code (capture harness). Exercised:
+  `.well-known` discovery, app-password Basic auth, CalDAV PUT/GET round-trip,
+  timed event with VALARM, all-day event, weekly recurring series with
+  single-occurrence edit and single-occurrence delete, VTODO tasks, VJOURNAL
+  journals, cross-calendar move (Thunderbird's copy + delete-original flow —
+  it prompts before removing the source by design). Bug found and fixed
+  during the session: a cross-calendar move reusing the canonical
+  `<uid>.ics` filename collided on the global events primary key and failed
+  403 (fixed in `daf1095`, DB unit test + interop step). Thunderbird 153 no
+  longer offers "Floating" times in the event editor, so floating-time E5
+  could not be exercised from this client (covered by automated tests).
+  Contacts via CardDAV not yet exercised.
 - **Band Manager (eventmgr)** — a Go application consuming Daymark
   calendars over CalDAV (display-name-keyed multi-calendar adoption,
   LOCATION property) as its active calendar provider, in production use.

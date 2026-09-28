@@ -1,9 +1,10 @@
 # Thunderbird
 
-> Status: the protocol behavior (`.well-known` discovery, app-password auth,
-> sync-collection) is covered by the automated interop suite; Thunderbird has
-> not been recorded as a tested configuration yet. See
-> [COMPATIBILITY.md](../COMPATIBILITY.md).
+> Status: **tested in a guided interop session** (Thunderbird 153.3.1,
+> 2026-09-28): discovery, app-password auth, events including recurrence with
+> single-occurrence edits, tasks, journals, and cross-calendar moves all
+> work; see [COMPATIBILITY.md](../COMPATIBILITY.md). CardDAV contacts not yet
+> exercised.
 
 ## Setup
 
