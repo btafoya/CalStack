@@ -4,10 +4,12 @@ DAVx⁵ syncs Daymark calendars, address books and tasks into the Android
 Calendar/Contacts/Tasks providers, so any Android calendar or contacts app
 works against Daymark.
 
-> Status: the protocol behavior (`.well-known` discovery, app-password auth,
-> sync-collection) is covered by the automated interop suite; DAVx⁵ itself has
-> not been recorded as a tested configuration yet. See
-> [COMPATIBILITY.md](../COMPATIBILITY.md).
+> Status: **events and contacts are tested in production use** (two-way sync,
+> recurring events with per-occurrence exceptions; see
+> [COMPATIBILITY.md](../COMPATIBILITY.md) for the recorded configuration).
+> Task (VTODO) sync via DAVx⁵ is not recorded as tested yet. The protocol
+> level (`.well-known` discovery, app-password auth, sync-collection) is
+> covered by the automated interop suite.
 
 ## Setup
 

@@ -1,25 +1,36 @@
 # Compatibility Matrix and Test Strategy
 
-## Results status (2026-09-27)
+## Results status (updated 2026-09-28)
 
-No real-device client interoperability has been tested and recorded yet.
-Everything below is a **test plan**, not results. Protocol-level behavior is
-covered end-to-end by `tests/interop/run.sh` (69 automated steps: discovery,
-CRUD, REPORTs, sync-token, free-busy, ACL, ETag handling). Record results in
-this file as client sessions are run; the capture harness
-([INTEROP_CAPTURE.md](INTEROP_CAPTURE.md)) produces the evidence.
+Protocol-level behavior is covered end-to-end by `tests/interop/run.sh`
+(69 automated steps: discovery, CRUD, REPORTs, sync-token, free-busy, ACL,
+ETag handling). The capture harness ([INTEROP_CAPTURE.md](INTEROP_CAPTURE.md))
+produces per-request evidence for client sessions.
 
-| Client | Calendar | Contacts | Tasks | Status |
+### Tested configurations
+
+| Client | Calendar | Contacts | Tasks | Notes |
 |---|---:|---:|---:|---|
-| Apple Calendar (iOS/macOS) | — | — | — | not tested |
-| Apple Contacts | — | — | — | not tested |
-| Thunderbird | — | — | — | not tested |
-| DAVx⁵ + Android | — | — | — | not tested |
-| Outlook (via third-party CalDAV add-in) | — | — | — | not tested; no native CalDAV |
+| DAVx⁵ + Android | ✅ | ✅ | not recorded | production use, ongoing |
+| Band Manager (eventmgr, CalDAV consumer) | ✅ | — | — | production use, ongoing |
 
-`✅ tested` rows go here with client version, server version, date, and the
-scenario list actually exercised. Untested must stay blank/unmarked — no
-protocol-in-theory claims (also README rule).
+- **DAVx⁵ + Android** — real-device sessions against a production server
+  (current build as of 2026-09-28; DAVx⁵/Android versions not recorded).
+  Exercised: account discovery, app-password credentials, two-way sync of
+  events and contacts, recurring events with per-occurrence modifications
+  and exceptions. A bug found in production use — overrides left with the
+  master's UID after a "this and following" series split, making them
+  permanently unwritable via CalDAV PUT — was fixed in commit `3bde372`
+  (re-parent overrides' UID on series split) with a regression test.
+- **Band Manager (eventmgr)** — a Go application consuming Daymark
+  calendars over CalDAV (display-name-keyed multi-calendar adoption,
+  LOCATION property) as its active calendar provider, in production use.
+  Private sibling project; source not public.
+
+Everything else below remains a **test plan**, not results. Record new rows
+with client version, server version, date, and the scenario list actually
+exercised. Untested stays blank/unmarked — no protocol-in-theory claims
+(also README rule).
 
 ## Target clients
 

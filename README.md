@@ -287,7 +287,7 @@ Per-client setup guides (untested-status caveats included):
 
 ### Client compatibility
 
-Real-device interoperability has not yet been systematically tested and recorded. [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) is the test plan (which clients, which scenarios); results will be recorded there as they are produced. Protocol-level behavior — discovery, CRUD, `calendar-query`/`calendar-multiget`/`sync-collection`/`free-busy-query` REPORTs, ETag handling — is covered end-to-end by [`tests/interop/run.sh`](tests/interop/run.sh). Interoperability testing with a real client is a valued contribution category; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Real-device interoperability: DAVx⁵ (events and contacts) and a CalDAV-consuming application run against a production instance today; see [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for the recorded configurations — the matrix grows as testing happens, and [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) is also the test plan for what isn't recorded yet. Protocol-level behavior — discovery, CRUD, `calendar-query`/`calendar-multiget`/`sync-collection`/`free-busy-query` REPORTs, ETag handling — is covered end-to-end by [`tests/interop/run.sh`](tests/interop/run.sh). Interoperability testing with a real client is a valued contribution category; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Authenticate with a **CalDAV app password**, not your login password — create one from the web UI or the API:
 
