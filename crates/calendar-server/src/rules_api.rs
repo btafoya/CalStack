@@ -631,11 +631,11 @@ async fn test_provider(
         .ok_or_else(|| AppError::BadRequest("unknown provider kind".into()))?;
     let subject = body
         .subject
-        .unwrap_or_else(|| "CalStack test message".into());
+        .unwrap_or_else(|| "Daymark test message".into());
     let text = body
         .body
         .clone()
-        .unwrap_or_else(|| format!("Test message sent from CalStack at {}.", Utc::now()));
+        .unwrap_or_else(|| format!("Test message sent from Daymark at {}.", Utc::now()));
     let result: Result<(), calendar_notify::NotifyError> = async {
         match kind {
             calendar_notify::Provider::Postmark | calendar_notify::Provider::Smtp => {

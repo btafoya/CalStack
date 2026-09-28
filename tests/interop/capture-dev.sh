@@ -12,7 +12,7 @@
 #
 # Usage: tests/interop/capture-dev.sh   (PORT=8080 PGPORT=55442 BIND_ADDR=127.0.0.1 DAV_CAPTURE_DIR=... to override)
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PORT=${PORT:-8080}; PGPORT=${PGPORT:-55442}; BIND=${BIND_ADDR:-127.0.0.1}; NAME=calstack-capture
+PORT=${PORT:-8080}; PGPORT=${PGPORT:-55442}; BIND=${BIND_ADDR:-127.0.0.1}; NAME=daymark-capture
 CAP=${DAV_CAPTURE_DIR:-$ROOT/captures/$(date +%Y%m%d-%H%M%S)}
 BIN="$ROOT/target/debug/calendar-server"
 [ -x "$BIN" ] || (cd "$ROOT" && cargo build -p calendar-server) || exit 1

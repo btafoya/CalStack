@@ -1,10 +1,10 @@
-# Contributing to CalStack
+# Contributing to Daymark
 
-Thanks for your interest in contributing. CalStack is a self-hosted calendar server in Rust with PostgreSQL as its only runtime dependency — CalDAV/CardDAV interop, a normalized OpenAPI domain API, and an embedded web UI. MIT licensed; contributions are welcome.
+Thanks for your interest in contributing. Daymark is a self-hosted calendar server in Rust with PostgreSQL as its only runtime dependency — CalDAV/CardDAV interop, a normalized OpenAPI domain API, and an embedded web UI. MIT licensed; contributions are welcome.
 
 ## Ways to contribute
 
-- **Bug reports** — open a GitHub issue with the CalStack version, client (if CalDAV/CardDAV is involved), and a minimal reproduction. For protocol bugs, include the client name and version.
+- **Bug reports** — open a GitHub issue with the Daymark version, client (if CalDAV/CardDAV is involved), and a minimal reproduction. For protocol bugs, include the client name and version.
 - **Feature requests** — check [docs/PRD.md](docs/PRD.md) and [docs/DEFERRED_REQUIREMENTS.md](docs/DEFERRED_REQUIREMENTS.md) first; the feature may be planned, deferred deliberately, or settled against by an ADR.
 - **Code** — see the workflow below.
 - **Protocol conformance** — fixes for RFC 4791/5545/5546/6047/6352/6638 behavior are especially valuable. Real client trace captures help ([docs/INTEROP_CAPTURE.md](docs/INTEROP_CAPTURE.md) explains the capture harness).
@@ -12,8 +12,8 @@ Thanks for your interest in contributing. CalStack is a self-hosted calendar ser
 ## Getting started
 
 ```bash
-git clone https://github.com/btafoya/CalStack.git
-cd CalStack
+git clone https://github.com/btafoya/Daymark.git
+cd Daymark
 cargo build --workspace
 ```
 

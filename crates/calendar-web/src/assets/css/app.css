@@ -1,16 +1,16 @@
-/* CalStack brand theme on Bootstrap 5.3. No build step, so the compiled
+/* Daymark brand theme on Bootstrap 5.3. No build step, so the compiled
    Bootstrap rules that bake the default blue in are overridden here.
    Surface model: --bs-body-bg = card/panel surface, --bs-tertiary-bg = page
    background (body elements carry bg-body-tertiary), --bs-secondary-bg =
    navbar/footer/selected surface. Light + dark. */
 
 :root {
-  --calstack-navy: #0B2670;
-  --calstack-blue: #1554C0;
-  --calstack-electric: #0D7FF2;
-  --calstack-cyan: #12AEE8;
-  --calstack-green: #12C957;
-  --calstack-gradient: linear-gradient(135deg, #0B2670 0%, #1554C0 50%, #12AEE8 100%);
+  --daymark-navy: #0B2670;
+  --daymark-blue: #1554C0;
+  --daymark-electric: #0D7FF2;
+  --daymark-cyan: #12AEE8;
+  --daymark-green: #12C957;
+  --daymark-gradient: linear-gradient(135deg, #0B2670 0%, #1554C0 50%, #12AEE8 100%);
 }
 
 [data-bs-theme="light"] {
@@ -25,7 +25,7 @@
   --bs-link-color-rgb: 21, 84, 192;
   --bs-link-hover-color-rgb: 13, 127, 242;
   --bs-focus-ring-color: rgba(21, 84, 192, 0.25);
-  --calstack-selected-bg: #EDF2F8;
+  --daymark-selected-bg: #EDF2F8;
 }
 
 [data-bs-theme="dark"] {
@@ -40,11 +40,11 @@
   --bs-link-color-rgb: 74, 155, 255;
   --bs-link-hover-color-rgb: 114, 178, 255;
   --bs-focus-ring-color: rgba(37, 133, 245, 0.35);
-  --calstack-selected-bg: #122B55;
-  --calstack-blue: #2585F5;
-  --calstack-electric: #4A9BFF;
-  --calstack-cyan: #16B9E8;
-  --calstack-green: #20D866;
+  --daymark-selected-bg: #122B55;
+  --daymark-blue: #2585F5;
+  --daymark-electric: #4A9BFF;
+  --daymark-cyan: #16B9E8;
+  --daymark-green: #20D866;
 }
 
 /* Full-height pages: the content area stretches so short pages still fill
@@ -164,8 +164,8 @@ body > .container-fluid > .row {
 }
 
 .form-check-input:checked {
-  background-color: var(--calstack-blue);
-  border-color: var(--calstack-blue);
+  background-color: var(--daymark-blue);
+  border-color: var(--daymark-blue);
 }
 
 .form-check-input:focus {
@@ -199,9 +199,9 @@ header.navbar::after {
 }
 
 .navbar-collapse .nav-link.active {
-  color: var(--calstack-blue);
+  color: var(--daymark-blue);
   font-weight: 600;
-  border-bottom-color: var(--calstack-blue);
+  border-bottom-color: var(--daymark-blue);
 }
 
 /* Quiet footer. */
@@ -212,7 +212,7 @@ footer.footer {
 }
 
 footer.footer .link-secondary {
-  color: var(--calstack-blue) !important;
+  color: var(--daymark-blue) !important;
 }
 
 /* Calendar sidebar = workspace panel, on the surface color. */
@@ -223,9 +223,9 @@ aside.border-end {
 /* Selected calendar in the sidebar lists. */
 #cal-list .list-group-item.active,
 #sub-list .list-group-item.active {
-  background-color: var(--calstack-selected-bg);
+  background-color: var(--daymark-selected-bg);
   border-color: var(--bs-border-color);
-  color: var(--calstack-blue);
+  color: var(--daymark-blue);
 }
 
 /* Per-calendar color swatch (inline background-color from app.js). */

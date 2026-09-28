@@ -320,16 +320,13 @@ pub(crate) async fn send_delivery_once(
     let mut request = client
         .post(&webhook.url)
         .header("content-type", "application/json")
-        .header(
-            "user-agent",
-            concat!("CalStack/", env!("CARGO_PKG_VERSION")),
-        )
+        .header("user-agent", concat!("Daymark/", env!("CARGO_PKG_VERSION")))
         .body(body.clone());
     if let (Some(secret), Some(crypto)) = (&webhook.secret_encrypted, crypto)
         && let Ok(key) = crypto.decrypt(secret)
     {
         request = request.header(
-            "X-CalStack-Signature",
+            "X-Daymark-Signature",
             db::webhooks::sign(body.as_bytes(), &key),
         );
     }
@@ -523,10 +520,10 @@ async fn sync_calendar(
             "remote host resolves to a blocked address ({blocked})"
         ));
     }
-    let mut request = client.get(url).header("accept", "text/calendar").header(
-        "user-agent",
-        concat!("CalStack/", env!("CARGO_PKG_VERSION")),
-    );
+    let mut request = client
+        .get(url)
+        .header("accept", "text/calendar")
+        .header("user-agent", concat!("Daymark/", env!("CARGO_PKG_VERSION")));
     if let Some(etag) = &cal.source_etag {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
@@ -582,7 +579,7 @@ async fn sync_calendar(
             db::UserRow {
                 id: Uuid::nil(),
                 username: String::new(),
-                email: "sync-unknown@calstack.invalid".into(),
+                email: "sync-unknown@daymark.invalid".into(),
                 display_name: None,
                 password_hash: None,
                 is_admin: false,
@@ -600,7 +597,7 @@ async fn sync_calendar(
             db::UserRow {
                 id: Uuid::nil(),
                 username: String::new(),
-                email: "sync-unknown@calstack.invalid".into(),
+                email: "sync-unknown@daymark.invalid".into(),
                 display_name: None,
                 password_hash: None,
                 is_admin: false,

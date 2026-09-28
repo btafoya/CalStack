@@ -4,7 +4,7 @@ Status: implemented (`scripts/install.sh`, `scripts/uninstall.sh`, `scripts/READ
 
 ## Goal
 
-First-class bare-metal deployment on Debian-family distros: `scripts/` ships an installer that builds CalStack from source, installs a hardened systemd unit, and gets the service running with a single command. No Docker required.
+First-class bare-metal deployment on Debian-family distros: `scripts/` ships an installer that builds Daymark from source, installs a hardened systemd unit, and gets the service running with a single command. No Docker required.
 
 ## User stories
 

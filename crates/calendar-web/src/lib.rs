@@ -232,14 +232,14 @@ macro_rules! footer_html {
       <div class="col-lg-auto ms-lg-auto">
         <nav aria-label="Footer">
           <ul class="list-inline list-inline-dots mb-0">
-            <li class="list-inline-item"><a href="https://github.com/btafoya/CalStack/blob/main/LICENSE" target="_blank" class="link-secondary" rel="noopener">License</a></li>
-            <li class="list-inline-item"><a href="https://github.com/btafoya/CalStack" target="_blank" class="link-secondary" rel="noopener">Source code</a></li>
+            <li class="list-inline-item"><a href="https://github.com/btafoya/Daymark/blob/main/LICENSE" target="_blank" class="link-secondary" rel="noopener">License</a></li>
+            <li class="list-inline-item"><a href="https://github.com/btafoya/Daymark" target="_blank" class="link-secondary" rel="noopener">Source code</a></li>
           </ul>
         </nav>
       </div>
       <div class="col-12 col-lg-auto mt-3 mt-lg-0">
         <ul class="list-inline list-inline-dots mb-0">
-          <li class="list-inline-item">Copyright © 2026 CalStack. All rights reserved.</li>
+          <li class="list-inline-item">Copyright © 2026 Daymark. All rights reserved.</li>
           <li class="list-inline-item">v"#,
             env!("CARGO_PKG_VERSION"),
             r#"</li>
@@ -262,7 +262,7 @@ macro_rules! subpage_header {
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
-    <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="CalStack"></a>
+    <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="Daymark"></a>
     <div class="collapse navbar-collapse" id="navbar-menu">
       <ul class="navbar-nav">
         <li class="nav-item"><a class="nav-link" id="contacts-nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
@@ -294,7 +294,7 @@ const LOGIN_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Sign in</title>
+<title>Daymark — Sign in</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/app.css">
 <link rel="icon" type="image/png" sizes="16x16" href="/assets/img/favicon-16x16.png">
@@ -306,7 +306,7 @@ const LOGIN_PAGE: &str = concat!(
 <div class="flex-grow-1 d-flex align-items-center">
 <div class="container" style="max-width:420px">
   <form id="login-form" class="card p-4 mt-5">
-    <h1 class="h4 mb-3">CalStack</h1>
+    <h1 class="h4 mb-3">Daymark</h1>
     <div class="mb-3"><label class="form-label" for="user">Username or email</label>
       <input class="form-control" id="user" name="user" autocomplete="username" required></div>
     <div class="mb-3"><label class="form-label" for="pass">Password</label>
@@ -360,7 +360,7 @@ const APP_PAGE_HEAD: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack</title>
+<title>Daymark</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/summernote-bs5.min.css">
@@ -382,7 +382,7 @@ const APP_PAGE_HEAD: &str = concat!(
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="Toggle navigation">
       <span class="navbar-toggler-icon"></span>
     </button>
-    <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="CalStack"></a>
+    <a class="navbar-brand" href="/"><img src="/assets/img/logo-horizontal-small.png" alt="Daymark"></a>
     <div class="collapse navbar-collapse" id="navbar-menu">
       <ul class="navbar-nav">
         <li class="nav-item"><a class="nav-link" id="contacts-nav-link" href="/contacts-ui"><span class="nav-link-icon me-1"><i class="bi bi-person-lines-fill"></i></span><span class="nav-link-title">Contacts</span></a></li>
@@ -879,7 +879,7 @@ const ADMIN_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Admin</title>
+<title>Daymark — Admin</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -934,7 +934,7 @@ const PROVIDERS_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Providers</title>
+<title>Daymark — Providers</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -1064,7 +1064,7 @@ const CONTACTS_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Contacts</title>
+<title>Daymark — Contacts</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -1158,7 +1158,7 @@ const CREDENTIALS_PAGE: &str = concat!(
 <html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — Credentials</title>
+<title>Daymark — Credentials</title>
 <link rel="stylesheet" href="/assets/css/bootstrap.min.css">
 <link rel="stylesheet" href="/assets/css/bootstrap-icons.css">
 <link rel="stylesheet" href="/assets/css/app.css">
@@ -1268,7 +1268,7 @@ const SWAGGER_PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CalStack — API docs</title>
+<title>Daymark — API docs</title>
 <link rel="stylesheet" href="/assets/css/swagger-ui.css">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/img/favicon-32x32.png">
 <style>body{margin:0}.topbar{display:none}</style>

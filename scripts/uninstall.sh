@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove the CalStack systemd deployment installed by scripts/install.sh.
+# Remove the Daymark systemd deployment installed by scripts/install.sh.
 # Usage: sudo scripts/uninstall.sh [--keep-config] [--with-postgres]
 #   --keep-config     keep /etc/calstack/calstack.env
 #   --with-postgres   also offer to drop the calstack database (prompted, default no)

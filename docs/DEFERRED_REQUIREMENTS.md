@@ -208,7 +208,7 @@ action reachable; stop carrying dead schema.
   recorded in `webhook_deliveries` (request, response status, duration,
   attempt).
 - Payload: JSON envelope with event id, calendar id, trigger, compact event
-  view, and an HMAC-SHA256 signature header (`X-CalStack-Signature`) when a
+  view, and an HMAC-SHA256 signature header (`X-Daymark-Signature`) when a
   sign key is configured.
 - Delivery is at-least-once; receivers must dedupe on delivery id.
 - Never log or expose the sign key or target URL credentials.

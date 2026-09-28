@@ -4,7 +4,7 @@ Requirements discovery for full VTODO and VJOURNAL support. Status: brainstorm 2
 
 ## Goal
 
-Make CalStack a real CalDAV task and journal store: tasks and journals sync with Apple Reminders, Tasks.org, jtx Board and Thunderbird, and are first-class in the API and web UI. ADR-011 ("VTODO is rejected") said support must arrive "as real support or not at all"; this is that support, extended to VJOURNAL.
+Make Daymark a real CalDAV task and journal store: tasks and journals sync with Apple Reminders, Tasks.org, jtx Board and Thunderbird, and are first-class in the API and web UI. ADR-011 ("VTODO is rejected") said support must arrive "as real support or not at all"; this is that support, extended to VJOURNAL.
 
 ## Client targets (all primary, with interop test coverage)
 
@@ -34,7 +34,7 @@ Make CalStack a real CalDAV task and journal store: tasks and journals sync with
 ## Findings that constrain design
 
 - **`events` cannot host tasks.** It requires a start (`starts_at` xor `start_date`), has `organizer_email NOT NULL` and a status CHECK of TENTATIVE/CONFIRMED/CANCELLED. A VTODO may have no DTSTART, no DUE and no organizer, and uses NEEDS-ACTION/IN-PROCESS/COMPLETED/CANCELLED; VJOURNAL uses DRAFT/FINAL/CANCELLED. Loosening those constraints weakens event guarantees. Storage shape is a `/sc:design` decision.
-- **dav-server hardcodes `supported-calendar-component-set`** to VEVENT, VTODO, VJOURNAL, VFREEBUSY for every calendar collection (upstream `handle_props.rs`; confidence moderate, pinned 0.11 not checked locally). Per-collection sets therefore need a PROPFIND override or upstream change. Side effect today: CalStack already advertises tasks and 403s them.
+- **dav-server hardcodes `supported-calendar-component-set`** to VEVENT, VTODO, VJOURNAL, VFREEBUSY for every calendar collection (upstream `handle_props.rs`; confidence moderate, pinned 0.11 not checked locally). Per-collection sets therefore need a PROPFIND override or upstream change. Side effect today: Daymark already advertises tasks and 403s them.
 - **Already extensible:** `change_log.resource_type` (default `'event'`), per-calendar ctag, ACLs, etags, soft delete and purge, categories, recurrence engine.
 - **VEVENT-only assumptions to revisit:** `parse_ics` returns `Vec<ParsedEvent>`; PUT requires exactly one VEVENT (`adapter.rs:706`); `Location::Object` requires a UUID filename; 403 gate `dav.rs:57`; `retention_purge`, backup export, search, public feeds, alarm worker, rules triggers, iTIP scheduling are event-only; web calendar view is bs-calendar with no task view.
 - **Do not copy the CardDAV sync shortcut.** `sync_collection_addressbook` returns a full snapshot each time (a `ponytail:` debt). Tasks and journals share calendars, so they use the incremental `change_log` path.

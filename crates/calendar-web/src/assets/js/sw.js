@@ -1,9 +1,9 @@
-/* CalStack service worker: web push display + click-through. */
+/* Daymark service worker: web push display + click-through. */
 self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) { /* payload optional */ }
   event.waitUntil(
-    self.registration.showNotification(data.title || 'CalStack', {
+    self.registration.showNotification(data.title || 'Daymark', {
       body: data.body || '',
       data: { url: data.url || '/' },
     })

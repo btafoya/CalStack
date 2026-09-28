@@ -83,7 +83,7 @@ struct WebhookBody {
     enabled: Option<bool>,
     /// Subscribed triggers; empty/omitted = all of them.
     events: Option<Vec<String>>,
-    /// Optional shared secret for X-CalStack-Signature; stored encrypted.
+    /// Optional shared secret for X-Daymark-Signature; stored encrypted.
     sign_key: Option<String>,
 }
 
@@ -384,7 +384,7 @@ fn test_event_defaults() -> db::EventRow {
         id: Uuid::new_v4(),
         calendar_id: Uuid::nil(),
         uid: format!("webhook-test-{}", Uuid::new_v4()),
-        summary: "CalStack webhook test".into(),
+        summary: "Daymark webhook test".into(),
         starts_at: Some(Utc::now()),
         ends_at: Some(Utc::now() + chrono::Duration::hours(1)),
         start_date: None,

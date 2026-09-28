@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install CalStack as a systemd service on Debian-family distros.
+# Install Daymark as a systemd service on Debian-family distros.
 # Usage: sudo scripts/install.sh [--with-postgres] [--skip-key-gen] [--no-admin] [--non-interactive] [flags]
 #   --with-postgres        apt install postgresql and provision a calstack DB
 #   --skip-key-gen         don't generate APP_ENCRYPTION_KEY (external key management)
@@ -104,7 +104,7 @@ fi
 esc() { printf "'%s'" "${1//\'/\'\\\'\'}"; }  # single-quote for safe sourcing
 
 {
-  echo "# CalStack configuration — managed by scripts/install.sh"
+  echo "# Daymark configuration — managed by scripts/install.sh"
   echo "DATABASE_URL=$(esc "$DATABASE_URL")"
   echo "BIND_ADDR=$(esc "$BIND_ADDR")"
   [ -n "${APP_ENCRYPTION_KEY:-}" ] && echo "APP_ENCRYPTION_KEY=$(esc "$APP_ENCRYPTION_KEY")"
@@ -138,7 +138,7 @@ if [[ $WITH_PG -eq 1 ]]; then
 fi
 cat >"$UNIT" <<EOF
 [Unit]
-Description=CalStack calendar server
+Description=Daymark calendar server
 After=network-online.target $PG_AFTER
 Wants=network-online.target
 Requires=$PG_REQ
@@ -179,7 +179,7 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 curl -s "http://$HEALTH_ADDR/healthz" | grep -q ok || die "service did not answer healthz — see: journalctl -u calendar-server -n 50"
-echo "==> CalStack is running on http://$BIND_ADDR (enabled at boot)"
+echo "==> Daymark is running on http://$BIND_ADDR (enabled at boot)"
 
 # ============ first admin ============
 if [[ $NO_ADMIN -eq 0 && $INTERACTIVE -eq 1 ]]; then

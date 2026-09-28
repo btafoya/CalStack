@@ -6,7 +6,7 @@
 # Usage: tests/interop/components_hrefs.sh
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SP=$(mktemp -d); PORT=${PORT:-18130}; PGPORT=${PGPORT:-55441}; B=http://127.0.0.1:$PORT
-NAME=calstack-comp-hrefs
+NAME=daymark-comp-hrefs
 FAILS=0
 ok()   { echo "  ok   $1"; }
 bad()  { echo "  FAIL $1"; FAILS=$((FAILS+1)); }

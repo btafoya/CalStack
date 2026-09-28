@@ -306,7 +306,7 @@ pub fn event_view(event: &EventRow) -> serde_json::Value {
     })
 }
 
-/// HMAC-SHA256 of `payload` under `key`, hex-encoded (X-CalStack-Signature).
+/// HMAC-SHA256 of `payload` under `key`, hex-encoded (X-Daymark-Signature).
 pub fn sign(payload: &[u8], key: &[u8]) -> String {
     calendar_auth::hex_encode(&hmac_sha256(key, payload))
 }

@@ -419,7 +419,7 @@ LOG = sys.argv[1]; KEY = sys.argv[2].encode()
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
-        sig = self.headers.get('X-CalStack-Signature', '')
+        sig = self.headers.get('X-Daymark-Signature', '')
         expect = hmac.new(KEY, body, hashlib.sha256).hexdigest()
         with open(LOG, 'a') as f:
             f.write(json.dumps({"ok": sig == expect, "body": body.decode('utf-8', 'replace')}) + "\n")

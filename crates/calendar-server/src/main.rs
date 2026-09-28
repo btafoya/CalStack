@@ -70,7 +70,7 @@ impl utoipa::Modify for SecuritySchemes {
 /// `#[derive(OpenApi)]` structs next to each router.
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "CalStack API"),
+    info(title = "Daymark API"),
     security(("sessionCookie" = []), ("bearerToken" = [])),
     modifiers(&SecuritySchemes)
 )]

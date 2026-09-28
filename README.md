@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/logo.png" alt="CalStack" width="200">
+  <img src="assets/logo.png" alt="Daymark" width="200">
 </p>
 
-<h1 align="center">CalStack</h1>
+<h1 align="center">Daymark</h1>
 
 <p align="center">
   A fast, self-hosted, single-binary calendar server written in Rust, backed by nothing but PostgreSQL.
@@ -10,14 +10,14 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <a href="https://github.com/btafoya/CalStack/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/btafoya/CalStack/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/btafoya/Daymark/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/btafoya/Daymark/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust" src="https://img.shields.io/badge/rust-stable%20(2024%20edition)-orange.svg">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg">
 </p>
 
 ---
 
-CalStack speaks CalDAV (and CardDAV) to real clients (Apple Calendar/Contacts, Thunderbird, DAVx5, Outlook) and exposes a normalized OpenAPI domain model for everything else. One binary, one database, no Redis, no queue service, no data directory.
+Daymark speaks CalDAV (and CardDAV) to real clients (Apple Calendar/Contacts, Thunderbird, DAVx5, Outlook) and exposes a normalized OpenAPI domain model for everything else. One binary, one database, no Redis, no queue service, no data directory.
 
 ## Features
 
@@ -65,8 +65,8 @@ PostgreSQL itself can run either way — natively, or via `docker compose up -d`
 ### systemd (Debian-family distros)
 
 ```bash
-git clone https://github.com/btafoya/CalStack.git
-cd CalStack
+git clone https://github.com/btafoya/Daymark.git
+cd Daymark
 sudo scripts/install.sh                  # you already have PostgreSQL; prompts for DATABASE_URL
 sudo scripts/install.sh --with-postgres  # also apt-installs PostgreSQL and provisions a calstack DB
 ```
@@ -76,8 +76,8 @@ The installer builds from source (needs Rust), installs the binary to `/usr/loca
 ### Build from source
 
 ```bash
-git clone https://github.com/btafoya/CalStack.git
-cd CalStack
+git clone https://github.com/btafoya/Daymark.git
+cd Daymark
 cargo build --release
 ```
 
@@ -121,7 +121,7 @@ Configuration is environment-variable only — no config files, no CLI flags for
 
 \* `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGIN` must both be set to enable passkey login; otherwise it's disabled and every other auth method still works.
 
-Put CalStack behind a reverse proxy (nginx, Caddy, Traefik) for TLS — it speaks plain HTTP on `BIND_ADDR`.
+Put Daymark behind a reverse proxy (nginx, Caddy, Traefik) for TLS — it speaks plain HTTP on `BIND_ADDR`.
 
 ## Running
 

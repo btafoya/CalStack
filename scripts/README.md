@@ -1,12 +1,12 @@
-# CalStack systemd scripts (Debian)
+# Daymark systemd scripts (Debian)
 
-Install, manage, and uninstall CalStack as a systemd service on Debian-family distros. No Docker involved.
+Install, manage, and uninstall Daymark as a systemd service on Debian-family distros. No Docker involved.
 
 ## Install
 
 ```bash
-git clone https://github.com/btafoya/CalStack.git
-cd CalStack
+git clone https://github.com/btafoya/Daymark.git
+cd Daymark
 sudo scripts/install.sh                 # you already have PostgreSQL; prompts for DATABASE_URL
 sudo scripts/install.sh --with-postgres # also apt install postgresql and provision a `calstack` DB
 ```
