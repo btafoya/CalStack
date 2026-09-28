@@ -104,6 +104,31 @@ Calendar and contact infrastructure without deploying a groupware suite.
 
 MIT licensed.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/calendar.png" alt="Calendar month view"></td>
+    <td width="50%"><img src="assets/screenshots/event-editor.png" alt="Event editor"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/tasks.png" alt="Tasks"></td>
+    <td><img src="assets/screenshots/journals.png" alt="Journals"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/contacts.png" alt="Contacts"></td>
+    <td><img src="assets/screenshots/rules.png" alt="Rules"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/providers.png" alt="Notification providers"></td>
+    <td><img src="assets/screenshots/admin.png" alt="Admin and audit log"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/api-docs.png" alt="OpenAPI 3.1 documentation"></td>
+    <td><img src="assets/screenshots/login.png" alt="Sign-in page"></td>
+  </tr>
+</table>
+
 ## Requirements
 
 - **PostgreSQL 16+** — the only runtime dependency. `docker-compose.yml` runs just this, if you'd rather not install it natively.

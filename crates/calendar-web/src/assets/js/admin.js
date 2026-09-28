@@ -37,6 +37,16 @@
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
 
+  // change_summary is a JSON value — the middleware stores {path, status}.
+  function auditSummary(value) {
+    if (value == null) { return ''; }
+    if (typeof value === 'string') { return value; }
+    if (typeof value.path === 'string' && value.status != null) {
+      return value.path + ' (' + value.status + ')';
+    }
+    return JSON.stringify(value);
+  }
+
   function renderAudit(rows) {
     var $rows = $('#audit-rows').empty();
     rows.forEach(function (r) {
@@ -44,7 +54,7 @@
         .append($('<td>').text(r.created_at))
         .append($('<td>').text(humanize(r.action)))
         .append($('<td>').text(humanize(r.object_type)))
-        .append($('<td>').text(r.change_summary || ''))
+        .append($('<td>').text(auditSummary(r.change_summary)))
         .appendTo($rows);
     });
   }
