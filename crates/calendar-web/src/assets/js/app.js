@@ -639,7 +639,8 @@
       // ponytail: one fetch per calendar, fine while calendar counts are
       // small (same assumption the single-calendar endpoint already makes,
       // events_api.rs:466); add a batch endpoint if that stops holding.
-      return Promise.all(state.calendars.map(function (c) { return occurrencesFor(c, params); }))
+      var all = state.calendars.concat(state.subscriptions || []);
+      return Promise.all(all.map(function (c) { return occurrencesFor(c, params); }))
         .then(function (perCal) { return [].concat.apply([], perCal); });
     }
     return occurrencesFor(cal, params);
@@ -1431,6 +1432,9 @@
   }
 
   function renderSubscriptions(rows) {
+    // Cached for the unified "All Calendars" view — only live ones have
+    // occurrences worth fetching; a removed-by-owner row 404s.
+    state.subscriptions = rows.filter(function (s) { return s.live; }).map(subToCal);
     var list = $('#sub-list').empty();
     rows.forEach(function (s) {
       var item = $('<li class="list-group-item d-flex justify-content-between align-items-center">')
