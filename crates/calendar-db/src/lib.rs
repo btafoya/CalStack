@@ -1150,13 +1150,20 @@ pub async fn split_event(
             .await?;
             // Overrides beyond the split wall belong to the continuation
             // (their RECURRENCE-IDs no longer match the truncated master).
+            // uid must move with them: a RECURRENCE-ID override is only
+            // linked to its master by sharing its UID (RFC 5545 3.8.4.4),
+            // and the continuation got a fresh one from insert_event_tx —
+            // left stale, the override becomes permanently unwritable via
+            // CalDAV PUT (the adapter's one-uid-per-resource check rejects
+            // it) while still being served back over GET/REPORT.
             sqlx::query(
-                "UPDATE events SET master_event_id = $2, updated_at = now()
+                "UPDATE events SET master_event_id = $2, uid = $3, updated_at = now()
                  WHERE master_event_id = $1 AND deleted_at IS NULL
-                   AND (recurrence_id > $3 OR recurrence_id_date > $4)",
+                   AND (recurrence_id > $4 OR recurrence_id_date > $5)",
             )
             .bind(master.id)
             .bind(row.id)
+            .bind(&row.uid)
             .bind(split.wall)
             .bind(split.wall_date)
             .execute(&mut *tx)
@@ -1196,6 +1203,177 @@ pub async fn split_event(
     };
     tx.commit().await?;
     Ok((master, continuation))
+}
+
+#[cfg(test)]
+mod split_event_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn test_pool() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .ok()?;
+        crate::migrate(&pool).await.ok()?;
+        Some(pool)
+    }
+
+    struct Fixture {
+        user: Uuid,
+        calendar: Uuid,
+    }
+
+    async fn fixture(pool: &PgPool) -> Fixture {
+        let f = Fixture {
+            user: Uuid::new_v4(),
+            calendar: Uuid::new_v4(),
+        };
+        sqlx::query("INSERT INTO users (id, username, email) VALUES ($1, $2, $3)")
+            .bind(f.user)
+            .bind(format!("u-{}", f.user.simple()))
+            .bind(format!("{}@splitevent.test", f.user))
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO tenants (id, slug, name, is_personal) VALUES ($1, $2, $2, true)")
+            .bind(f.user)
+            .bind(f.user.simple().to_string())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_members (tenant_id, user_id, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(f.user)
+        .bind(f.user)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO calendars (id, tenant_id, slug, name, created_by) VALUES ($1, $2, $3, $3, $4)",
+        )
+        .bind(f.calendar)
+        .bind(f.user)
+        .bind(f.user.simple().to_string())
+        .bind(f.user)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO calendar_acl (calendar_id, principal_user_id, capability, can_manage_acl)
+             VALUES ($1, $2, 'owner', true)",
+        )
+        .bind(f.calendar)
+        .bind(f.user)
+        .execute(pool)
+        .await
+        .unwrap();
+        f
+    }
+
+    fn new_event(uid: &str, starts_at: DateTime<Utc>, rrule: Option<&str>) -> NewEventData {
+        NewEventData {
+            uid: uid.to_string(),
+            starts_at: Some(starts_at),
+            ends_at: Some(starts_at + chrono::Duration::hours(1)),
+            rrule: rrule.map(str::to_string),
+            summary: "Weekly Jam".to_string(),
+            organizer_email: "writer@splitevent.test".into(),
+            categories: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// Regression test for the bug this commit fixes: an override past the
+    /// split wall must carry the continuation's UID after "this and future"
+    /// split, not the truncated master's old one — otherwise the override
+    /// becomes permanently orphaned (unwritable via CalDAV PUT, since the
+    /// adapter requires one UID per resource) while still being served back
+    /// over GET/REPORT with the stale identity.
+    #[tokio::test]
+    async fn split_reparents_override_uid_to_continuation() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let f = fixture(&pool).await;
+
+        let series_start = DateTime::parse_from_rfc3339("2026-09-27T19:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let old_uid = Uuid::new_v4().to_string();
+        let mut tx = pool.begin().await.unwrap();
+        let (master, _) = insert_event_tx(
+            &mut tx,
+            f.calendar,
+            f.user,
+            &[],
+            &new_event(&old_uid, series_start, Some("FREQ=WEEKLY")),
+        )
+        .await
+        .unwrap();
+
+        // An override two weeks in — after the split wall we'll use below.
+        let override_rid = DateTime::parse_from_rfc3339("2026-10-11T19:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            .naive_utc();
+        let mut override_data = new_event(&old_uid, override_rid.and_utc(), None);
+        override_data.master_id = Some(master.id);
+        override_data.recurrence_id = Some(override_rid);
+        override_data.summary = "Weekly Jam (moved)".to_string();
+        insert_event_tx(&mut tx, f.calendar, f.user, &[], &override_data)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let new_uid = Uuid::new_v4().to_string();
+        let split_wall = DateTime::parse_from_rfc3339("2026-10-04T19:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            .naive_utc();
+        let (_old_master, continuation) = split_event(
+            &pool,
+            master.id,
+            &[],
+            &SeriesSplit {
+                wall: Some(split_wall),
+                wall_date: None,
+                master_rrule: None,
+                master_rdate: serde_json::json!([]),
+                master_exdate: serde_json::json!([]),
+                continuation: Some(new_event(
+                    &new_uid,
+                    split_wall.and_utc(),
+                    Some("FREQ=WEEKLY"),
+                )),
+            },
+        )
+        .await
+        .unwrap();
+        let continuation = continuation.expect("continuation row");
+        assert_eq!(continuation.uid, new_uid);
+
+        let reparented: EventRow = sqlx::query_as(
+            "SELECT * FROM events WHERE master_event_id = $1 AND recurrence_id = $2",
+        )
+        .bind(continuation.id)
+        .bind(override_rid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reparented.uid, new_uid,
+            "override re-parented past the split wall must carry the continuation's uid, \
+             not the old master's — otherwise it becomes a permanently orphaned, \
+             CalDAV-unwritable override (see split_event)"
+        );
+    }
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]
