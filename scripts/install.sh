@@ -93,7 +93,7 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
   fi
 fi
 [[ -n "${DATABASE_URL:-}" ]] || die "DATABASE_URL is required"
-[[ -z "${BIND_ADDR:-}" ]] && BIND_ADDR=$BIND_DEFAULT
+[[ -z "${BIND_ADDR:-}" ]] && BIND_ADDR="0.0.0.0:8080"
 
 ask APP_PUBLIC_URL "APP_PUBLIC_URL (e.g. https://calendar.example.com, blank = skip): " ""
 ask WEBAUTHN_RP_ID "WEBAUTHN_RP_ID (passkeys, blank = disable): " ""

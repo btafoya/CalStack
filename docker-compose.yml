@@ -6,6 +6,8 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: calendar
+    ports:
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -13,19 +15,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
-  app:
-    build: .
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      DATABASE_URL: postgres://postgres:postgres@postgres:5432/calendar
-      BIND_ADDR: 0.0.0.0:8080
-    ports:
-      - "${APP_PORT:-8080}:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
 
 volumes:
   pgdata:
