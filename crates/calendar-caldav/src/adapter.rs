@@ -501,7 +501,9 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                 Location::Root | Location::User => {
                     // One dirent per accessible calendar, named "{user}/{slug}"
                     // so the home-set listing shows calendar collections. A
-                    // share principal sees exactly its shared calendar.
+                    // share principal sees exactly its shared calendar. Names
+                    // are segments relative to the parent (push_segment joins
+                    // them) — no leading slash.
                     let calendars: Vec<(CalendarRow, CalendarCapability)> =
                         if let Some(calendar_id) = creds.share_calendar_id {
                             db::get_calendar(&self.pool, calendar_id)
@@ -513,19 +515,15 @@ impl GuardedFileSystem<DavAuth> for PgDavFs {
                                 .await
                                 .map_err(fs_err)?
                         };
+                    let user_prefix = if matches!(location, Location::Root) {
+                        format!("{}/", creds.user.username)
+                    } else {
+                        String::new()
+                    };
                     calendars
                         .into_iter()
                         .map(|(cal, _cap)| Entry {
-                            name: format!(
-                                "{}/{}",
-                                if matches!(location, Location::Root) {
-                                    creds.user.username.as_str()
-                                } else {
-                                    ""
-                                },
-                                cal.slug
-                            )
-                            .into_bytes(),
+                            name: format!("{user_prefix}{}", cal.slug).into_bytes(),
                             meta: Meta {
                                 len: 0,
                                 modified: cal.updated_at.into(),

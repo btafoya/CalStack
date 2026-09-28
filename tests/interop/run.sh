@@ -357,6 +357,54 @@ curl -s -u "$AUTH" -X PROPFIND "$BASE/calendars/alice/work/" -H 'Depth: 0' \
   --data-binary '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:supported-report-set/></D:prop></D:propfind>' \
   | grep -q "sync-collection" || fail "supported-report-set missing sync-collection"
 
+# ============ 4. CardDAV ============
+
+step "CardDAV well-known discovery redirects with Location"
+curl -s -D- -o /dev/null -u "$AUTH" "$BASE/.well-known/carddav" | grep -qi "^location: /contacts/" \
+  || fail "well-known/carddav redirect"
+
+step "CardDAV principal advertises addressbook-home-set"
+# The principal URL is /contacts/ itself; dav-server-rs only injects the
+# home-set for its hardcoded /addressbooks mount, so the adapter supplies it.
+curl -s -u "$AUTH" -X PROPFIND "$BASE/contacts/" -H 'Depth: 0' \
+  -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><D:propfind xmlns:D="DAV:" xmlns:CR="urn:ietf:params:xml:ns:carddav"><D:prop><CR:addressbook-home-set/></D:prop></D:propfind>' \
+  | grep -q "addressbook-home-set" || fail "addressbook-home-set missing"
+
+step "CardDAV home-set listing has clean hrefs and both books"
+OUT=$(curl -s -u "$AUTH" -X PROPFIND "$BASE/contacts/alice/" -H 'Depth: 1' \
+  -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><D:propfind xmlns:D="DAV:" xmlns:CR="urn:ietf:params:xml:ns:carddav"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>')
+echo "$OUT" | grep -q "contacts" || fail "personal book missing from home-set listing"
+echo "$OUT" | grep -q "directory" || fail "directory book missing from home-set listing"
+echo "$OUT" | grep -q "<D:href>[^<]*//" && fail "doubled slash in home-set hrefs"
+
+step "CardDAV vCard PUT/GET round-trip"
+VUID=$(uuidgen)
+printf 'BEGIN:VCARD\r\nVERSION:4.0\r\nUID:%s\r\nFN:Alice Card\r\nN:Card;Alice;;;\r\nEMAIL;TYPE=WORK:alice@interop.test\r\nTEL;TYPE=CELL:+15550101\r\nORG:Interop Co\r\nEND:VCARD\r\n' "$VUID" > "$DATA/card.vcf"
+curl -s -u "$AUTH" -X PUT "$BASE/contacts/alice/contacts/$VUID.vcf" -H 'content-type: text/vcard' \
+  --data-binary @"$DATA/card.vcf" -o /dev/null -w '%{http_code}' | grep -qE "201|204" || fail "vCard PUT"
+curl -s -u "$AUTH" "$BASE/contacts/alice/contacts/$VUID.vcf" | grep -q "FN:Alice Card" || fail "vCard GET"
+curl -s -u "$AUTH" "$BASE/contacts/alice/contacts/$VUID.vcf" | grep -q "TEL;TYPE=CELL" || fail "TEL not round-tripped"
+
+step "CardDAV sync-collection REPORT on the address book"
+INIT=$(curl -s -u "$AUTH" -X REPORT "$BASE/contacts/alice/contacts/" -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><D:sync-collection xmlns:D="DAV:"><D:sync-token/><D:prop><D:getetag/></D:prop></D:sync-collection>')
+echo "$INIT" | grep -q "sync-token" || fail "addressbook sync-collection"
+TOKEN=$(echo "$INIT" | grep -o "<D:sync-token>[^<]*</D:sync-token>" | head -1 | sed 's/<[^>]*>//g; s/^ *//; s/ *$//')
+curl -s -u "$AUTH" -X REPORT "$BASE/contacts/alice/contacts/" -H 'content-type: application/xml' \
+  --data-binary "<?xml version=\"1.0\"?><D:sync-collection xmlns:D=\"DAV:\"><D:sync-token>$TOKEN</D:sync-token><D:prop><D:getetag/></D:prop></D:sync-collection>" \
+  | grep -q "D:multistatus" || fail "addressbook sync with token"
+
+step "CardDAV vCard DELETE"
+curl -s -u "$AUTH" -X DELETE "$BASE/contacts/alice/contacts/$VUID.vcf" -o /dev/null -w '%{http_code}' | grep -q "204" || fail "vCard DELETE"
+
+step "PROPFIND advertises supported-report-set on the calendar collection"
+curl -s -u "$AUTH" -X PROPFIND "$BASE/calendars/alice/work/" -H 'Depth: 0' \
+  -H 'content-type: application/xml' \
+  --data-binary '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:supported-report-set/></D:prop></D:propfind>' \
+  | grep -q "sync-collection" || fail "supported-report-set missing sync-collection"
+
 step "calendar-query REPORT honors time-range and expands recurrence"
 UUIDQ=$(uuidgen)
 printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//interop//EN\r\nBEGIN:VEVENT\r\nUID:q-rec@interop\r\nDTSTAMP:20260911T120000Z\r\nDTSTART;TZID=America/Denver:20260901T090000\r\nDTEND;TZID=America/Denver:20260901T100000\r\nRRULE:FREQ=DAILY;COUNT=30\r\nSUMMARY:Recurring query probe\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n' > "$DATA/q.ics"

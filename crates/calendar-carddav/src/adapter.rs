@@ -378,15 +378,18 @@ impl GuardedFileSystem<DavAuth> for PgAddressBookFs {
                             .map_err(fs_err)?,
                         );
                     }
+                    // Dirent names are path segments relative to the parent
+                    // (dav-server-rs push_segment() joins them); a leading
+                    // slash would double onto the parent URL.
                     let prefix = if matches!(location, Location::Root) {
-                        creds.user.username.as_str()
+                        format!("{}/", creds.user.username)
                     } else {
-                        ""
+                        String::new()
                     };
                     let mut entries: Vec<Entry> = books
                         .into_iter()
                         .map(|book| Entry {
-                            name: format!("{prefix}/{}", book.slug).into_bytes(),
+                            name: format!("{prefix}{}", book.slug).into_bytes(),
                             meta: Meta {
                                 len: 0,
                                 modified: book.updated_at.into(),
@@ -401,7 +404,7 @@ impl GuardedFileSystem<DavAuth> for PgAddressBookFs {
                         .await
                         .unwrap_or_default();
                     entries.push(Entry {
-                        name: format!("{prefix}/{}", db::contacts::DIRECTORY_SLUG).into_bytes(),
+                        name: format!("{prefix}{}", db::contacts::DIRECTORY_SLUG).into_bytes(),
                         meta: Meta {
                             len: 0,
                             modified: Utc::now().into(),
@@ -606,6 +609,28 @@ impl GuardedFileSystem<DavAuth> for PgAddressBookFs {
         creds: &'a DavAuth,
     ) -> FsFuture<'a, Vec<dav_server::fs::DavProp>> {
         Box::pin(async move {
+            // The principal URL is /contacts/ itself; advertise
+            // addressbook-home-set (RFC 6352 6.2.1) on it. dav-server-rs only
+            // injects this property for its hardcoded DEFAULT_CARDDAV_DIRECTORY
+            // ("/addressbooks"), not our "/contacts" mount, so without this the
+            // discovery chain never resolves (Thunderbird fails with a null
+            // querySelector on exactly this missing property, 2026-09-28).
+            if matches!(
+                parse_location(path),
+                Some(Location::Root) | Some(Location::User)
+            ) {
+                return Ok(vec![dav_server::fs::DavProp {
+                    name: "addressbook-home-set".into(),
+                    prefix: Some("CARD".into()),
+                    namespace: Some("urn:ietf:params:xml:ns:carddav".into()),
+                    xml: Some(
+                        "<CARD:addressbook-home-set xmlns:CARD=\"urn:ietf:params:xml:ns:carddav\">\
+                         <D:href xmlns:D=\"DAV:\">/contacts/</D:href>\
+                         </CARD:addressbook-home-set>"
+                            .into(),
+                    ),
+                }]);
+            }
             let Location::AddressBook(slug) = parse_location(path).ok_or(FsError::NotFound)? else {
                 return Ok(vec![]);
             };
