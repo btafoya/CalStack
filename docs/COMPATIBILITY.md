@@ -1,5 +1,26 @@
 # Compatibility Matrix and Test Strategy
 
+## Results status (2026-09-27)
+
+No real-device client interoperability has been tested and recorded yet.
+Everything below is a **test plan**, not results. Protocol-level behavior is
+covered end-to-end by `tests/interop/run.sh` (69 automated steps: discovery,
+CRUD, REPORTs, sync-token, free-busy, ACL, ETag handling). Record results in
+this file as client sessions are run; the capture harness
+([INTEROP_CAPTURE.md](INTEROP_CAPTURE.md)) produces the evidence.
+
+| Client | Calendar | Contacts | Tasks | Status |
+|---|---:|---:|---:|---|
+| Apple Calendar (iOS/macOS) | — | — | — | not tested |
+| Apple Contacts | — | — | — | not tested |
+| Thunderbird | — | — | — | not tested |
+| DAVx⁵ + Android | — | — | — | not tested |
+| Outlook (via third-party CalDAV add-in) | — | — | — | not tested; no native CalDAV |
+
+`✅ tested` rows go here with client version, server version, date, and the
+scenario list actually exercised. Untested must stay blank/unmarked — no
+protocol-in-theory claims (also README rule).
+
 ## Target clients
 
 ### Apple

@@ -17,7 +17,7 @@
 
 ---
 
-Daymark speaks CalDAV (and CardDAV) to real clients (Apple Calendar/Contacts, Thunderbird, DAVx5, Outlook) and exposes a normalized OpenAPI domain model for everything else. One binary, one database, no Redis, no queue service, no data directory.
+Daymark speaks standard CalDAV and CardDAV (RFC 4791 / RFC 6352) and exposes a normalized OpenAPI domain model for everything else. One binary, one database, no Redis, no queue service, no data directory. Protocol behavior is exercised end-to-end by an automated interoperability suite — see [Client compatibility](#client-compatibility) for tested-client status.
 
 ## Features
 
@@ -172,7 +172,13 @@ Point any CalDAV client at:
 https://<your-host>/
 ```
 
-Discovery follows the standard `.well-known/caldav` → `current-user-principal` → `calendar-home-set` chain, so most clients (Apple Calendar/Contacts, Thunderbird + built-in CalDAV, DAVx5, Outlook via a CalDAV bridge) auto-configure from that URL alone. CardDAV clients go through `.well-known/carddav` to `/contacts` the same way; a single CalDAV+CardDAV URL like `https://<your-host>/` covers both.
+Discovery follows the standard `.well-known/caldav` → `current-user-principal` → `calendar-home-set` chain — covered by the automated interop suite — so RFC-compliant clients can auto-configure from that URL alone. CardDAV clients go through `.well-known/carddav` to `/contacts` the same way; a single URL like `https://<your-host>/` covers both.
+
+Outlook has no native CalDAV support and requires a third-party sync add-in; that path is untested.
+
+### Client compatibility
+
+Real-device interoperability has not yet been systematically tested and recorded. [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) is the test plan (which clients, which scenarios); results will be recorded there as they are produced. Protocol-level behavior — discovery, CRUD, `calendar-query`/`calendar-multiget`/`sync-collection`/`free-busy-query` REPORTs, ETag handling — is covered end-to-end by [`tests/interop/run.sh`](tests/interop/run.sh). Interoperability testing with a real client is a valued contribution category; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Authenticate with a **CalDAV app password**, not your login password — create one from the web UI or the API:
 
