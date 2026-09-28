@@ -15,7 +15,13 @@ this index organizes by linking, not by relocating.
 ## Architecture & compatibility
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — crate layering, dav-server-rs integration, transaction/change-journal/concurrency rules.
-- [`COMPATIBILITY.md`](COMPATIBILITY.md) — target CalDAV/CardDAV clients and the test strategy against them.
+- [`COMPATIBILITY.md`](COMPATIBILITY.md) — target CalDAV/CardDAV clients, the test strategy against them, and recorded results.
+
+## User guides
+
+- [`guide/davx5.md`](guide/davx5.md) — DAVx⁵ (Android) setup.
+- [`guide/apple.md`](guide/apple.md) — Apple Calendar & Contacts (iOS/macOS) setup.
+- [`guide/thunderbird.md`](guide/thunderbird.md) — Thunderbird setup.
 
 ## Feature designs
 

@@ -131,20 +131,39 @@ MIT licensed.
 
 ## Requirements
 
-- **PostgreSQL 16+** — the only runtime dependency. `docker-compose.yml` runs just this, if you'd rather not install it natively.
-- **Rust** (stable toolchain, 2024 edition) — to build the binary; both installation paths below build from source.
-- **A Debian-family distro + systemd** — only for the `scripts/install.sh` path.
+- **PostgreSQL 16+** — the only runtime dependency.
+- **A stable x86-64 Linux** for the prebuilt binary (statically linked, works on any distro); other targets build from source.
+- **Rust** (stable toolchain, 2024 edition) and a Debian-family distro + systemd — only for the `scripts/install.sh` and build-from-source paths.
 
 ## Installation
 
-Pick one of two paths:
-
 | Path | When |
 |---|---|
+| **Prebuilt binary** | Any Linux distro, no Rust toolchain needed |
+| **OCI image** | `ghcr.io/btafoya/daymark`, works alongside your existing compose setup |
 | **systemd (Debian)** | Bare-metal or VM deployment, service managed by systemd |
 | **Build from source** | You manage the process yourself (or another supervisor) |
 
-PostgreSQL itself can run either way — natively, or via `docker compose up -d` (starts just the database, on `127.0.0.1:5433` by default; see `docker-compose.yml`).
+### Prebuilt binary
+
+Grab `daymark-server` from the [latest release](https://github.com/btafoya/Daymark/releases/latest) — a statically-linked musl binary; the only thing it talks to is PostgreSQL over TCP.
+
+```bash
+tar xzf daymark-v*-x86_64-linux.tar.gz
+DATABASE_URL=postgres://user:pass@localhost/calendar BIND_ADDR=0.0.0.0:8080 ./daymark-server serve
+```
+
+Migrations apply automatically on startup.
+
+### OCI image
+
+```bash
+docker run -d --name daymark -p 8080:8080 \
+  -e DATABASE_URL=postgres://user:pass@host/calendar \
+  ghcr.io/btafoya/daymark:latest
+```
+
+Docker is optional — the binary above runs directly on any Linux. A `docker-compose.yml` is also included to run just PostgreSQL (`docker compose up -d`, on `127.0.0.1:5433` by default).
 
 ### systemd (Debian-family distros)
 
@@ -259,6 +278,12 @@ https://<your-host>/
 Discovery follows the standard `.well-known/caldav` → `current-user-principal` → `calendar-home-set` chain — covered by the automated interop suite — so RFC-compliant clients can auto-configure from that URL alone. CardDAV clients go through `.well-known/carddav` to `/contacts` the same way; a single URL like `https://<your-host>/` covers both.
 
 Outlook has no native CalDAV support and requires a third-party sync add-in; that path is untested.
+
+Per-client setup guides (untested-status caveats included):
+
+- [DAVx⁵ / Android](docs/guide/davx5.md)
+- [Apple Calendar & Contacts](docs/guide/apple.md)
+- [Thunderbird](docs/guide/thunderbird.md)
 
 ### Client compatibility
 

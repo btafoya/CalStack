@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  BIN: calendar-server
+
+jobs:
+  musl-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install musl target
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl-release
+      - name: Build static binary
+        run: cargo build --release --target x86_64-unknown-linux-musl --bin $BIN
+      - name: Verify static linking
+        run: file target/x86_64-unknown-linux-musl/release/$BIN | grep -qE "statically linked|static-pie"
+      - name: Smoke-test the binary
+        run: |
+          /usr/lib/postgresql/16/bin/initdb -D /tmp/pg -U postgres --auth=trust >/dev/null
+          /usr/lib/postgresql/16/bin/pg_ctl -D /tmp/pg -o "-p 55499 -k /tmp -c listen_addresses=127.0.0.1" -l /tmp/pg.log start
+          /usr/lib/postgresql/16/bin/createdb -h 127.0.0.1 -p 55499 -U postgres calendar
+          DATABASE_URL=postgres://postgres@127.0.0.1:55499/calendar BIND_ADDR=127.0.0.1:18499 \
+            target/x86_64-unknown-linux-musl/release/$BIN serve &
+          for _ in $(seq 1 100); do
+            curl -sf http://127.0.0.1:18499/healthz >/dev/null && exit 0
+            sleep 0.2
+          done
+          exit 1
+      - name: Package
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/$BIN daymark-server
+          tar czf daymark-${{ github.ref_name }}-x86_64-linux.tar.gz daymark-server
+          sha256sum daymark-${{ github.ref_name }}-x86_64-linux.tar.gz \
+            > daymark-${{ github.ref_name }}-x86_64-linux.tar.gz.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            daymark-*-x86_64-linux.tar.gz
+            daymark-*-x86_64-linux.tar.gz.sha256
+          generate_release_notes: true
+
+  oci-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

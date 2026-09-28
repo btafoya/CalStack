@@ -41,3 +41,8 @@ uuid.workspace = true
 thiserror.workspace = true
 dotenvy.workspace = true
 reqwest.workspace = true
+
+# web-push (ece) and webauthn-attestation-ca pull openssl unconditionally; for
+# musl release builds vendor it so the binary stays fully static.
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
